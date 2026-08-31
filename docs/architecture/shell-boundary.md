@@ -24,6 +24,33 @@ A listening socket on a mail client is a local privilege-escalation and cross-ap
 Having no listener at all is the strongest available answer to "what can another process on this machine
 reach", and it is now literally true.
 
+### Single instance, and how a callback reaches a running Sift
+
+Two ordinary needs would each be met by a socket if nobody said otherwise, and a requirement stated with
+no carve-out is one an implementer can break on the first day without noticing.
+
+**Two copies of Sift MUST NOT open the same account databases.** The store permits one writer
+([D-21](../storage/data-model.md)), and a second process would meet lock contention rather than a clear
+failure. The single-instance mechanism is the platform's own: on macOS the launch services layer refuses
+to launch a second copy of a bundle and hands the request to the running one; on Linux it is ownership of
+the application's well-known name on the session bus, which is in any case how a Flatpak application is
+addressed.
+
+**The authorization callback of [D-36](../security/credentials.md) arrives by the same route**, which is
+why the two are one question. The registered scheme resolves to the bundle, and the platform delivers the
+URL to the instance already running.
+
+**Neither is a listening socket, and the distinction is the requirement's own.** NFR-24 forbids Sift
+opening a listener. Connecting to a bus the session already provides, and being handed a message by the
+platform's launch machinery, are both Sift acting as a client of something else. **The pattern this rule
+exists to forbid is the reflexive one** — a lock file beside a Unix domain socket that the second instance
+connects to, which is what most applications do and which would break a Standing gate in the
+[roadmap](../product/roadmap.md) on the first commit.
+
+Both mechanisms are nonetheless real local surfaces, and the
+[threat model](../security/threat-model.md) names them rather than counting them as absent because they
+are not sockets.
+
 ## D-17 — A narrow C ABI between the core and the shells
 
 **Chosen:** the presentation layer exposes a C ABI; the macOS shell binds it through generated Swift

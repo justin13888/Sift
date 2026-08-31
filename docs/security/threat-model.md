@@ -13,6 +13,15 @@ access to a stolen or shared device. Sift presents no listening socket to the fi
 in [shell boundary](../architecture/shell-boundary.md) — so its local attack surface is the registered
 URI scheme and the files it writes.
 
+**"No listening socket" is not the same as "nothing can reach it", and the difference is worth naming
+rather than inferring from NFR-24's absoluteness.** The registered scheme is delivered by the platform's
+own launch machinery, and on Linux the single-instance mechanism is a well-known name on the session bus;
+both are addressable by any process running as the user. What NFR-24 buys is that the endpoint is the
+platform's, with the platform's own access rules, rather than one Sift wrote — and that the input arriving
+on it is a URL rather than an arbitrary protocol. That input is untrusted like any other: the
+authorization state parameter in [D-36](../security/credentials.md) is doing real work against a forged
+callback, and it is the reason that requirement calls it more than ceremony.
+
 **Out of scope:** an attacker who already has the user's live session with code execution as that user,
 a malicious provider, and physical attacks against a running machine.
 
