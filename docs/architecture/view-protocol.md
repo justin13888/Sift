@@ -2,7 +2,7 @@
 
 What crosses the shell boundary, and under what contract.
 
-**Owns:** D-48.
+**Owns:** D-48, D-66.
 
 [Shell boundary](shell-boundary.md) settles *that* the boundary is a narrow C ABI and argues why
 ([D-17](shell-boundary.md)). [Presentation layer](presentation-layer.md) settles what the layer beneath it
@@ -64,6 +64,138 @@ the thing NFR-6 exists to prevent. The bet is that the rendezvous is short becau
 cancelled is a query rather than a network round trip, and that bet is unmeasured. If it proves wrong, the
 answer is an explicit quiescence handshake — cancel, then await confirmation before freeing — and not a
 retreat to best-effort, because the retreat reintroduces a use-after-free rather than a slow frame.
+
+## D-66 — The boundary's representation, stated once
+
+**Chosen:** one calling convention for every entry point, one string representation, one aggregate shape,
+and build-time exhaustiveness in place of runtime tolerance.
+**Rejected:** per-call conventions chosen for each function's convenience; opaque row handles with
+per-field accessors; a runtime fallback for a discriminant a shell does not recognise.
+
+[Shell boundary](shell-boundary.md) requires that *"every type crossing the boundary needs an explicit,
+stable representation"* and that the ownership rules *"be written down rather than inferred"*. The rules
+above do the ownership half. This does the representation half, and it is one decision rather than five
+because the argument is the same for all of them: [D-17](shell-boundary.md) keeps the surface narrow so
+that its rules can be held in one file, and a boundary with five conventions cannot be.
+
+### Every call returns a status, and results leave through out-parameters
+
+**No entry point encodes failure in its return value's domain.** Every function returns a status; a
+result reaches the caller through an out-parameter the caller owns and the layer writes. Sentinel
+returns, null-means-error, and a thread-local last-error are all excluded.
+
+A thread-local last-error is the one worth naming, because it is conventional in C and wrong here:
+[D-19](overview.md) is a work-stealing runtime, and D-48's rule 2 confines shell calls to the main
+thread — so a last-error is *nearly* safe, which is worse than either safe or unsafe. The convention that
+is correct only while a rule elsewhere holds is the convention that breaks when that rule is relaxed.
+
+**The status distinguishes three things, and the third is why this is a requirement rather than a
+style.** An operation may succeed; it may fail in an identified way, in which case the failure is an
+identified state the shell renders — the section below says who owns those; or it may have been
+terminated by a caught panic. [D-47](overview.md) requires that a caught panic *"MUST NOT be silently
+absorbed as an ordinary parse failure"* and that it be counted per subsystem — and if the boundary
+collapses it into the same status as an ordinary failure, the count is unobtainable at exactly the layer
+where a shell would otherwise report the defect. A caught panic is therefore its own status value,
+everywhere.
+
+### Strings are UTF-8 with an explicit length, and are never NUL-terminated
+
+**Every string crossing the boundary is a pointer and a byte length, in UTF-8**, and the length is
+authoritative. Nothing on this boundary scans for a terminator.
+
+This is a security property rather than a convenience. [NFR-54](presentation-layer.md) makes the
+presentation layer responsible for normalizing attacker-controlled text — display names, subjects,
+snippets, folder and tag names, attachment names — *before* it crosses, and a terminator-delimited
+representation makes the crossing itself lossy in an attacker-reachable way: a byte the sender chose
+truncates the value, and the shell renders a prefix of a subject while the layer believes it handed over
+the whole one. Every truncation on this boundary MUST be one the presentation layer performed
+deliberately, under a bound in [limits](../limits.md), and none MUST be a property of the encoding.
+
+**Validity is established once, where normalization happens, and is not re-checked by the shell.** The
+layer guarantees well-formed UTF-8 on this boundary in the same way the sanitizer guarantees it under
+[I10](../rendering/sanitizer-invariants.md); a shell that validated again would be asserting a property
+it cannot repair, and a shell that validated *instead* would be the second normalization site NFR-54
+exists to prevent.
+
+### Rows cross as a contiguous array, borrowed for the callback
+
+**A batch of list rows crosses as one contiguous array of fixed-layout records, borrowed under the
+ownership rule above**, with each record's text fields carried as pointer-and-length into storage the
+layer owns for the duration of the delivery.
+
+The alternative — an opaque row handle plus one accessor per field — is what a boundary designed for
+safety rather than for this workload would choose, and it is arithmetically excluded. FR-6's list carries
+roughly ten fields, and [NFR-6](ui-shell.md) requires zero dropped frames over a ten-thousand-row fling
+with cell reuse; per-field accessors turn one delivery into six figures of boundary crossings for a
+gesture whose entire budget is frame-shaped. The contiguous array is what lets a shell bind a batch in
+one pass.
+
+**What that costs is stated plainly**: fixed-layout records are the part of this boundary that
+[D-17](shell-boundary.md) concedes memory-safety bugs are possible in, and D-60's generated declarations
+in [workspace](../build/workspace.md) exist precisely so that the two sides' idea of that layout cannot
+disagree silently.
+
+### An unknown discriminant is a build failure, not a runtime case
+
+**Every enumerated value crossing this boundary MUST be handled exhaustively by both shells, checked when
+the project is built. There is no runtime fallback for an unrecognised discriminant, and one MUST NOT be
+added.**
+
+This is deliberately the opposite of the rule [provider model](../mail/provider-model.md) states for
+capabilities — *"an unrecognised capability is ignored, not fatal"* — and the difference is that a
+capability set is written by an adapter and read by a build that may be older, while **both sides of this
+boundary ship in one binary**. D-17 says so in its own argument for a C ABI: there is *"no version skew
+to detect, because both sides ship in one binary"*. Nothing here is ever older than anything else here.
+
+So a runtime fallback would not be tolerance; it would be a hiding place. [D-56](presentation-layer.md)
+requires that *"a state either has a rendering in both shells or it has none"*, and the way that rule
+fails is not by anyone deciding against it — it is by a shell quietly rendering "something went wrong"
+for a state whose real rendering was never written, on one platform, for as long as nobody looks. A build
+failure is the only enforcement that cannot be deferred, and it is the same enforcement
+[workspace](../build/workspace.md) applies to the boundary's own layout.
+
+### The main-loop hop is arranged at initialization, by the shell
+
+D-48 rule 1 requires the layer to deliver on the shell's main loop while
+[presentation layer](presentation-layer.md) forbids it to contain a widget toolkit. **The shell therefore
+supplies, once at initialization, the means of scheduling work onto its own loop**, and the layer calls
+it. AppKit and GTK4 both provide such a primitive natively; neither is reachable from a toolkit-free
+layer, and neither needs to be.
+
+**Deliveries are coalesced per observation rather than posted per notification.** A delta applying
+thousands of envelopes must not become thousands of main-loop items — that is NFR-6's frame budget spent
+on scheduling — so the layer accumulates and posts a batch, and D-48's atomic-batch rule already says
+what a shell does with it. Where the shell cannot keep up, the layer coalesces further rather than
+growing an unbounded queue: a queue that grows is an unbounded cache by another name, which
+[memory pressure](../runtime/memory-pressure.md) forbids outright.
+
+### Cancellation rendezvous with workers, and discards what is already posted
+
+D-48 requires that after cancellation returns, no further callback arrives *"on any thread, ever"*, and
+its own contestability note worries only about how long the rendezvous takes. There is a sharper problem
+it does not reach: **a delivery already posted to the main loop will still arrive**, and the thread
+calling `cancel` is the thread that would have to drain it — so a cancellation that waited for posted
+deliveries would deadlock against itself, deterministically, every time.
+
+**Each observation carries a generation, every posted delivery carries the generation it was posted
+under, and cancellation advances it.** Cancellation then rendezvous with *worker-side* work only, which
+is the short wait D-48 bets on, and a stale delivery that reaches the main loop is discarded by
+comparing generations rather than waited for. The guarantee D-48 states is preserved exactly — no
+callback for that observation is *delivered* after cancellation returns — without requiring the main
+thread to wait on itself.
+
+This is what makes the use-after-free D-48 is about actually closed. The shell cancels because it is
+about to free the context the observation writes into; with a generation check, the posted delivery that
+would have written into freed memory never reaches the shell at all.
+
+**What it costs:** a generation on every observation and a comparison on every delivery, and the
+discipline that no delivery path may skip the check. The check is cheap; remembering it exists is the
+part that needs writing down.
+
+**Contestable because:** generations solve the posted-delivery race and do not solve a shell that frees
+its context without cancelling first, which remains undefined behaviour that no mechanism here detects.
+The honest position is that this boundary depends on the shell obeying a protocol, and narrowing the
+protocol is the only defence available at a C ABI.
 
 ## Change notifications
 
