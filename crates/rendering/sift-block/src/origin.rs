@@ -70,13 +70,13 @@ impl Origin {
                 confidence: Confidence::Attested,
             };
         }
-        if auth.sender_policy_passed {
-            if let Some(d) = &auth.envelope_domain {
-                return Self::Synthetic {
-                    domain: d.clone(),
-                    confidence: Confidence::AttestedByPolicy,
-                };
-            }
+        if auth.sender_policy_passed
+            && let Some(d) = &auth.envelope_domain
+        {
+            return Self::Synthetic {
+                domain: d.clone(),
+                confidence: Confidence::AttestedByPolicy,
+            };
         }
         if let Some(d) = &auth.from_domain {
             return Self::Synthetic {

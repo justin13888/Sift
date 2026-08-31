@@ -45,7 +45,16 @@ fn no_bundled_root_store() -> Result<(), String> {
     let mut findings = Vec::new();
     for target in SHIPPED_TARGETS {
         let output = Command::new("cargo")
-            .args(["tree", "--workspace", "--edges", "normal", "--prefix", "none", "--target", target])
+            .args([
+                "tree",
+                "--workspace",
+                "--edges",
+                "normal",
+                "--prefix",
+                "none",
+                "--target",
+                target,
+            ])
             .output()
             .map_err(|e| format!("cargo tree did not run: {e}"))?;
         if !output.status.success() {

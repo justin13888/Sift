@@ -135,10 +135,10 @@ impl Threads {
     /// of a conversation does not separate them again. Recomputing would undo a correct
     /// merge every time a message was evicted, which D-102 does routinely.
     pub fn remove(&mut self, message: MessageId) {
-        if let Some(thread) = self.of_message.remove(&message) {
-            if let Some(members) = self.members.get_mut(&thread) {
-                members.retain(|m| *m != message);
-            }
+        if let Some(thread) = self.of_message.remove(&message)
+            && let Some(members) = self.members.get_mut(&thread)
+        {
+            members.retain(|m| *m != message);
         }
     }
 

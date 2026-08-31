@@ -117,6 +117,23 @@ fn classify_transport(error: &TransportError) -> FailureKind {
     }
 }
 
+/// What one account's authorization is against.
+///
+/// The three travel together because they are meaningless apart: the redirect must be one
+/// the client is registered for, and the client must be one the endpoints know. Passing them
+/// separately let a caller mix a profile from one account with a client identifier from
+/// another, which fails at the provider with a message nobody can act on.
+#[derive(Debug, Clone)]
+pub struct Registration {
+    pub profile: OAuthProfile,
+    /// **No client secret.** D-88's first point: a public client with PKCE, because "a
+    /// secret shipped through three channels is not a secret".
+    pub client_id: String,
+    /// D-36's registered URI scheme. Never a loopback address — NFR-24 admits no listening
+    /// socket for any purpose.
+    pub redirect_uri: String,
+}
+
 /// NFR-23's single place. Everything that touches credential material goes through here.
 #[derive(Debug)]
 pub struct Broker<S: CredentialStore> {
@@ -153,21 +170,25 @@ impl<S: CredentialStore> Broker<S> {
     /// See [`AuthError`].
     pub fn begin(
         &mut self,
-        profile: &OAuthProfile,
-        client_id: &str,
-        redirect_uri: &str,
+        registration: &Registration,
         scheme_is_registered: bool,
         now_millis: u64,
     ) -> Result<String, AuthError> {
         if !may_begin(scheme_is_registered) {
             return Err(AuthError::NoCallbackRegistration);
         }
-        if profile.authorizes_sending() {
+        if registration.profile.authorizes_sending() {
             return Err(AuthError::ScopeWouldAuthorizeSending);
         }
         let pkce = Pkce::generate().map_err(|_| AuthError::NoEntropy)?;
         let state = oauth::state().map_err(|_| AuthError::NoEntropy)?;
-        let url = authorization_url(profile, client_id, redirect_uri, &state, &pkce);
+        let url = authorization_url(
+            &registration.profile,
+            &registration.client_id,
+            &registration.redirect_uri,
+            &state,
+            &pkce,
+        );
         self.flows.begin(InFlight {
             state,
             verifier: pkce.verifier,
@@ -183,13 +204,12 @@ impl<S: CredentialStore> Broker<S> {
     pub fn complete<T: Transport>(
         &mut self,
         transport: &mut T,
-        profile: &OAuthProfile,
-        client_id: &str,
-        redirect_uri: &str,
+        registration: &Registration,
         account: AccountId,
         callback: &str,
         now_millis: u64,
     ) -> Result<Pair, AuthError> {
+        let profile = &registration.profile;
         let state = oauth::callback_parameter(callback, "state").ok_or(AuthError::NoSuchFlow)?;
         let flow = self
             .flows
@@ -203,7 +223,12 @@ impl<S: CredentialStore> Broker<S> {
         }
         let code = oauth::callback_parameter(callback, "code").ok_or(AuthError::NoSuchFlow)?;
 
-        let body = exchange_body(client_id, redirect_uri, &code, &flow.verifier);
+        let body = exchange_body(
+            &registration.client_id,
+            &registration.redirect_uri,
+            &code,
+            &flow.verifier,
+        );
         let answer = self.post_token(transport, profile, body.as_bytes())?;
         let TokenAnswer::Granted(grant) = answer else {
             return Err(AuthError::Failed(classify(&answer)));
@@ -244,8 +269,7 @@ impl<S: CredentialStore> Broker<S> {
     pub fn refresh<T: Transport>(
         &mut self,
         transport: &mut T,
-        profile: &OAuthProfile,
-        client_id: &str,
+        registration: &Registration,
         account: AccountId,
     ) -> Result<Pair, AuthError> {
         // Concurrent refusals otherwise produce concurrent refreshes, and against a provider
@@ -255,7 +279,7 @@ impl<S: CredentialStore> Broker<S> {
         if !self.in_flight.begin(account.as_u128()) {
             return Err(AuthError::Failed(FailureKind::Transport));
         }
-        let outcome = self.refresh_inner(transport, profile, client_id, account);
+        let outcome = self.refresh_inner(transport, registration, account);
         self.in_flight.finish(account.as_u128());
         outcome
     }
@@ -263,13 +287,12 @@ impl<S: CredentialStore> Broker<S> {
     fn refresh_inner<T: Transport>(
         &mut self,
         transport: &mut T,
-        profile: &OAuthProfile,
-        client_id: &str,
+        registration: &Registration,
         account: AccountId,
     ) -> Result<Pair, AuthError> {
         let held = self.usable(account)?;
-        let body = refresh_body(client_id, &held.refresh);
-        let answer = self.post_token(transport, profile, body.as_bytes())?;
+        let body = refresh_body(&registration.client_id, &held.refresh);
+        let answer = self.post_token(transport, &registration.profile, body.as_bytes())?;
         let TokenAnswer::Granted(grant) = answer else {
             return Err(AuthError::Failed(classify(&answer)));
         };
@@ -392,6 +415,14 @@ mod tests {
         Broker::new(InMemory::default())
     }
 
+    fn registration() -> Registration {
+        Registration {
+            profile: profile(),
+            client_id: "c".into(),
+            redirect_uri: "net.example:/cb".into(),
+        }
+    }
+
     fn account() -> AccountId {
         AccountId::from_u128(1)
     }
@@ -412,7 +443,7 @@ mod tests {
         // back to nothing.
         let mut b = broker();
         assert_eq!(
-            b.begin(&profile(), "c", "net.example:/cb", false, 0),
+            b.begin(&registration(), false, 0),
             Err(AuthError::NoCallbackRegistration)
         );
         assert_eq!(b.flows_in_progress(), 0);
@@ -421,11 +452,14 @@ mod tests {
     #[test]
     fn an_authorization_that_would_ask_for_a_sending_scope_never_starts() {
         // The no-send constraint at the point a reviewer can check it: the consent screen.
-        let mut p = profile();
-        p.scopes.push("https://mail.example.test/".into());
+        let mut sending = registration();
+        sending
+            .profile
+            .scopes
+            .push("https://mail.example.test/".into());
         let mut b = broker();
         assert_eq!(
-            b.begin(&p, "c", "net.example:/cb", true, 0),
+            b.begin(&sending, true, 0),
             Err(AuthError::ScopeWouldAuthorizeSending)
         );
     }
@@ -434,14 +468,12 @@ mod tests {
     fn a_completed_flow_stores_the_pair_before_anything_uses_it() {
         // D-88's fourth point. The write precedes the use.
         let mut b = broker();
-        let url = b.begin(&profile(), "c", "net.example:/cb", true, 0).unwrap();
+        let url = b.begin(&registration(), true, 0).unwrap();
         let mut t = granting(r#"{"access_token":"at","refresh_token":"rt","scope":"read modify"}"#);
         let pair = b
             .complete(
                 &mut t,
-                &profile(),
-                "c",
-                "net.example:/cb",
+                &registration(),
                 account(),
                 &format!("net.example:/cb?state={}&code=abc", state_of(&url)),
                 0,
@@ -455,14 +487,12 @@ mod tests {
     #[test]
     fn the_exchange_sends_the_verifier_that_matches_the_challenge_and_no_secret() {
         let mut b = broker();
-        let url = b.begin(&profile(), "c", "net.example:/cb", true, 0).unwrap();
+        let url = b.begin(&registration(), true, 0).unwrap();
         let challenge = oauth::callback_parameter(&url, "code_challenge").unwrap();
         let mut t = granting(r#"{"access_token":"at","refresh_token":"rt"}"#);
         b.complete(
             &mut t,
-            &profile(),
-            "c",
-            "net.example:/cb",
+            &registration(),
             account(),
             &format!("net.example:/cb?state={}&code=abc", state_of(&url)),
             0,
@@ -473,7 +503,10 @@ mod tests {
             .split('&')
             .find_map(|f| f.strip_prefix("code_verifier="))
             .expect("no verifier was sent");
-        assert!(!sent.contains("client_secret"), "a public client sent a secret");
+        assert!(
+            !sent.contains("client_secret"),
+            "a public client sent a secret"
+        );
         // The verifier's own challenge is the one the browser was given. Without this the
         // exchange could send any verifier at all and the test would still pass.
         assert_eq!(
@@ -492,14 +525,12 @@ mod tests {
     fn a_forged_callback_is_discarded_and_does_not_disturb_the_real_flow() {
         // Any process running as the user can invoke the registered scheme.
         let mut b = broker();
-        let _ = b.begin(&profile(), "c", "net.example:/cb", true, 0).unwrap();
+        let _ = b.begin(&registration(), true, 0).unwrap();
         let mut t = granting(r#"{"access_token":"at"}"#);
         assert_eq!(
             b.complete(
                 &mut t,
-                &profile(),
-                "c",
-                "net.example:/cb",
+                &registration(),
                 account(),
                 "net.example:/cb?state=forged&code=abc",
                 0,
@@ -507,22 +538,26 @@ mod tests {
             Err(AuthError::NoSuchFlow)
         );
         assert_eq!(b.flows_in_progress(), 1, "the real flow was disturbed");
-        assert!(t.performed.is_empty(), "a forged callback reached the network");
+        assert!(
+            t.performed.is_empty(),
+            "a forged callback reached the network"
+        );
     }
 
     #[test]
     fn a_user_who_declines_is_told_that_rather_than_shown_a_failure() {
         let mut b = broker();
-        let url = b.begin(&profile(), "c", "net.example:/cb", true, 0).unwrap();
+        let url = b.begin(&registration(), true, 0).unwrap();
         let mut t = granting(r#"{"access_token":"at"}"#);
         assert_eq!(
             b.complete(
                 &mut t,
-                &profile(),
-                "c",
-                "net.example:/cb",
+                &registration(),
                 account(),
-                &format!("net.example:/cb?error=access_denied&state={}", state_of(&url)),
+                &format!(
+                    "net.example:/cb?error=access_denied&state={}",
+                    state_of(&url)
+                ),
                 0,
             ),
             Err(AuthError::Declined("access_denied".into()))
@@ -534,14 +569,12 @@ mod tests {
         // The scope set is already the minimum. A narrower grant is an account that will
         // fail later in a way nothing connects back to the consent screen.
         let mut b = broker();
-        let url = b.begin(&profile(), "c", "net.example:/cb", true, 0).unwrap();
+        let url = b.begin(&registration(), true, 0).unwrap();
         let mut t = granting(r#"{"access_token":"at","refresh_token":"rt","scope":"read"}"#);
         assert_eq!(
             b.complete(
                 &mut t,
-                &profile(),
-                "c",
-                "net.example:/cb",
+                &registration(),
                 account(),
                 &format!("net.example:/cb?state={}&code=abc", state_of(&url)),
                 0,
@@ -568,7 +601,7 @@ mod tests {
         )
         .unwrap();
         let mut t = granting(r#"{"access_token":"new-at","refresh_token":"new-rt"}"#);
-        b.refresh(&mut t, &profile(), "c", account()).unwrap();
+        b.refresh(&mut t, &registration(), account()).unwrap();
 
         assert_eq!(
             b.store().read(account(), Item::SupersededRefresh).unwrap(),
@@ -591,7 +624,7 @@ mod tests {
         )
         .unwrap();
         let mut t = granting(r#"{"access_token":"new-at"}"#);
-        let pair = b.refresh(&mut t, &profile(), "c", account()).unwrap();
+        let pair = b.refresh(&mut t, &registration(), account()).unwrap();
         assert_eq!(pair.refresh, "kept-rt");
     }
 
@@ -619,7 +652,7 @@ mod tests {
                 body: b"<html>Sign in to the network</html>".to_vec(),
             },
         );
-        let outcome = b.refresh(&mut t, &profile(), "c", account());
+        let outcome = b.refresh(&mut t, &registration(), account());
         assert_eq!(outcome, Err(AuthError::Failed(FailureKind::Unparseable)));
         assert!(!FailureKind::Unparseable.is_non_transient());
         assert_eq!(
@@ -650,7 +683,7 @@ mod tests {
                 body: br#"{"error":"invalid_grant"}"#.to_vec(),
             },
         );
-        let Err(AuthError::Failed(kind)) = b.refresh(&mut t, &profile(), "c", account()) else {
+        let Err(AuthError::Failed(kind)) = b.refresh(&mut t, &registration(), account()) else {
             panic!("the refresh did not fail");
         };
         assert!(kind.is_non_transient());
@@ -677,7 +710,7 @@ mod tests {
             },
         );
         assert_eq!(
-            b.refresh(&mut t, &profile(), "c", account()),
+            b.refresh(&mut t, &registration(), account()),
             Err(AuthError::Failed(FailureKind::Throttled))
         );
         assert!(!FailureKind::Throttled.is_non_transient());

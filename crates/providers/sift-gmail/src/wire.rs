@@ -205,7 +205,9 @@ pub fn parse_history_id(body: &[u8]) -> Result<String, Refusal> {
     json(body)?
         .get("historyId")
         .and_then(scalar)
-        .ok_or(Refusal::Malformed("the profile carried no history identifier"))
+        .ok_or(Refusal::Malformed(
+            "the profile carried no history identifier",
+        ))
 }
 
 /// # Errors
@@ -431,7 +433,10 @@ fn envelope_from(value: &serde_json::Value) -> Result<Envelope, Refusal> {
         references,
         subject: header("Subject"),
         from: header("From").as_deref().and_then(rfc5322::address_of),
-        to: header("To").as_deref().map(rfc5322::addresses_of).unwrap_or_default(),
+        to: header("To")
+            .as_deref()
+            .map(rfc5322::addresses_of)
+            .unwrap_or_default(),
         // The server's own received time. D-55 orders on this and never on the `Date`
         // header, which is the sender's and can say anything at all.
         received_at_millis: value
@@ -689,7 +694,10 @@ mod tests {
         assert!(!target.contains("format=full"), "{target}");
         assert!(!target.contains("format=raw"), "{target}");
         for header in ENVELOPE_HEADERS {
-            assert!(target.contains(&format!("metadataHeaders={header}")), "{header}");
+            assert!(
+                target.contains(&format!("metadataHeaders={header}")),
+                "{header}"
+            );
         }
     }
 
@@ -699,24 +707,35 @@ mod tests {
         // what "structure first" means on this provider.
         let target = structure_target(&RemoteMessageId("abc".into()));
         assert!(target.ends_with("?format=full"));
-        assert!(!target.contains("format=raw"), "a whole message was requested");
+        assert!(
+            !target.contains("format=raw"),
+            "a whole message was requested"
+        );
     }
 
     #[test]
     fn an_identifier_cannot_carry_a_second_query_parameter() {
         let target = list_target(&RemoteFolderId("INBOX&maxResults=99999".into()), None, 500);
-        assert!(target.contains("labelIds=INBOX%26maxResults%3D99999"), "{target}");
+        assert!(
+            target.contains("labelIds=INBOX%26maxResults%3D99999"),
+            "{target}"
+        );
         assert_eq!(target.matches("maxResults=").count(), 1, "{target}");
     }
 
     #[test]
     fn the_two_folders_that_are_otherwise_hidden_ask_to_see_themselves() {
-        assert!(list_target(&RemoteFolderId(crate::label::TRASH.into()), None, 500)
-            .contains("includeSpamTrash=true"));
-        assert!(list_target(&RemoteFolderId(crate::label::SPAM.into()), None, 500)
-            .contains("includeSpamTrash=true"));
-        assert!(!list_target(&RemoteFolderId("INBOX".into()), None, 500)
-            .contains("includeSpamTrash"));
+        assert!(
+            list_target(&RemoteFolderId(crate::label::TRASH.into()), None, 500)
+                .contains("includeSpamTrash=true")
+        );
+        assert!(
+            list_target(&RemoteFolderId(crate::label::SPAM.into()), None, 500)
+                .contains("includeSpamTrash=true")
+        );
+        assert!(
+            !list_target(&RemoteFolderId("INBOX".into()), None, 500).contains("includeSpamTrash")
+        );
     }
 
     #[test]
@@ -727,8 +746,14 @@ mod tests {
 
     #[test]
     fn a_history_identifier_is_read_whether_it_is_written_as_a_string_or_a_number() {
-        assert_eq!(parse_history_id(br#"{"historyId":"12345"}"#).unwrap(), "12345");
-        assert_eq!(parse_history_id(br#"{"historyId":12345}"#).unwrap(), "12345");
+        assert_eq!(
+            parse_history_id(br#"{"historyId":"12345"}"#).unwrap(),
+            "12345"
+        );
+        assert_eq!(
+            parse_history_id(br#"{"historyId":12345}"#).unwrap(),
+            "12345"
+        );
     }
 
     #[test]
@@ -776,10 +801,8 @@ mod tests {
 
     #[test]
     fn a_list_page_carries_its_continuation() {
-        let page = parse_list(
-            br#"{"messages":[{"id":"a"},{"id":"b"}],"nextPageToken":"next"}"#,
-        )
-        .unwrap();
+        let page =
+            parse_list(br#"{"messages":[{"id":"a"},{"id":"b"}],"nextPageToken":"next"}"#).unwrap();
         assert_eq!(page.ids.len(), 2);
         assert_eq!(page.next_page.as_deref(), Some("next"));
     }

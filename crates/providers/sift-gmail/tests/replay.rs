@@ -81,7 +81,10 @@ fn the_tag_axis_is_reported_by_name_rather_than_by_identifier() {
     let g = gmail(account());
     // FR-37's affordance shows names; the wire takes identifiers, and only the adapter
     // holds the mapping between them.
-    assert_eq!(g.tags().unwrap(), vec!["IMPORTANT".to_owned(), "Receipts".to_owned()]);
+    assert_eq!(
+        g.tags().unwrap(),
+        vec!["IMPORTANT".to_owned(), "Receipts".to_owned()]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -91,7 +94,11 @@ fn the_tag_axis_is_reported_by_name_rather_than_by_identifier() {
 fn backfilling() -> Replay {
     let mut r = account();
     r.on("GET", &wire::list_target(&inbox(), None, 500), LIST_1);
-    r.on("GET", &wire::list_target(&inbox(), Some("page2"), 500), LIST_2);
+    r.on(
+        "GET",
+        &wire::list_target(&inbox(), Some("page2"), 500),
+        LIST_2,
+    );
     r
 }
 
@@ -331,9 +338,7 @@ fn an_envelope_fetch_asks_for_metadata_and_never_for_a_whole_message() {
         batch_answer(&[(0, 200, r#"{"id":"m1","internalDate":"5"}"#)]),
     );
     let g = gmail(r);
-    let _ = g
-        .fetch_envelopes(&[RemoteMessageId("m1".into())])
-        .unwrap();
+    let _ = g.fetch_envelopes(&[RemoteMessageId("m1".into())]).unwrap();
 
     let replay = replay_of(&g);
     let at = replay
@@ -366,7 +371,11 @@ fn a_batch_answered_out_of_order_still_lands_on_the_right_messages() {
         .fetch_envelopes(&[RemoteMessageId("m1".into()), RemoteMessageId("m2".into())])
         .unwrap();
     for envelope in &envelopes {
-        let expected = if envelope.id.0 == "m1" { "first" } else { "second" };
+        let expected = if envelope.id.0 == "m1" {
+            "first"
+        } else {
+            "second"
+        };
         assert_eq!(envelope.subject.as_deref(), Some(expected));
     }
     assert_eq!(envelopes.len(), 2);
@@ -413,9 +422,7 @@ fn a_forty_megabyte_attachment_costs_nothing_until_it_is_asked_for() {
         STRUCTURE,
     );
     let g = gmail(r);
-    let html = g
-        .fetch_part(&RemoteMessageId("m1".into()), "1")
-        .unwrap();
+    let html = g.fetch_part(&RemoteMessageId("m1".into()), "1").unwrap();
     assert_eq!(html, b"<html><b>hi</b></html>");
     assert_eq!(
         replay_of(&g).count_of(
@@ -540,7 +547,8 @@ fn reporting_junk_and_reporting_not_junk_are_opposites_rather_than_the_same_call
     assert_eq!(junk["removeLabelIds"], serde_json::json!(["INBOX"]));
 
     let g = gmail(modifying());
-    g.apply(&[mutation("m1", Operation::ReportNotJunk)]).unwrap();
+    g.apply(&[mutation("m1", Operation::ReportNotJunk)])
+        .unwrap();
     let not_junk = sent_body(&g, &wire::batch_modify_target());
     assert_eq!(not_junk["addLabelIds"], serde_json::json!(["INBOX"]));
     assert_eq!(not_junk["removeLabelIds"], serde_json::json!(["SPAM"]));
@@ -549,7 +557,8 @@ fn reporting_junk_and_reporting_not_junk_are_opposites_rather_than_the_same_call
 #[test]
 fn the_read_axis_is_the_presence_of_a_label_so_marking_read_removes_one() {
     let g = gmail(modifying());
-    g.apply(&[mutation("m1", Operation::SetRead(true))]).unwrap();
+    g.apply(&[mutation("m1", Operation::SetRead(true))])
+        .unwrap();
     assert_eq!(
         sent_body(&g, &wire::batch_modify_target())["removeLabelIds"],
         serde_json::json!(["UNREAD"])
@@ -569,7 +578,8 @@ fn deleting_to_trash_is_its_own_request_rather_than_a_label_change() {
         },
     );
     let g = gmail(r);
-    g.apply(&[mutation("m1", Operation::DeleteToTrash)]).unwrap();
+    g.apply(&[mutation("m1", Operation::DeleteToTrash)])
+        .unwrap();
     assert_eq!(
         replay_of(&g).count_of("POST", &wire::trash_target(&RemoteMessageId("m1".into()))),
         1
@@ -634,7 +644,10 @@ fn removing_a_tag_the_message_never_had_succeeds_without_asking_the_server() {
         outcome,
         vec![sift_provider::adapter::MutationOutcome::Applied]
     );
-    assert_eq!(replay_of(&g).count_of("POST", &wire::batch_modify_target()), 0);
+    assert_eq!(
+        replay_of(&g).count_of("POST", &wire::batch_modify_target()),
+        0
+    );
 }
 
 #[test]

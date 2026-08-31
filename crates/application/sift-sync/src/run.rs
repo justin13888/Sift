@@ -12,16 +12,17 @@
 
 use crate::ingest::{self, IngestError, PageReport};
 use sift_foundation::identity::LocalIdGenerator;
-use sift_provider::adapter::{
-    Adapter, Change, Failure, RemoteFolderId, RemoteMessageId,
-};
+use sift_provider::adapter::{Adapter, Change, Failure, RemoteFolderId, RemoteMessageId};
 use sift_store::account::Account;
 
 /// What went wrong running a turn.
 #[derive(Debug)]
 pub enum RunError {
     /// The provider failed, classified by the adapter that produced it.
-    Provider { failure: Failure, said: String },
+    Provider {
+        failure: Failure,
+        said: String,
+    },
     Store(IngestError),
 }
 
@@ -160,7 +161,10 @@ where
 /// What one turn did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Turn {
-    Applied { report: PageReport, more: bool },
+    Applied {
+        report: PageReport,
+        more: bool,
+    },
     /// The cursor was refused. The caller recovers rather than backing off.
     Invalidated,
 }

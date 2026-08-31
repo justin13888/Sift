@@ -447,12 +447,12 @@ pub fn resolve<E: Element>(
 
         // Inheritance, from the parent's already-computed style. Document order guarantees
         // the parent is resolved first, which is why this is one pass.
-        if let Some(parent) = element.parent() {
-            if let Some(parent_style) = computed.get(parent) {
-                for (property, value) in parent_style {
-                    if inherits(property) && !style.contains_key(property) {
-                        style.insert(property.clone(), value.clone());
-                    }
+        if let Some(parent) = element.parent()
+            && let Some(parent_style) = computed.get(parent)
+        {
+            for (property, value) in parent_style {
+                if inherits(property) && !style.contains_key(property) {
+                    style.insert(property.clone(), value.clone());
                 }
             }
         }

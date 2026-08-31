@@ -81,8 +81,8 @@ pub fn reconcile_folders(
 ) -> Result<FolderReport, IngestError> {
     let mut report = FolderReport::default();
     let known: Vec<(i64, String, bool)> = {
-        let mut stmt =
-            store.prepare("SELECT id, remote_id, retired FROM folder WHERE remote_id IS NOT NULL")?;
+        let mut stmt = store
+            .prepare("SELECT id, remote_id, retired FROM folder WHERE remote_id IS NOT NULL")?;
         let rows = stmt.query_map([], |r| {
             Ok((r.get(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? != 0))
         })?;
@@ -90,9 +90,14 @@ pub fn reconcile_folders(
     };
 
     for folder in remote {
-        let display = normalize::for_display(&folder.display_name).as_str().to_owned();
+        let display = normalize::for_display(&folder.display_name)
+            .as_str()
+            .to_owned();
         let special = folder.special_use.map(special_use_name);
-        match known.iter().find(|(_, remote_id, _)| *remote_id == folder.id.0) {
+        match known
+            .iter()
+            .find(|(_, remote_id, _)| *remote_id == folder.id.0)
+        {
             Some((id, _, retired)) => {
                 store.execute(
                     "UPDATE folder SET display_name = ?2, special_use = ?3, retired = 0 WHERE id = ?1",
@@ -147,10 +152,7 @@ const fn special_use_name(use_: SpecialUse) -> &'static str {
 ///
 /// # Errors
 /// See [`IngestError`].
-pub fn folder_local_id(
-    store: &Connection,
-    remote: &RemoteFolderId,
-) -> Result<i64, IngestError> {
+pub fn folder_local_id(store: &Connection, remote: &RemoteFolderId) -> Result<i64, IngestError> {
     store
         .query_row(
             "SELECT id FROM folder WHERE remote_id = ?1",
@@ -419,7 +421,9 @@ fn upsert(
                     join::DIGEST_RULE_VERSION,
                     thread.to_bytes().to_vec(),
                     i64::try_from(envelope.received_at_millis).unwrap_or(i64::MAX),
-                    envelope.origination_date_millis.map(|m| i64::try_from(m).unwrap_or(i64::MAX)),
+                    envelope
+                        .origination_date_millis
+                        .map(|m| i64::try_from(m).unwrap_or(i64::MAX)),
                     envelope.from.clone().unwrap_or_default(),
                     envelope.to.join(", "),
                     subject,
@@ -443,7 +447,9 @@ fn upsert(
                     join::DIGEST_RULE_VERSION,
                     thread.to_bytes().to_vec(),
                     i64::try_from(envelope.received_at_millis).unwrap_or(i64::MAX),
-                    envelope.origination_date_millis.map(|m| i64::try_from(m).unwrap_or(i64::MAX)),
+                    envelope
+                        .origination_date_millis
+                        .map(|m| i64::try_from(m).unwrap_or(i64::MAX)),
                     envelope.from.clone().unwrap_or_default(),
                     envelope.to.join(", "),
                     subject,
@@ -539,10 +545,16 @@ fn thread_for(
 
 fn write_tags(tx: &Transaction<'_>, message: LocalId, tags: &[String]) -> Result<(), IngestError> {
     let key = message.to_bytes().to_vec();
-    tx.execute("DELETE FROM message_tag WHERE message_id = ?1", params![key])?;
+    tx.execute(
+        "DELETE FROM message_tag WHERE message_id = ?1",
+        params![key],
+    )?;
     for tag in tags {
         let name = normalize::for_display(tag).as_str().to_owned();
-        tx.execute("INSERT OR IGNORE INTO tag (name) VALUES (?1)", params![name])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO tag (name) VALUES (?1)",
+            params![name],
+        )?;
         let id: i64 = tx.query_row("SELECT id FROM tag WHERE name = ?1", params![name], |r| {
             r.get(0)
         })?;

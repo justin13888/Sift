@@ -227,8 +227,7 @@ impl Replay {
         n: usize,
         error: TransportError,
     ) -> &mut Self {
-        self.faults
-            .insert((Exchange::new(verb, target), n), error);
+        self.faults.insert((Exchange::new(verb, target), n), error);
         self
     }
 

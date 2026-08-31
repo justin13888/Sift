@@ -308,10 +308,10 @@ fn exceeds_a_bound(position: &Position, transferred: Option<u64>) -> Option<&'st
     {
         return Some("L-11 decoded pixels");
     }
-    if let (Some(w), Some(h)) = (position.declared_width, position.declared_height) {
-        if u64::from(w) * u64::from(h) > L12_RASTER_PIXELS {
-            return Some("L-12 rasterized pixels");
-        }
+    if let (Some(w), Some(h)) = (position.declared_width, position.declared_height)
+        && u64::from(w) * u64::from(h) > L12_RASTER_PIXELS
+    {
+        return Some("L-12 rasterized pixels");
     }
     None
 }

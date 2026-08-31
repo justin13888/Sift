@@ -103,8 +103,14 @@ mod tests {
         // Both parameters, and each has a failure that is silent without it: no refresh
         // token at all, and no refresh token on a re-add.
         let p = profile();
-        assert!(p.authorize_parameters.contains(&("access_type".into(), "offline".into())));
-        assert!(p.authorize_parameters.contains(&("prompt".into(), "consent".into())));
+        assert!(
+            p.authorize_parameters
+                .contains(&("access_type".into(), "offline".into()))
+        );
+        assert!(
+            p.authorize_parameters
+                .contains(&("prompt".into(), "consent".into()))
+        );
     }
 
     #[test]

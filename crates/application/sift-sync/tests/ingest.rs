@@ -87,7 +87,11 @@ impl Scripted {
         }
     }
 
-    fn answering(mut self, pages: Vec<Result<Delta, &'static str>>, envelopes: Vec<Envelope>) -> Self {
+    fn answering(
+        mut self,
+        pages: Vec<Result<Delta, &'static str>>,
+        envelopes: Vec<Envelope>,
+    ) -> Self {
         self.pages = RefCell::new(pages);
         self.envelopes = envelopes;
         self
@@ -96,8 +100,8 @@ impl Scripted {
 
 fn shape() -> Capabilities {
     use sift_provider::capability::{
-        ArchiveSemantics, DeltaMechanism, IdStability, JunkReporting, LocationCardinality, Magnitude,
-        PushMechanism, SnippetSource, TagSupport, ThreadOperations, TrashSemantics,
+        ArchiveSemantics, DeltaMechanism, IdStability, JunkReporting, LocationCardinality,
+        Magnitude, PushMechanism, SnippetSource, TagSupport, ThreadOperations, TrashSemantics,
     };
     Capabilities {
         location_cardinality: LocationCardinality::OneOrMore,
@@ -288,7 +292,10 @@ fn a_folder_that_comes_back_keeps_the_cursor_it_had() {
     ingest::reconcile_folders(&account.store, &[inbox(), archive()]).unwrap();
 
     let same = ingest::folder_local_id(&account.store, &RemoteFolderId("ARCH".into())).unwrap();
-    assert_eq!(same, arch, "the folder was recreated rather than un-retired");
+    assert_eq!(
+        same, arch,
+        "the folder was recreated rather than un-retired"
+    );
     assert_eq!(
         ingest::cursor_of(&account.store, arch).unwrap(),
         Some(Cursor(b"c-kept".to_vec()))
@@ -318,7 +325,10 @@ fn a_display_name_is_normalized_before_it_is_stored() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_ne!(name, "Rece\u{202e}ipts", "the override reached the store raw");
+    assert_ne!(
+        name, "Rece\u{202e}ipts",
+        "the override reached the store raw"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -336,7 +346,10 @@ fn a_page_and_its_cursor_land_together() {
         &mut account.store,
         folder,
         &page(
-            vec![present("m1", Provenance::Delivered), present("m2", Provenance::Delivered)],
+            vec![
+                present("m1", Provenance::Delivered),
+                present("m2", Provenance::Delivered),
+            ],
             "c1",
             false,
         )
@@ -378,7 +391,12 @@ fn a_page_that_cannot_be_written_leaves_the_cursor_where_it_was() {
     let outcome = ingest::apply_page(
         &mut account.store,
         99_999,
-        &page(vec![present("m1", Provenance::Delivered)], "c-second", false).unwrap(),
+        &page(
+            vec![present("m1", Provenance::Delivered)],
+            "c-second",
+            false,
+        )
+        .unwrap(),
         &[envelope("m1", "one", 100)],
         &ids(),
     );
@@ -459,7 +477,11 @@ fn a_message_keeps_the_provenance_it_arrived_with() {
 
     let provenance: String = account
         .store
-        .query_row("SELECT provenance FROM message WHERE remote_id = 'm1'", [], |r| r.get(0))
+        .query_row(
+            "SELECT provenance FROM message WHERE remote_id = 'm1'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(provenance, "Delivered");
 }
@@ -474,7 +496,10 @@ fn a_backfill_never_counts_as_an_arrival() {
         &mut account.store,
         folder,
         &page(
-            vec![present("m1", Provenance::Discovered), present("m2", Provenance::Discovered)],
+            vec![
+                present("m1", Provenance::Discovered),
+                present("m2", Provenance::Discovered),
+            ],
             "c1",
             false,
         )
@@ -484,7 +509,10 @@ fn a_backfill_never_counts_as_an_arrival() {
     )
     .unwrap();
     assert_eq!(report.inserted, 2);
-    assert_eq!(report.delivered, 0, "a backfill announced the whole mailbox");
+    assert_eq!(
+        report.delivered, 0,
+        "a backfill announced the whole mailbox"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -700,7 +728,11 @@ fn a_flag_change_is_asked_about_even_though_the_message_is_already_held() {
 
     let flags: i64 = account
         .store
-        .query_row("SELECT flags FROM message WHERE remote_id = 'm1'", [], |r| r.get(0))
+        .query_row(
+            "SELECT flags FROM message WHERE remote_id = 'm1'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert!(sift_store::flags::is_read(flags));
     assert_eq!(adapter.asked_for.borrow().len(), 2);
@@ -806,7 +838,10 @@ fn a_thread_is_joined_on_the_providers_conversation_and_keeps_one_identity() {
         &mut account.store,
         folder,
         &page(
-            vec![present("m1", Provenance::Delivered), present("m2", Provenance::Delivered)],
+            vec![
+                present("m1", Provenance::Delivered),
+                present("m2", Provenance::Delivered),
+            ],
             "c1",
             false,
         )
@@ -823,7 +858,9 @@ fn a_thread_is_joined_on_the_providers_conversation_and_keeps_one_identity() {
     assert_eq!(threads, 1, "one conversation became two threads");
     let distinct: i64 = account
         .store
-        .query_row("SELECT count(DISTINCT thread_id) FROM message", [], |r| r.get(0))
+        .query_row("SELECT count(DISTINCT thread_id) FROM message", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(distinct, 1);
 }
@@ -848,7 +885,11 @@ fn a_subject_is_normalized_once_before_it_is_stored() {
     .unwrap();
     let subject: String = account
         .store
-        .query_row("SELECT subject FROM message WHERE remote_id = 'm1'", [], |r| r.get(0))
+        .query_row(
+            "SELECT subject FROM message WHERE remote_id = 'm1'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_ne!(
         subject, "Invoice\u{202e}fdp.exe",

@@ -129,8 +129,7 @@ pub fn state() -> Result<String, &'static str> {
 /// Unpadded URL-safe base64, which is the encoding every one of these fields uses.
 #[must_use]
 pub fn base64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
@@ -323,7 +322,9 @@ pub fn granted_covers(requested: &[String], granted: Option<&str>) -> bool {
         return true;
     };
     let granted: Vec<&str> = granted.split_whitespace().collect();
-    requested.iter().all(|want| granted.contains(&want.as_str()))
+    requested
+        .iter()
+        .all(|want| granted.contains(&want.as_str()))
 }
 
 /// Pull one parameter out of a callback address.
@@ -463,7 +464,11 @@ mod tests {
 
     #[test]
     fn an_obviously_named_send_scope_is_caught_too() {
-        for scope in ["mail.send", "Mail.Compose", "urn:ietf:params:jmap:submission"] {
+        for scope in [
+            "mail.send",
+            "Mail.Compose",
+            "urn:ietf:params:jmap:submission",
+        ] {
             let mut p = profile();
             p.scopes.push(scope.into());
             assert!(p.authorizes_sending(), "{scope}");
@@ -517,7 +522,10 @@ mod tests {
     #[test]
     fn only_an_explicit_denial_of_the_grant_is_a_denial() {
         assert!(matches!(
-            read_token_answer(400, br#"{"error":"invalid_grant","error_description":"expired"}"#),
+            read_token_answer(
+                400,
+                br#"{"error":"invalid_grant","error_description":"expired"}"#
+            ),
             TokenAnswer::GrantDenied { .. }
         ));
         // Something about the request or the registration. Re-authenticating the user does
@@ -539,7 +547,11 @@ mod tests {
             b"{}",
             b"{\"error_description\":\"no error field\"}",
         ] {
-            assert_eq!(read_token_answer(400, body), TokenAnswer::Unparseable, "{body:?}");
+            assert_eq!(
+                read_token_answer(400, body),
+                TokenAnswer::Unparseable,
+                "{body:?}"
+            );
         }
     }
 
@@ -586,6 +598,9 @@ mod tests {
         assert_eq!(callback_parameter("", "state"), None);
         assert_eq!(callback_parameter("?", "state"), None);
         assert_eq!(callback_parameter("?%", "state"), None);
-        assert_eq!(callback_parameter("?state=%zz", "state").as_deref(), Some("%zz"));
+        assert_eq!(
+            callback_parameter("?state=%zz", "state").as_deref(),
+            Some("%zz")
+        );
     }
 }

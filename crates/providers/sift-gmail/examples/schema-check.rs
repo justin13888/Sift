@@ -7,6 +7,11 @@
 //!
 //! `cargo run -p sift-gmail --example schema-check`
 
+// Printing is what a diagnostic *is*. The workspace denies it everywhere else because
+// a library that prints has no way to be quiet, and NFR-55 bounds what Sift writes
+// down — neither applies to a command a person runs by hand and reads the output of.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use sift_gmail::schema;
 use sift_provider::transport::{Request, Transport};
 
@@ -55,7 +60,10 @@ fn main() -> std::process::ExitCode {
                 }
             }
             None => {
-                println!("GONE   {} is no longer in the published schema", endpoint.id);
+                println!(
+                    "GONE   {} is no longer in the published schema",
+                    endpoint.id
+                );
                 drift += 1;
             }
         }

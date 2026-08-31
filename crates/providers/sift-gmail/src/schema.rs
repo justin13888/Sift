@@ -122,7 +122,11 @@ mod tests {
     #[test]
     fn the_committed_list_parses_and_is_the_size_it_says_it_is() {
         let endpoints = endpoints();
-        assert_eq!(endpoints.len(), 10, "the header's count and the list disagree");
+        assert_eq!(
+            endpoints.len(),
+            10,
+            "the header's count and the list disagree"
+        );
         assert!(ENDPOINTS.contains("revision: 20260824"));
     }
 

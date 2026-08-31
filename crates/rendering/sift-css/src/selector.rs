@@ -215,15 +215,15 @@ impl Compound {
             // engine beside us will not, and the two documents would then differ.
             return false;
         }
-        if let Some(tag) = &self.tag {
-            if !element.tag().eq_ignore_ascii_case(tag) {
-                return false;
-            }
+        if let Some(tag) = &self.tag
+            && !element.tag().eq_ignore_ascii_case(tag)
+        {
+            return false;
         }
-        if let Some(id) = &self.id {
-            if element.id() != Some(id.as_str()) {
-                return false;
-            }
+        if let Some(id) = &self.id
+            && element.id() != Some(id.as_str())
+        {
+            return false;
         }
         if !self
             .classes

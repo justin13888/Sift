@@ -3,6 +3,11 @@
 //! that fails on an aeroplane.
 //!
 //! `cargo run -p sift-http --example probe -- <host> <path>`
+// Printing is what a diagnostic *is*. The workspace denies it everywhere else because
+// a library that prints has no way to be quiet, and NFR-55 bounds what Sift writes
+// down — neither applies to a command a person runs by hand and reads the output of.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use sift_provider::transport::{Request, Transport};
 
 fn main() {

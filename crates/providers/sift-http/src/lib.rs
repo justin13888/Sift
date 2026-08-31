@@ -257,7 +257,10 @@ fn from_wire(e: wire::WireError) -> TransportError {
 /// NFR-39's limit, which is the failure `docs/limits.md` describes for every other bound it
 /// holds: the sender chooses how much work the receiver does.
 fn decode(head: &wire::Head, body: Vec<u8>, cap: u64) -> Result<Vec<u8>, TransportError> {
-    let coding = head.get("content-encoding").unwrap_or("").to_ascii_lowercase();
+    let coding = head
+        .get("content-encoding")
+        .unwrap_or("")
+        .to_ascii_lowercase();
     if coding.is_empty() || coding == "identity" {
         return Ok(body);
     }
@@ -408,7 +411,9 @@ mod tests {
         // D-85's distinction: the request went out. Retrying it blindly is what NFR-17
         // forbids.
         assert_eq!(
-            from_wire(wire::WireError::Malformed("the answer ended inside its body")),
+            from_wire(wire::WireError::Malformed(
+                "the answer ended inside its body"
+            )),
             TransportError::Unknown
         );
     }

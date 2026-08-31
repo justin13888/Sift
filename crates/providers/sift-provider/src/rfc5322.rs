@@ -92,7 +92,7 @@ pub fn parse_date_millis(value: &str) -> Option<i64> {
     let hour: i64 = time.next()?.parse().ok()?;
     let minute: i64 = time.next()?.parse().ok()?;
     let second: i64 = time.next().unwrap_or("0").parse().ok()?;
-    if !(day >= 1 && day <= 31 && hour < 24 && minute < 60 && second <= 60) {
+    if !((1..=31).contains(&day) && hour < 24 && minute < 60 && second <= 60) {
         return None;
     }
 
@@ -143,7 +143,11 @@ fn zone_offset_minutes(zone: &str) -> i64 {
         let hours: i64 = zone[1..3].parse().unwrap_or(0);
         let minutes: i64 = zone[3..5].parse().unwrap_or(0);
         let magnitude = hours * 60 + minutes;
-        return if bytes[0] == b'-' { -magnitude } else { magnitude };
+        return if bytes[0] == b'-' {
+            -magnitude
+        } else {
+            magnitude
+        };
     }
     0
 }
@@ -299,7 +303,15 @@ mod tests {
 
     #[test]
     fn nothing_address_shaped_yields_nothing_rather_than_a_guess() {
-        for hostile in ["", "undisclosed-recipients:;", "@", "a@", "@b", "a@b@c", "  "] {
+        for hostile in [
+            "",
+            "undisclosed-recipients:;",
+            "@",
+            "a@",
+            "@b",
+            "a@b@c",
+            "  ",
+        ] {
             assert_eq!(address_of(hostile), None, "{hostile}");
         }
     }

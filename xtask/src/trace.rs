@@ -63,10 +63,10 @@ fn mentioned() -> BTreeSet<String> {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if is_source(&path) {
-                if let Ok(text) = std::fs::read_to_string(&path) {
-                    collect(&text, &mut found);
-                }
+            } else if is_source(&path)
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                collect(&text, &mut found);
             }
         }
     }

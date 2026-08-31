@@ -47,7 +47,10 @@ impl core::fmt::Display for GmailError {
         match self {
             Self::Transport(e) => write!(f, "the wire failed: {e:?}"),
             Self::Refusal(Refusal::CursorInvalidated) => {
-                write!(f, "the stored cursor is outside the retained history window")
+                write!(
+                    f,
+                    "the stored cursor is outside the retained history window"
+                )
             }
             Self::Refusal(Refusal::Malformed(why)) => write!(f, "{why}"),
             Self::Refusal(Refusal::Denied { status, message }) => {
@@ -83,7 +86,10 @@ impl Position {
             "phase".into(),
             serde_json::Value::from(if self.backfilling { "backfill" } else { "live" }),
         );
-        value.insert("history".into(), serde_json::Value::from(self.history.clone()));
+        value.insert(
+            "history".into(),
+            serde_json::Value::from(self.history.clone()),
+        );
         if let Some(page) = &self.backfill_page {
             value.insert("page".into(), serde_json::Value::from(page.clone()));
         }
@@ -98,12 +104,7 @@ impl Position {
     pub fn decode(cursor: &Cursor) -> Result<Self, Refusal> {
         let value: serde_json::Value = serde_json::from_slice(&cursor.0)
             .map_err(|_| Refusal::Malformed("the stored cursor is not one this adapter wrote"))?;
-        let text = |key: &str| {
-            value
-                .get(key)
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-        };
+        let text = |key: &str| value.get(key).and_then(|v| v.as_str()).map(str::to_owned);
         Ok(Self {
             history: text("history")
                 .ok_or(Refusal::Malformed("the stored cursor carried no position"))?,
@@ -218,7 +219,12 @@ impl<T: Transport> Gmail<T> {
             .labels
             .borrow()
             .iter()
-            .filter(|l| matches!(l.axis(), label::Axis::Tag | label::Axis::UndecidedByTheModel))
+            .filter(|l| {
+                matches!(
+                    l.axis(),
+                    label::Axis::Tag | label::Axis::UndecidedByTheModel
+                )
+            })
             .map(|l| l.name.clone())
             .collect())
     }
@@ -250,11 +256,7 @@ impl<T: Transport> Gmail<T> {
             return Err(GmailError::Unsupported("the tag name is not acceptable"));
         }
         let body = serde_json::to_vec(&serde_json::json!({ "name": name })).unwrap_or_default();
-        let response = self.post(
-            &format!("{}/labels", wire::USER),
-            "application/json",
-            &body,
-        )?;
+        let response = self.post(&format!("{}/labels", wire::USER), "application/json", &body)?;
         if !response.is_success() {
             return Err(wire::refusal(response.status, &response.body).into());
         }
@@ -263,7 +265,9 @@ impl<T: Transport> Gmail<T> {
         let id = created
             .get("id")
             .and_then(|i| i.as_str())
-            .ok_or(Refusal::Malformed("the created label carried no identifier"))?
+            .ok_or(Refusal::Malformed(
+                "the created label carried no identifier",
+            ))?
             .to_owned();
         self.labels.borrow_mut().push(Label {
             id: id.clone(),
@@ -580,9 +584,11 @@ impl<T: Transport> Gmail<T> {
         // That is a property of the operations rather than a convenience, and it is why
         // FR-13's one non-idempotent intent is also the one this provider will not do.
         let response = match &mutation.operation {
-            Operation::DeleteToTrash => {
-                self.post(&wire::trash_target(&mutation.message), "application/json", b"{}")?
-            }
+            Operation::DeleteToTrash => self.post(
+                &wire::trash_target(&mutation.message),
+                "application/json",
+                b"{}",
+            )?,
             // The scope Sift asks for cannot do this, and the scope that can also authorizes
             // sending. Refused rather than approximated: `docs/mail/mutations.md` requires
             // an unsupported operation be *absent*, and the capability table already says

@@ -66,13 +66,14 @@ pub struct Candidate<'a> {
 pub fn examine(candidate: &Candidate<'_>, origin: &Origin) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    if let (Some(w), Some(h)) = (candidate.declared_width, candidate.declared_height) {
-        if w <= 2 && h <= 2 {
-            findings.push(Finding {
-                reason: Reason::PixelDimensions,
-                evidence: format!("{w}x{h}"),
-            });
-        }
+    if let (Some(w), Some(h)) = (candidate.declared_width, candidate.declared_height)
+        && w <= 2
+        && h <= 2
+    {
+        findings.push(Finding {
+            reason: Reason::PixelDimensions,
+            evidence: format!("{w}x{h}"),
+        });
     }
 
     if let Some(style) = candidate.style {
@@ -93,13 +94,11 @@ pub fn examine(candidate: &Candidate<'_>, origin: &Origin) -> Vec<Finding> {
     // positive is most likely, because legitimate first-party addresses carry opaque
     // identifiers all the time.
     let first_party = origin.domain().is_some_and(|d| candidate.url.contains(d));
-    if !first_party {
-        if let Some(token) = high_entropy_segment(candidate.url) {
-            findings.push(Finding {
-                reason: Reason::PerRecipientToken,
-                evidence: token,
-            });
-        }
+    if !first_party && let Some(token) = high_entropy_segment(candidate.url) {
+        findings.push(Finding {
+            reason: Reason::PerRecipientToken,
+            evidence: token,
+        });
     }
 
     if candidate.in_zero_height_container && candidate.alt.is_none_or(str::is_empty) {

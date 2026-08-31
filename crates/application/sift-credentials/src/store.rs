@@ -284,8 +284,13 @@ mod tests {
         let account = AccountId::from_u128(u128::from(std::process::id()) | (1 << 100));
         let _ = store.erase(account);
 
-        store.write(account, Item::Refresh, "a-refresh-token").unwrap();
-        assert_eq!(store.read(account, Item::Refresh).unwrap(), "a-refresh-token");
+        store
+            .write(account, Item::Refresh, "a-refresh-token")
+            .unwrap();
+        assert_eq!(
+            store.read(account, Item::Refresh).unwrap(),
+            "a-refresh-token"
+        );
         assert_eq!(store.remaining(account), vec![Item::Refresh]);
 
         store.erase(account).unwrap();
@@ -293,7 +298,10 @@ mod tests {
             store.remaining(account).is_empty(),
             "FR-4's erasure left something behind"
         );
-        assert_eq!(store.read(account, Item::Refresh), Err(StoreError::NotFound));
+        assert_eq!(
+            store.read(account, Item::Refresh),
+            Err(StoreError::NotFound)
+        );
     }
 
     #[cfg(not(target_os = "macos"))]

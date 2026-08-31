@@ -66,7 +66,10 @@ impl Head {
         {
             return Framing::Chunked;
         }
-        if let Some(len) = self.get("content-length").and_then(|v| v.trim().parse().ok()) {
+        if let Some(len) = self
+            .get("content-length")
+            .and_then(|v| v.trim().parse().ok())
+        {
             return Framing::Length(len);
         }
         // 204 and 304 carry no body regardless of what they say.
@@ -268,7 +271,9 @@ impl<R: Read + core::fmt::Debug> Incoming<R> {
                 });
             }
             if !self.fill()? {
-                return Err(WireError::Malformed("the answer ended inside a chunk header"));
+                return Err(WireError::Malformed(
+                    "the answer ended inside a chunk header",
+                ));
             }
         }
     }
@@ -296,7 +301,9 @@ impl<R: Read + core::fmt::Debug> Incoming<R> {
             let chunk = self.exactly(usize::try_from(size).unwrap_or(usize::MAX))?;
             out.extend_from_slice(&chunk);
             if !self.line()?.is_empty() {
-                return Err(WireError::Malformed("a chunk was not followed by a blank line"));
+                return Err(WireError::Malformed(
+                    "a chunk was not followed by a blank line",
+                ));
             }
         }
     }
@@ -315,9 +322,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 pub fn parse_head(bytes: &[u8]) -> Result<Head, WireError> {
     let text = String::from_utf8_lossy(bytes);
     let mut lines = text.split("\r\n");
-    let status_line = lines
-        .next()
-        .ok_or(WireError::Malformed("no status line"))?;
+    let status_line = lines.next().ok_or(WireError::Malformed("no status line"))?;
     let mut fields = status_line.splitn(3, ' ');
     let version = fields.next().unwrap_or("");
     if !version.starts_with("HTTP/1.") {
@@ -359,7 +364,10 @@ mod tests {
         assert!(text.starts_with("GET /x HTTP/1.1\r\n"));
         assert!(text.contains("host: api.example.test\r\n"));
         assert!(text.contains("accept-encoding: gzip\r\n"));
-        assert!(!text.contains("content-length"), "an empty body stated a length");
+        assert!(
+            !text.contains("content-length"),
+            "an empty body stated a length"
+        );
     }
 
     #[test]
@@ -375,7 +383,9 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         // The value is mangled rather than honoured: it stays one header line.
         assert!(
-            !text.split("\r\n").any(|line| line.starts_with("x-injected")),
+            !text
+                .split("\r\n")
+                .any(|line| line.starts_with("x-injected")),
             "{text}"
         );
         assert!(text.contains("authorization: Bearer ax-injected: yes\r\n"));
@@ -391,7 +401,8 @@ mod tests {
 
     #[test]
     fn a_status_line_and_headers_parse() {
-        let head = parse_head(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n").unwrap();
+        let head =
+            parse_head(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n").unwrap();
         assert_eq!(head.status, 200);
         assert_eq!(head.get("Content-Type"), Some("application/json"));
         assert_eq!(head.get("absent"), None);
@@ -430,8 +441,9 @@ mod tests {
 
     #[test]
     fn a_chunk_extension_is_ignored_rather_than_refused() {
-        let mut i =
-            incoming(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2;a=b\r\nhi\r\n0\r\n\r\n");
+        let mut i = incoming(
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2;a=b\r\nhi\r\n0\r\n\r\n",
+        );
         let head = i.head().unwrap();
         assert_eq!(i.body(head.framing(), 1000).unwrap(), b"hi");
     }

@@ -121,10 +121,7 @@ pub enum Resolution {
 ///
 /// `candidates` are what the scope proposed, each with its stored digest and rule version.
 #[must_use]
-pub fn resolve(
-    incoming: (&[u8; 32], u32),
-    candidates: &[(&[u8], u32)],
-) -> Resolution {
+pub fn resolve(incoming: (&[u8; 32], u32), candidates: &[(&[u8], u32)]) -> Resolution {
     let mut agreeing = Vec::new();
     let mut near = 0usize;
     for (index, candidate) in candidates.iter().enumerate() {
@@ -246,10 +243,7 @@ mod tests {
         // D-104. The alternative silently un-merges every thread in the store on the day a
         // rule changes.
         let d = digest(&envelope());
-        assert_eq!(
-            corroborates((&d, 1), (&d, 2)),
-            Corroboration::NotComparable
-        );
+        assert_eq!(corroborates((&d, 1), (&d, 2)), Corroboration::NotComparable);
         assert_eq!(corroborates((&d, 1), (&d, 1)), Corroboration::Agrees);
     }
 

@@ -64,12 +64,13 @@ where
         produced = Some(body()?);
         Ok(())
     });
-    if status == SiftStatus::Ok && !out.is_null() {
-        if let Some(v) = produced {
-            // SAFETY: the caller's obligation above. Written only after the body returned
-            // successfully, so a panicking body leaves the caller's memory untouched.
-            unsafe { out.write(v) };
-        }
+    if status == SiftStatus::Ok
+        && !out.is_null()
+        && let Some(v) = produced
+    {
+        // SAFETY: the caller's obligation above. Written only after the body returned
+        // successfully, so a panicking body leaves the caller's memory untouched.
+        unsafe { out.write(v) };
     }
     status
 }
