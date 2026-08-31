@@ -1,0 +1,60 @@
+# The Flatpak manifest — D-15, D-33, D-61.
+#
+# **This file needs a named owner in this repository before the first release**, and so does
+# the Homebrew Cask beside it. Both carry values that become permanent on publication.
+#
+# The application id here is simultaneously the D-Bus well-known name, the desktop-file name,
+# the portal identity for autostart and permission grants, and the data root. **Renaming it
+# creates a new application with no upgrade path.**
+
+app-id: net.justinchung.Sift
+runtime: org.gnome.Platform
+# D-15 pins the runtime because *version skew is the dominant Linux rendering risk*. The
+# WebKitGTK floor is additionally declared and enforced at startup: running below it MUST
+# fail loudly rather than degrade silently, because a silently degraded renderer produces a
+# fidelity-corpus failure nobody can reproduce.
+runtime-version: '48'
+sdk: org.freedesktop.Sdk.Extension.rust-stable
+command: sift
+
+finish-args:
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Credential access runs through the secrets portal rather than the session bus directly.
+  - --talk-name=org.freedesktop.secrets
+  # D-14 reads network state from NetworkManager over D-Bus. **R-10 is the standing risk**:
+  # Flathub may resist this permission, and the portal's network monitor supplies neither the
+  # metered flag nor the link class — which are the two facts every policy-tier decision
+  # actually turns on.
+  - --system-talk-name=org.freedesktop.NetworkManager
+  # NFR-50's accessibility bridge needs the bus reachable from inside the sandbox. R-14 says
+  # the bridge has never been shown to cross the body view's process and sandbox at all, and
+  # this is the Linux half of that question.
+  - --socket=session-bus
+  # Background residency is requested through the desktop portal's autostart, never a systemd
+  # user unit: a sandboxed application cannot install a host unit, and process-model.md
+  # forbids a system-wide service outright.
+  - --talk-name=org.freedesktop.portal.Background
+  # Q-13: whether a contacts portal with the needed read access exists is unverified. Where it
+  # does not, FR-40 is simply absent and the address is still shown.
+
+modules:
+  - name: sift
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        # D-59 vendors dependencies because a Flatpak build has no network and every crate
+        # must be a declared source.
+        CARGO_HOME: /run/build/sift/cargo
+    build-commands:
+      # D-61: on Linux **Cargo owns the binary**, and this manifest wraps an ordinary Cargo
+      # build. That is the inverse of macOS, where the platform toolchain owns the bundle and
+      # links the Rust core as a static library.
+      - cargo --offline build --release --package sift-gtk --features toolkit
+      - install -Dm755 target/release/sift /app/bin/sift
+    sources:
+      - type: dir
+        path: ../..

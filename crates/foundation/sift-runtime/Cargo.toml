@@ -12,3 +12,5 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+sift-subsystem.workspace = true
+sift-alloc.workspace = true

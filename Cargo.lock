@@ -1547,6 +1547,10 @@ dependencies = [
 [[package]]
 name = "sift-observe"
 version = "0.1.0"
+dependencies = [
+ "sift-alloc",
+ "sift-subsystem",
+]
 
 [[package]]
 name = "sift-presentation"
@@ -1567,6 +1571,10 @@ dependencies = [
 [[package]]
 name = "sift-runtime"
 version = "0.1.0"
+dependencies = [
+ "sift-alloc",
+ "sift-subsystem",
+]
 
 [[package]]
 name = "sift-sanitize"

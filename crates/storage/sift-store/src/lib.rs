@@ -4,4 +4,9 @@
 //! reaches Sift through C.
 
 pub mod account;
+
+// D-65's first harness. Absent from release: the flag register declares it off, and it MUST
+// NOT be compilable into a shipped binary.
+#[cfg(any(test, feature = "fault-injection"))]
+pub mod fault;
 pub mod schema;
