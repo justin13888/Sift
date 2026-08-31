@@ -1,6 +1,6 @@
 # Cache and blobs
 
-**Owns:** D-23, FR-10, FR-12, NFR-14, NFR-49, NFR-52.
+**Owns:** D-23, D-57, FR-10, FR-12, NFR-14, NFR-49, NFR-52, NFR-53.
 
 ## The cache is not the source of truth
 
@@ -89,6 +89,73 @@ perfectly good answer.
 
 An attachment list MUST be shown with lazy download, save-to-disk, and open-with-system-handler. Opening
 an executable type MUST require an explicit warning first.
+
+**What counts as an executable type is decided from three sources, and disagreement between them is itself
+a reason to warn.** The declared media type, the sniffed content, and the extension of the name about to
+be written are each incomplete alone, and the platform does not consult the one a naive check would: what
+happens when a file is opened is decided by its **extension**, not by the type the sender declared. A
+message can therefore declare `text/plain` on a file whose name ends in an executable extension and defeat
+any type-based check entirely. Sift MUST warn on the union of the three, and MUST treat a mismatch among
+them as suspicious in its own right — a sender who labels an executable as a document has told Sift
+something about their intent.
+
+**Previewing an attachment through the platform's own preview facility is permitted and preferred over
+building one.** It decodes hostile bytes out of process, in a component maintained by the platform, which
+is strictly better than the alternative of teaching Sift to render more formats. This is a *different*
+decode path from the classification decode [Q-14](../open-questions.md) is about, and does not wait on it.
+Dragging an attachment out to the file system is likewise permitted, and MUST carry NFR-49's provenance
+marking exactly as a save does — it is the same act of writing sender-controlled bytes to disk.
+
+## NFR-53 — A sender-supplied name never becomes a path
+
+**NFR-53.** Sift MUST NOT use a sender-supplied filename as a filesystem path. The name written is derived
+from it under the normalization NFR-54 in
+[presentation layer](../architecture/presentation-layer.md) applies to every attacker-controlled string,
+with path separators, traversal segments, absolute prefixes, control characters and reserved names
+removed; the exact final path MUST be shown to the user before the write; and an existing file MUST NOT
+be overwritten.
+
+This is the first place Sift writes attacker-controlled bytes to a user-chosen location under an
+attacker-chosen name, and no document covered it. NFR-28 in [the pipeline](../rendering/pipeline.md)
+already requires decoding parameter continuations and encoded words in headers — so the *output* of that
+decoding is arbitrary sender-chosen text, and it is that text which was going to become a path.
+
+The failure that makes this a requirement rather than hygiene is the one
+[link handling](../rendering/link-handling.md) already defends against for URLs: a right-to-left override
+inside a filename produces a name that renders as a document and executes as a program. Showing the final
+path is what makes that visible, and it is the same remedy — display the thing honestly rather than try to
+detect malice.
+
+The [threat model](../security/threat-model.md) carries the filename parameter and the save path as inputs
+in its own table, which they were previously absent from.
+
+## D-57 — The cache is excluded from backup; the queue is not
+
+**Chosen:** the blob store and the account databases' cache-shaped content are excluded from the
+platform's backup mechanism. **The mutation queue is not excluded.**
+**Rejected:** backing up everything; excluding the whole data directory.
+
+**Why exclude.** The store is a refillable cache of a provider's data, and it is bounded by NFR-14 at a
+default of 2 GB per installation. Backing that up spends the user's backup capacity on bytes their mail
+provider already holds — and it spends it on bytes that will not work when restored, because
+[D-43](encryption.md)'s per-installation secret lives in the credential store and does not travel with the
+files. A restored copy is either useless or, in the case the secret is genuinely gone, precisely the
+orphaned store D-43 requires to be **discarded wholesale**.
+
+**Why the queue is the exception, and why a blanket exclusion is wrong.** A queued mutation is the one
+thing in the store that the provider does not know about, which
+[D-32](data-model.md) already establishes when it explains why a downgrade must drain the queue first.
+Excluding the whole data directory would therefore make queued triage the single unrecoverable loss in the
+product, quietly, as a side effect of a storage-efficiency decision.
+
+**What it costs:** two exclusion scopes rather than one, and a restore that produces an account with
+pending mutations and no cached bodies — a state that must be correct, and which the cache-is-not-the-
+source-of-truth framing at the top of this document already requires it to be.
+
+**Contestable because:** the first real restore onto a new machine is when D-43's orphaned-store path is
+exercised for the first time, and this decision makes that path more likely rather than less by ensuring
+the blobs are absent rather than merely unreadable. That is the correct outcome and it does mean the code
+which has never run is the code every migrating user meets.
 
 Attachments MUST NOT be fetched as part of message fetch. See the fetch discipline in
 [sync engine](../mail/sync-engine.md). A single fetch is additionally capped by byte ceiling under

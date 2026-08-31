@@ -28,6 +28,7 @@ a malicious provider, and physical attacks against a running machine.
 | Link targets | the confirmation UI | punycode decoding and bidi stripping — [link handling](../rendering/link-handling.md) |
 | Header text — display names, subject | the **native** list, reader chrome, notifications and the tray | normalized once at the boundary — NFR-54 in [presentation layer](../architecture/presentation-layer.md). No sanitizer invariant sees this path |
 | The `Date` header | list ordering, if it were trusted | it is not: [D-55](../architecture/presentation-layer.md) orders on the server's received time |
+| MIME filename parameter | the **filesystem**, as the name of a saved attachment | never used as a path; derived, normalized and shown in full before the write — NFR-53 in [cache and blobs](../storage/cache-and-blobs.md) |
 | Filter lists | the filter engine, and generated stylesheets | stale-tolerant; never blocking; fetched over the network policy tier. **Integrity is an open gap** — see below |
 
 ## Trust boundaries

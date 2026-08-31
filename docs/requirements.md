@@ -93,6 +93,7 @@ two homes and one of them would go stale.
 | NFR-46 | Body view torn down when unused; footprint returns within 1 second | [rendering/webview-isolation](rendering/webview-isolation.md) |
 | NFR-48 | Schema migrations preserve envelopes, blobs, queued mutations, read state and policy state; never require resync | [storage/data-model](storage/data-model.md) |
 | NFR-49 | Attachments written to disk carry the platform's untrusted-source provenance marking | [storage/cache-and-blobs](storage/cache-and-blobs.md) |
+| NFR-53 | A sender-supplied filename never becomes a path; the final path is shown and nothing is overwritten | [storage/cache-and-blobs](storage/cache-and-blobs.md) |
 | NFR-52 | Envelopes and their full-text index entries bounded by their own budget, evicted oldest-first together | [storage/cache-and-blobs](storage/cache-and-blobs.md) |
 
 ## Reliability and correctness
