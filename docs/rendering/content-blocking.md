@@ -59,13 +59,15 @@ The rule is therefore that **an absent authority denies.** With no engine loaded
 refused, exactly as it would be for a sender the user has not allowed, and the reason recorded for
 [FR-33](../runtime/observability.md) names the shed rather than a rule. FR-29's heuristics are Sift's own
 code and continue to apply; cosmetic filtering is unaffected, having already been baked into the document
-at sanitize time. **The engine returns when pressure has been clear for L-19 and a window is open** —
-not when a *new* window opens, which is what this said before and which left a user who keeps one window open and passes
-through L1 once with no authority for that window's life. [D-93](../runtime/memory-pressure.md)'s
-hysteresis is what makes the two distinguishable: a reload after sustained clearance is not the
-reload-on-demand this section refuses, because it is not a response to a pressure signal. The failure
-direction is the one this document chooses everywhere else: a message with missing images rather than a
-message that quietly fetched something.
+at sanitize time. **The engine returns when pressure has been clear for L-19 and a window is open**
+— not when a *new* window opens, which is what this said before and which left a user who keeps one
+window open and passes through L1 once with no authority for that window's life.
+[D-93](../runtime/memory-pressure.md)'s hysteresis is what makes the two distinguishable: a reload
+after sustained clearance is not the reload-on-demand this section refuses, because it is not a
+response to a pressure signal.
+
+The failure direction is the one this document chooses everywhere else: a message with missing images
+rather than a message that quietly fetched something.
 
 ## FR-27 — Filter lists
 

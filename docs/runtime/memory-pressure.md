@@ -39,14 +39,15 @@ not settled. **Pressure must stay clear for L-19 before a tier is released, and 
 step at a time**, so recovering from L3 passes through L2 and L1 rather than restoring everything at
 once into a system that was under pressure a moment ago.
 
-**This is what fixes the filter engine's permanent absence.**
-[Content blocking](../rendering/content-blocking.md) says the engine returns *"when pressure clears **and** the next window opens"*, which for a user who keeps
-one window open and passes through L1 once means it never returns for that window's life — in the tier
-this document itself calls *"the tier Sift will spend real time in"*. That was a consequence of having no
-hysteresis: without a settling rule, reloading on clearance alone would be the shed undoing itself, which
-that document correctly refuses. With L-19 the two are distinguishable. **The engine returns when pressure
-has been clear for L-19 and a window is open** — not when a *new* window opens — and the no-reload-on-
-demand rule keeps its meaning, because a reload after sustained clearance is not a response to a pressure
+**This is what fixes the filter engine's permanent absence.** [Content
+blocking](../rendering/content-blocking.md) says the engine returns *"when pressure clears **and**
+the next window opens"*, which for a user who keeps one window open and passes through L1 once means
+it never returns for that window's life — in the tier this document itself calls *"the tier Sift
+will spend real time in"*. That was a consequence of having no hysteresis: without a settling rule,
+reloading on clearance alone would be the shed undoing itself, which that document correctly
+refuses. With L-19 the two are distinguishable. **The engine returns when pressure has been clear
+for L-19 and a window is open** — not when a *new* window opens — and the no-reload-on- demand rule
+keeps its meaning, because a reload after sustained clearance is not a response to a pressure
 signal.
 
 **What it costs:** a delay between a system recovering and Sift behaving fully again, during which
