@@ -13,6 +13,16 @@ pub(crate) const LAYERS: &[&str] = &[
     "application",
     "presentation",
     "abi",
+    // Shells sit above the ABI. D-59's table stops at the ABI because the macOS shell is
+    // Swift and outside this workspace — but D-61 puts the Linux shell *in* it ("Cargo owns
+    // the binary and the GTK shell is Rust in the same workspace"), and D-65's
+    // command-driven harness is a shell by the same definition.
+    //
+    // D-17's constraint travels with them: a Rust shell links the crate directly rather
+    // than through generated declarations, and **MUST NOT reach presentation-layer API the
+    // ABI never exposes**. A capability existing for one shell and not the other is a defect
+    // in the boundary, not a Linux feature.
+    "shells",
 ];
 
 /// The four places `docs/architecture/overview.md` permits unsafe code. Everywhere
@@ -33,6 +43,12 @@ pub(crate) const ADAPTERS: &[&str] = &["sift-jmap", "sift-graph", "sift-gmail", 
 /// Prohibitions the layer ordering alone does not express, quoted from the layer table.
 ///
 /// `(layer, forbidden layer, the words the table uses)`
+/// Layers permitted to depend on the ABI crate.
+///
+/// "The C ABI is a leaf crate that **nothing in the core** depends on." A shell is not the
+/// core — consuming the ABI is the whole of what a shell does.
+pub(crate) const MAY_REACH_THE_ABI: &[&str] = &["shells"];
+
 pub(crate) const FORBIDDEN: &[(&str, &str, &str)] = &[
     // "Rendering ... may not reach: the store, the network, the adapters."
     // The broker is the one component in this layer with an edge outward, and it

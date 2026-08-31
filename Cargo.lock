@@ -400,6 +400,22 @@ name = "sift-graph"
 version = "0.1.0"
 
 [[package]]
+name = "sift-harness"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "sift-alloc",
+ "sift-foundation",
+ "sift-mutations",
+ "sift-presentation",
+ "sift-provider",
+ "sift-scheduler",
+ "sift-store",
+ "sift-subsystem",
+ "sift-sync",
+]
+
+[[package]]
 name = "sift-imap"
 version = "0.1.0"
 
@@ -434,6 +450,11 @@ version = "0.1.0"
 [[package]]
 name = "sift-presentation"
 version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+ "sift-mutations",
+ "sift-provider",
+]
 
 [[package]]
 name = "sift-provider"

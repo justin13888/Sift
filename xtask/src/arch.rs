@@ -5,7 +5,7 @@
 //! reason the graph is checked by a build step rather than by review: a wrong edge is
 //! cheap to add and expensive to remove.
 
-use crate::layers::{ADAPTERS, FORBIDDEN, LAYERS, UNSAFE_PERMITTED, rank};
+use crate::layers::{ADAPTERS, FORBIDDEN, LAYERS, MAY_REACH_THE_ABI, UNSAFE_PERMITTED, rank};
 use crate::meta::{Workspace, workspace};
 use std::collections::BTreeSet;
 
@@ -128,6 +128,12 @@ fn adapters_cannot_see_each_other(ws: &Workspace, out: &mut Vec<String>) {
 /// tripwire made operable: the whole boundary surface stays readable in one place.
 fn the_abi_is_a_leaf(ws: &Workspace, out: &mut Vec<String>) {
     for m in &ws.members {
+        if m.layer
+            .as_deref()
+            .is_some_and(|l| MAY_REACH_THE_ABI.contains(&l))
+        {
+            continue;
+        }
         for dep in ws.internal_deps(m) {
             if dep.name == "sift-abi" {
                 out.push(format!(

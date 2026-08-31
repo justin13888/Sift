@@ -204,12 +204,17 @@ impl LocalIdGenerator {
     pub fn next(&self) -> LocalId {
         let now = now_millis().min((1 << TIMESTAMP_BITS) - 1);
 
-        let packed = self
+        // `fetch_update` yields the value that was there *before* the update. The value
+        // this identity must use is the one that replaced it, so it is recomputed from the
+        // same inputs — `advance` is deterministic, so this is the value that was stored
+        // rather than a guess at it.
+        let previous = self
             .clock
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
                 Some(advance(prev, now))
             })
             .unwrap_or(0);
+        let packed = advance(previous, now);
 
         let millis = u128::from(packed >> SEQUENCE_BITS);
         let sequence = u128::from(packed & SEQUENCE_MAX);
@@ -386,6 +391,48 @@ mod tests {
                 assert!(b > a, "advance({a}, {now}) did not move forward");
             }
         }
+    }
+
+    #[test]
+    fn an_identity_carries_the_time_it_was_minted() {
+        // The bug this exists for: `fetch_update` returns the *previous* value, so an
+        // implementation that uses it directly gives every identity the timestamp of the one
+        // before — and the very first identity from a fresh generator carries zero.
+        //
+        // Two accounts added in one session would then both mint a first message stamped at
+        // the epoch, and D-55's cross-account merge would order them by ordinal rather than
+        // by when they arrived.
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_millis() as u64;
+
+        let first = generator(1).next();
+        assert!(
+            first.millis() >= before,
+            "the first identity from a fresh generator is stamped {} rather than now",
+            first.millis()
+        );
+
+        let g = generator(2);
+        for _ in 0..100 {
+            let id = g.next();
+            assert!(
+                id.millis() >= before,
+                "an identity lagged behind its own generator"
+            );
+        }
+    }
+
+    #[test]
+    fn two_fresh_generators_agree_about_the_present() {
+        // The cross-account consequence: the unified-inbox merge orders on received time
+        // with identity as the tiebreak, so identities that disagree about *now* put two
+        // accounts' first messages in an order nothing chose.
+        let a = generator(1).next();
+        let b = generator(2).next();
+        let gap = a.millis().abs_diff(b.millis());
+        assert!(gap < 1_000, "two generators started {gap} ms apart");
     }
 
     #[test]

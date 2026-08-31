@@ -1,0 +1,36 @@
+[package]
+name = "sift-harness"
+description = "D-65's command-driven shell harness. FR-24's testability claim, taken seriously."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+# A harness prints its results — that is the whole of what it does — so it does not take the
+# workspace's `print_stdout` deny, which exists because a resident mail client writing to a
+# terminal is a defect.
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+todo = "warn"
+dbg_macro = "deny"
+
+[[bin]]
+name = "sift-harness"
+path = "src/main.rs"
+
+[dependencies]
+sift-foundation.workspace = true
+sift-provider.workspace = true
+sift-mutations.workspace = true
+sift-presentation.workspace = true
+sift-store.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"] }
+sift-sync.workspace = true
+sift-scheduler.workspace = true
+sift-subsystem.workspace = true
+sift-alloc.workspace = true

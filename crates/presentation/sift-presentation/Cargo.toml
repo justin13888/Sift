@@ -12,3 +12,6 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+sift-foundation.workspace = true
+sift-provider.workspace = true
+sift-mutations.workspace = true
