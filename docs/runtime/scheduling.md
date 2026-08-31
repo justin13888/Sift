@@ -1,6 +1,6 @@
 # Scheduling and wakeups
 
-**Owns:** D-25, FR-43, NFR-10, NFR-11, NFR-15.
+**Owns:** D-25, D-94, FR-43, NFR-10, NFR-11, NFR-15.
 
 ## The enemy is wakeups, not cycles
 
@@ -40,6 +40,50 @@ than raw timers, and MUST respect low-power and metered states. The mechanism is
 **Backoff on failure.** Reconnection after network loss MUST use exponential backoff with a cap and
 jitter. Hot-looping reconnect is the classic "the mail client ate my battery on a flaky hotspot" bug and
 MUST NOT be possible by construction.
+
+## D-94 — NFR-11 is an application bound wearing a per-account label
+
+**Chosen:** NFR-11 is met when the **total** number of wakeups the application takes at idle is at most
+two per minute, regardless of how many accounts are configured. The per-account wording stands, and this
+states what it composes to.
+**Rejected:** reading it as two per minute per account, which permits ten at five accounts; changing the
+attribution rule so that a coalesced fire counts once.
+
+**Why it needed saying.** [Observability](observability.md) requires that *"a coalesced fire is
+attributed to every account whose work it served, not to the one that happened to set the deadline"*,
+because counting it once *"would let five accounts share a wakeup and report a fifth of one each, which
+is the arithmetic by which a budget is met on paper"*. That rule is right. Composed with NFR-11's
+per-account phrasing, it means a single coalesced fire spends one wakeup against **every** account's
+budget at once — so five accounts sharing two fires per minute is exactly at the limit, and a third fire
+puts all five over. **The budget is therefore two fires per minute for the whole application**, and the
+per-account reading that permits ten is arithmetically excluded by the attribution rule rather than by
+anything NFR-11 says.
+
+**Two consequences, and both are wanted.** An additional account costs **nothing** as long as its work
+joins existing fires — which is the strongest possible statement of what
+D-25's shared wheel is for, and a far better property than "each account may add two". And a
+third fire per minute fails the gate for every account simultaneously, which is correct: at idle, a third
+fire is a coalescing regression and it does not matter which account provoked it.
+
+**Why not fix it by changing the attribution instead.** Counting a coalesced fire once would make NFR-11
+read naturally as ten fires at five accounts, and would make the wheel's central benefit
+*arithmetically invisible in the only metric that measures it* — a design that coalesced nothing and one
+that coalesced perfectly would report the same per-account figure. The attribution rule exists precisely
+to prevent that, so the wording is what gives way.
+
+**This is not [R-3](../open-questions.md).** That risk asks whether two per minute is *achievable* with
+fifteen live connections. This asks what the number means, and the two are independent: if R-3 proves the
+target unreachable and it is raised, the composition stated here is unchanged.
+
+**What it costs:** a requirement whose plain reading is wrong, which is why the row above now points
+here. It also means the gate is insensitive to *which* account regressed, and the per-subsystem and
+per-account attribution [observability](observability.md) requires is what recovers that for diagnosis —
+the gate says the application failed, the counters say where to look.
+
+**Contestable because:** an application bound that does not scale with accounts is unusually strict, and a
+user with ten accounts is asking for more work than a user with one. The defence is that idle is defined
+as no work outstanding, so what is being bounded is the cost of *waiting*, and waiting for ten things
+should not cost more than waiting for one — that is what a timing wheel is.
 
 ## D-25 — A Sift-owned timing wheel on platform timers
 
@@ -91,7 +135,7 @@ Hypotheses, validated against the [reference environment](../product/reference-e
 | ID | Target |
 |---|---|
 | **NFR-10** | Idle CPU at or under 0.1%, averaged over 5 minutes with no network events |
-| **NFR-11** | At most 2 wakeups **per minute** per account at idle — timer fires and socket wakes alike — coalesced onto the shared scheduler |
+| **NFR-11** | At most 2 wakeups **per minute** per account at idle — timer fires and socket wakes alike — coalesced onto the shared scheduler. D-94 below states what that means once coalescing is accounted for, because the two compose to something narrower than the wording suggests |
 | **NFR-15** | Network at idle at or under 1 KB per minute per account, steady-state keepalive |
 
 **NFR-11 counts socket wakes as well as timer fires, and that too is a coherence fix.** It previously said

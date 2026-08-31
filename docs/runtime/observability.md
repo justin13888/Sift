@@ -51,7 +51,26 @@ The [glossary](../glossary.md) defines a subsystem as the unit memory is attribu
 | **Sanitize** | the tree builder, the allowlist policy, and the CSS cascade — stages 3, 4 and 6 |
 | **Broker** | the resource broker, its classification cache, and the filter engine |
 | **Bodyview** | the host side of the body view, and whatever the engine's own processes contribute to [footprint](../glossary.md) |
+| **Governor** | the pressure governor of [D-93](memory-pressure.md) and its tier state |
+| **Logging** | NFR-55's bounded local log buffer, which is a budgeted cache by its own requirement |
 | **Runtime** | the async runtime, thread stacks, and allocator metadata |
+
+**Three placements are not derivable from the rows above and are settled here**, because the partition
+claims exhaustiveness and each of these would otherwise be charged differently by two reasonable readers.
+
+- **A decoded image buffer is Broker's.** [D-29](../rendering/content-blocking.md) decodes in the broker
+  to classify, so the transient buffer belongs to the component that made it, and the durable
+  classification record belongs to **Blobs** because that is where it lives. The dark transform's own
+  working state is **Sanitize**, with the rest of stages 3, 4 and 6. This is exactly the asymmetry D-24
+  below is about — allocated by one subsystem, used by another — and the rule it gives is that the tag
+  follows the allocation, not the use.
+- **A caught panic is counted against the subsystem whose tag was current**, using D-24's task-scoped
+  tag rather than a counter of its own. [D-47](../architecture/overview.md) requires panics be counted
+  per subsystem; a *Panics* row would break exhaustiveness by owning no memory, and the tag is already
+  correct at the [pipeline stage boundary](../rendering/pipeline.md) where the catch sits.
+- **The application shell is Shell's**, alongside the window shells.
+  [UI shell](../architecture/ui-shell.md) separates the two lifetimes, and they are one subsystem for
+  attribution because the distinction that matters here is what the memory *is*, not how long it lives.
 
 **The partition MUST be exhaustive and non-overlapping**, and that is a property of this list rather than
 of the allocator. FR-34's residual is "total footprint minus the sum of declared caches", attributed per
