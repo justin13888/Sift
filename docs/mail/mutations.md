@@ -201,6 +201,71 @@ compensates has one.
 the message and tells the provider it was wrong; it cannot un-train the classifier. Undo promises the
 first and MUST NOT be described as promising the second.
 
+## What the queue guarantees about order
+
+FR-17 batches, FR-38 fans out, and D-51 above lets intents accumulate against a message before any of them
+reaches the server. None of that is safe without an ordering rule, and there was none.
+
+**Intents against one message apply in the order they were issued.** Always, including through batching
+and retry. This is the rule FR-17's batching must be built around rather than discover: *archive* then
+*move* and *move* then *archive* put the message in different places, so a batcher that groups by
+operation type and loses the per-message order produces a wrong final location — silently, without an
+error, and unreproducibly.
+
+**Intents against different messages are unordered**, which is what makes batching possible at all.
+
+**Coalescing is permitted only where the collapsed sequence has the same effect *at the server* as the
+sequence it replaces.** Marking read and then unread within one flush collapses to nothing, and nothing is
+lost. Reporting junk and then not-junk does **not** collapse, even though the message ends where it
+started, because D-40 above establishes that a report trains the provider's classifier — the two
+reports have durable remote effects that the pair of local states does not describe. That is the test:
+coalescing reasons about final state, and an intent whose point is a side effect has no final state to
+reason about.
+
+**An intent expires.** An intent that has not succeeded within a stated period stops being retried, and
+the account enters the *attention* condition in [failure model](../runtime/failure-model.md) with the
+intent still in the queue and still visible under FR-34. It is neither dropped nor retried forever.
+
+Both alternatives are worse in the same direction. Retrying forever means a queue drained after weeks
+offline replays archives onto messages the server has since deleted, handing FR-16 hundreds of conflicts
+to adjudicate at once, on a schedule the user did not choose. Dropping silently loses a mutation the user
+watched succeed, which is the single failure [data model](../storage/data-model.md) says the queue exists
+to prevent. Surfacing is the only option that loses nothing, and it is the same answer NFR-48 already
+gives for an intent that cannot be executed for a different reason.
+
+## Undo is a compensation, which is why FR-15 and FR-38 do not conflict
+
+Read together, FR-15 offers to reverse any intent but permanent delete, and FR-38 forbids rolling back a
+partially applied thread mutation. They look like a contradiction and are not, but the reconciliation was
+never written, so two implementers would build opposite behaviours from the same two paragraphs.
+
+**Undoing a partially applied thread mutation compensates what landed and leaves what did not.** Seven of
+ten archived and three pending becomes seven un-archived and three cancelled where cancellation is still
+possible — never ten un-archived, which would be the rollback FR-38 refuses, and never a refusal to undo,
+which would be FR-15 not applying to the case it is most needed in.
+
+The general form is already in FR-15 and is worth naming here: **a compensation acts on what is true, not
+on what was intended.** That is what makes it safe to offer against an operation whose outcome is partly
+unknown, and it is the same property that lets a compensation run after the original has already reached
+the server.
+
+**A bulk operation under FR-17 is one undoable unit.** A user who archives a selection of five hundred
+undoes the gesture they made, not five hundred gestures they did not.
+
+## An intent whose capability has gone
+
+[Provider model](provider-model.md) requires a probed capability that disappears to be surfaced under
+NFR-29, and [data model](../storage/data-model.md) requires an intent the build does not *recognise* to be
+quarantined. Neither reaches the case in between: an intent that is recognised, was legal when it was
+enqueued, and whose gating capability has since gone away — a queued tag-add against a server that stopped
+advertising arbitrary keywords, or a junk report on an account whose junk-reporting capability has dropped
+to *none*.
+
+**Such an intent MUST be quarantined and surfaced under NFR-48's existing rule, never executed against a
+capability the account no longer declares and never discarded.** The mechanism already exists and needed
+only to be pointed at this case; executing it anyway would be a write to the user's mail on the strength
+of a declaration that has been withdrawn.
+
 ## FR-16 — Conflict resolution
 
 When server state has diverged — the message was already moved or deleted elsewhere — Sift MUST resolve
