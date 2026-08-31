@@ -127,6 +127,27 @@ without UI automation.
 a screen reader. Body content is rendered in a web engine, so this requirement crosses into the
 [rendering pipeline](../rendering/pipeline.md).
 
+**The system's other accessibility preferences are honoured too, and two of them reach decisions made
+elsewhere.** [Dark mode](../rendering/dark-mode.md) says the shell follows the system light or dark
+appearance natively and calls that free in both toolkits; that is true of light and dark and not of the
+rest.
+
+- **Reduced motion** is the one with a design consequence rather than a presentational one, because
+  [D-38](../mail/mutations.md)'s animation carries meaning. That document owns the answer.
+- **Increased contrast** applies to the shell natively, and MUST also raise the threshold the dark
+  transform's contrast repair targets — a user who asked the system for more contrast has not asked for it
+  everywhere except inside the message.
+- **Larger text** must reach the message body as well as the chrome. The body is a separate document that
+  inherits nothing from the platform's text-size preference, so the scaling is applied through the base
+  stylesheet [platforms and distribution](../product/platforms-and-distribution.md) already requires — the
+  same place the font fallback chain is pinned. Without that, "larger text" enlarges everything except the
+  mail, which is the part the user was trying to read.
+
+This is the argument the [roadmap](../product/roadmap.md) already makes for NFR-50 against NFR-27, applied
+to a third case: the *structural* half — a body that can scale, a reconciliation that reads without
+motion, a contrast target that can move — is a P1 shape decision, even though the screen-reader work it
+sits beside is genuine P4.
+
 ## Performance targets
 
 Hypotheses, to be validated against the [reference environment](../product/reference-environment.md).

@@ -91,7 +91,8 @@ reader who thinks the budget is unachievable should say so before the cascade is
    muddies mid-tones and shifts hues.
 5. **Repair contrast.** After transforming, check every text-on-background pair against a perceptual
    contrast model and nudge lightness until it passes. **This step is what separates "usable" from
-   "technically inverted".**
+   "technically inverted".** The threshold is raised where the system's increased-contrast preference is
+   set — see [UI shell](../architecture/ui-shell.md), which owns the rest of that request.
 6. **Classify images, which is where Sift can do better than an extension.** An extension cannot reliably
    sample pixels. Sift decodes in the broker — only when a classification is needed, which is here and
    nowhere else under [D-29](content-blocking.md) — so it can compute a histogram and alpha

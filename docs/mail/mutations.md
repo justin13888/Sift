@@ -359,6 +359,18 @@ trip.
 Animating everything was rejected because it makes the common case — ordinary multi-device convergence —
 noisy, and a correction the user learns to ignore is not a correction.
 
+**The animation is carrying meaning, so it needs a non-animated form.** Both platforms let a user ask for
+reduced motion, and honouring that request would delete the distinction this decision exists to draw —
+the animation is not decoration here, it is the signal that separates "your action failed" from "something
+changed elsewhere". A reduced-motion user would get the silent path for both cases, which is the outcome
+this decision rejects.
+
+So the distinction MUST have an expression that does not depend on movement: under reduced motion the
+correction is accompanied by the same non-blocking notice, and the row is marked as changed by a means the
+platform's own accessibility settings do not suppress. What may not happen is the correction becoming
+silent because the animation was suppressed. Stating it here rather than in a shell is deliberate — a
+shell that quietly dropped the animation would drop half of D-38 without anyone deciding to.
+
 **Implementation is not per shell.** This policy MUST live in the
 [presentation layer](../architecture/presentation-layer.md), which owns optimistic state, so the two
 shells cannot diverge in behaviour. A shell that implemented its own reconciliation would make the two
