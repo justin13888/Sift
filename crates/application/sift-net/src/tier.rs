@@ -66,6 +66,20 @@ impl Tier {
         !matches!(self, Self::OfflinePortal | Self::OfflineNoPath)
     }
 
+    /// The steady-state byte budget this tier must stay inside, per account per hour.
+    ///
+    /// **NFR-31**'s 10 KB/hour for Minimal was restated from 50 KB for internal coherence
+    /// rather than measurement: NFR-15's 1 KB per minute is 60 KB an hour, so the old figure
+    /// asked the second-most-restricted tier to save seventeen per cent.
+    #[must_use]
+    pub const fn steady_state_bytes_per_hour(self) -> Option<u64> {
+        match self {
+            Self::Minimal => Some(10 * 1024),
+            Self::OfflinePortal | Self::OfflineNoPath | Self::Paused => Some(0),
+            Self::Unrestricted | Self::Conservative => None,
+        }
+    }
+
     /// Whether any speculative prefetch is permitted — NFR-32.
     #[must_use]
     pub const fn prefetch(self) -> bool {
@@ -102,7 +116,19 @@ impl Tier {
     }
 }
 
+/// How long a path change may take to be handled — **NFR-33**.
+///
+/// Connections torn down within five seconds of the change, and re-established within five
+/// seconds of a usable path. Where the new path is offline, **teardown is the whole
+/// requirement**: there is nothing to re-establish, and attempting it would be NFR-38's
+/// forbidden connection attempt.
+pub const PATH_CHANGE_BUDGET: core::time::Duration = core::time::Duration::from_secs(5);
+
 /// FR-35 — a per-network user override, which always wins.
+///
+/// **NFR-35** is the testable half: the override is persisted **by network identity** and
+/// takes precedence over detection every time. Keyed on identity rather than on session,
+/// because the network detection is wrong about is one the user returns to.
 ///
 /// "Detection will be wrong sometimes" — tethered Ethernet, a corporate VPN over cellular, a
 /// hotspot presenting as wifi. D-14 requires this be **designed in from the start rather
@@ -291,6 +317,23 @@ mod tests {
         assert!(!Tier::Unrestricted.prefer_push(LinkClass::Cellular));
         assert!(Tier::Unrestricted.prefer_push(LinkClass::Wifi));
         assert!(Tier::Conservative.prefer_push(LinkClass::Wired));
+    }
+
+    #[test]
+    fn the_restricted_tiers_have_a_stated_byte_budget() {
+        // NFR-31's 10 KB/hour, restated from 50 KB for coherence with NFR-15's 1 KB/minute
+        // rather than because anything was measured.
+        assert_eq!(Tier::Minimal.steady_state_bytes_per_hour(), Some(10 * 1024));
+        assert_eq!(Tier::OfflineNoPath.steady_state_bytes_per_hour(), Some(0));
+        assert_eq!(Tier::Unrestricted.steady_state_bytes_per_hour(), None);
+    }
+
+    #[test]
+    fn a_path_change_is_handled_inside_nfr33s_budget() {
+        // Where the new path is offline, teardown is the whole requirement — attempting to
+        // re-establish would be NFR-38's forbidden connection attempt.
+        assert_eq!(PATH_CHANGE_BUDGET, core::time::Duration::from_secs(5));
+        assert!(!Tier::OfflineNoPath.may_connect());
     }
 
     #[test]

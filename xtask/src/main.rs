@@ -11,6 +11,7 @@ mod header;
 mod invariants;
 mod layers;
 mod meta;
+mod trace;
 
 use std::process::ExitCode;
 
@@ -28,16 +29,19 @@ fn main() -> ExitCode {
         }
         Some("invariants") => invariants::run(),
         Some("coverage") => invariants::coverage(),
+        Some("trace") => trace::run(),
         Some("all") | None => arch::run()
             .and_then(|()| invariants::run())
             .and_then(|()| deps::run(false))
-            .and_then(|()| header::check()),
+            .and_then(|()| header::check())
+            .and_then(|()| trace::run()),
         Some(other) => Err(format!(
             "unknown task `{other}`\n\n\
              arch        the crate graph of D-59: one-way edges, the ABI a leaf, unsafe in four places\n\
              invariants  the prohibitions docs/ states as code-review rules\n\
              deps        the third dependency gate: new edges reviewed rather than absorbed\n\
              header      D-60's generated C header, and the drift check over it\n\
+             trace       every requirement is named somewhere a reader can find it\n\
              coverage    which crates each invariant rule currently covers\n\
              all         all of the above (default)"
         )),

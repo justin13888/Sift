@@ -47,6 +47,8 @@ jobs:
         run: cargo xtask deps
       - name: D-60 — the committed header matches the ABI crate
         run: cargo xtask header
+      - name: Traceability — every requirement is named in the source
+        run: cargo xtask trace
 
   # Gates 1 and 2 of the dependency policy. Each fails the build rather than warning.
   dependencies:

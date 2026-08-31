@@ -1,5 +1,10 @@
 //! D-4, D-55 — the unified inbox, and the order it is assembled in.
 //!
+//! **FR-7** is the requirement: a unified inbox across accounts, in the first release.
+//! D-4 schedules it late precisely so it can be cut without stranding work — and **NFR-2**
+//! is what makes the cutting question live, because a warm folder or account switch has to
+//! stay under 50 ms at p95 and this merge is on that path.
+//!
 //! # Why this is the expensive part of D-6
 //!
 //! D-6 gives every account its own database, which buys parallel writers, an account removal
@@ -203,6 +208,37 @@ mod tests {
         assert!(
             first_page[0].duplicate_of_another_account,
             "the mark needed the whole set to be right"
+        );
+    }
+
+    #[test]
+    fn merging_is_a_merge_rather_than_a_sort_of_everything() {
+        // NFR-2 budgets a warm switch at 50 ms p95, and this is on that path. The per-account
+        // queries already produced D-55's order, so the work here is proportional to what is
+        // shown rather than to what is held — which is the property that keeps a five-account
+        // switch from being a five-account sort.
+        let streams: Vec<Vec<Row>> = (0..5)
+            .map(|a| {
+                (0..2_000)
+                    .map(|i| {
+                        row(
+                            a * 10_000 + i,
+                            a,
+                            1_000_000 - u64::try_from(i).unwrap(),
+                            i as u64,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        let page = merge_page(&streams, 0, 50);
+        let elapsed = start.elapsed();
+        assert_eq!(page.len(), 50);
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "a five-account first page took {elapsed:?}; NFR-2's budget is 50 ms on the \
+             reference rig, and this machine is not it"
         );
     }
 

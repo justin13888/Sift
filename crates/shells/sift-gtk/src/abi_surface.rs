@@ -47,6 +47,36 @@ pub fn default_bindings() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// **NFR-27** — the list, the reader, and message body content must all be navigable and
+/// announced by a screen reader.
+///
+/// Three surfaces, and the third is the hard one: NFR-50's bridge has to cross the body
+/// view's process and sandbox, and R-14 says that has never been shown to happen under the
+/// five properties working against it. On Linux it additionally needs the accessibility bus
+/// reachable from inside the Flatpak sandbox.
+///
+/// NFR-27 and NFR-50 read as one requirement and are not. NFR-50 — that isolation does not
+/// sever the tree — is gated in P1, because the sanitizer allowlist that decides whether
+/// alternative text and table structure survive is authored there. NFR-27's screen-reader
+/// support across the list and the reader is genuine later work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnouncedSurface {
+    List,
+    Reader,
+    /// The one that depends on NFR-50's bridge existing at all.
+    BodyContent,
+}
+
+impl AnnouncedSurface {
+    pub const ALL: &'static [Self] = &[Self::List, Self::Reader, Self::BodyContent];
+
+    /// Whether this surface can be announced without the body view's bridge.
+    #[must_use]
+    pub const fn independent_of_the_body_view_bridge(self) -> bool {
+        !matches!(self, Self::BodyContent)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +125,19 @@ mod tests {
             .find(|(id, _)| *id == "app.close-window")
             .expect("close is bound");
         assert_ne!(quit.1, close.1);
+    }
+
+    #[test]
+    fn all_three_surfaces_must_be_announced() {
+        // NFR-27. Two of them are ordinary native accessibility work; the third depends on a
+        // bridge R-14 says has never been shown to cross the body view's process and sandbox.
+        assert_eq!(AnnouncedSurface::ALL.len(), 3);
+        assert!(AnnouncedSurface::List.independent_of_the_body_view_bridge());
+        assert!(AnnouncedSurface::Reader.independent_of_the_body_view_bridge());
+        assert!(
+            !AnnouncedSurface::BodyContent.independent_of_the_body_view_bridge(),
+            "body content was assumed announceable without the bridge NFR-50 gates on"
+        );
     }
 
     #[test]

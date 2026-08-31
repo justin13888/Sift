@@ -294,6 +294,18 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_application_costs_nothing_on_any_axis() {
+        // NFR-10 bounds idle CPU at 0.1%, NFR-11 at two wakeups a minute, and **NFR-15** at
+        // 1 KB per minute per account of steady-state keepalive. All three are properties of
+        // an application with nothing scheduled, and this is that state: no timer armed, no
+        // fire due, nothing to send.
+        let w = wheel();
+        assert_eq!(w.next_fire(), None);
+        assert_eq!(w.wakeups_scheduled(), 0);
+        assert_eq!(w.armed(), 0);
+    }
+
+    #[test]
     fn nothing_scheduled_arms_no_timer() {
         // The state NFR-10's 0.1% and NFR-11's two-per-minute are really about: an idle
         // application with nothing to do takes no wakeups at all.

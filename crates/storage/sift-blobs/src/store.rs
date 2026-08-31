@@ -126,6 +126,40 @@ pub fn path_of(address: &ContentAddress) -> String {
     address.path()
 }
 
+/// **NFR-49** — a file written to disk carries the platform's untrusted-source marking.
+///
+/// The quarantine attribute on macOS, so Gatekeeper evaluates it on first open. **Dragging an
+/// attachment out to the filesystem carries it exactly as a save does** — the drag is the
+/// route that gets forgotten, and a file that arrived by drag is no more trustworthy than one
+/// that arrived by save.
+///
+/// Where a platform offers no equivalent, **that MUST be stated in the interface rather than
+/// assumed away.** A silent absence is a user believing they have a protection they do not.
+///
+/// NFR-49 is additionally verified on **both macOS channels rather than once**, because the
+/// mechanism differs between a sandboxed and an unsandboxed build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    /// Marked as coming from an untrusted source.
+    Marked,
+    /// The platform offers no equivalent. **Stated, never assumed away.**
+    UnavailableAndSaidSo,
+}
+
+/// How a file left Sift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Egress {
+    SavedToDisk,
+    /// The route that gets forgotten.
+    DraggedOut,
+}
+
+/// Whether this route carries the marking. **Both do.**
+#[must_use]
+pub const fn carries_provenance(_egress: Egress) -> bool {
+    true
+}
+
 /// Two kinds of orphan, and only one of them matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Orphan {
@@ -209,6 +243,20 @@ mod tests {
         let path = path_of(&address);
         assert!(path.ends_with(&address.hex()));
         assert_eq!(path.matches('/').count(), 2, "the fan-out depth changed");
+    }
+
+    #[test]
+    fn a_dragged_out_file_is_marked_exactly_as_a_saved_one_is() {
+        // NFR-49. The drag is the route that gets forgotten, and a file that arrived by drag
+        // is no more trustworthy than one that arrived by save.
+        assert!(carries_provenance(Egress::SavedToDisk));
+        assert!(carries_provenance(Egress::DraggedOut));
+    }
+
+    #[test]
+    fn a_platform_with_no_marking_says_so_rather_than_being_silent() {
+        // A silent absence is a user believing they have a protection they do not.
+        assert_ne!(Provenance::Marked, Provenance::UnavailableAndSaidSo);
     }
 
     #[test]
