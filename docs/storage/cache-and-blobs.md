@@ -1,6 +1,6 @@
 # Cache and blobs
 
-**Owns:** D-23, D-57, FR-10, FR-12, NFR-14, NFR-49, NFR-52, NFR-53.
+**Owns:** D-23, D-57, D-73, FR-10, FR-12, NFR-14, NFR-49, NFR-52, NFR-53.
 
 ## The cache is not the source of truth
 
@@ -183,6 +183,53 @@ available"**.
 These are different facts and conflating them is a lie of omission. "Not cached" means Sift can fetch it
 when the network returns. "Not available" means the server no longer has it. A user deciding whether to
 find another way to reach a message needs to know which they are looking at.
+
+## D-73 — Offline is best-effort, and there is no floor
+
+**Chosen:** bodies are cached because a user read them, plus opportunistic prefetch on an unmetered
+network. Sift promises no quantity of mail readable without a network, and MUST NOT be built around one.
+**Rejected:** a stated retention target that sync actively fills; requiring a network, and treating the
+store as a pure latency cache.
+
+**Why this needed a decision at all.** Sift's position on offline was correct in four documents and
+asserted in none. This one opens with the cache never being authoritative; FR-12 above requires any
+cached message to be readable; [D-58](../runtime/network-conditions.md) gives offline two tiers that
+queue everything; and the mutation queue survives weeks without a network. A reader can hold all four and
+still not know whether offline usefulness is a **promise**. It is not, and the difference decides whether
+[D-53](../mail/sync-engine.md)'s no-bodies-during-backfill rule is a limitation to be worked around or
+the design.
+
+**Why no floor.** A guaranteed corpus of recent mail means sync fetching bodies nobody asked for — which
+is the body backfill D-53 refuses, on the grounds that *"a backfill that fetches body text for half a
+million messages to fill one column is a different product"*. It would also spend a user's data
+allowance on a prediction, in an application whose network behaviour is otherwise governed entirely by
+what the user did. Best-effort keeps FR-12's *"not cached"* state honest: it is the truthful report of a
+cache, rather than the symptom of a promise that went unmet.
+
+**Why not the other direction either — requiring a network buys nothing.** It is worth stating because
+the trade looks appealing and is not: **snappiness does not come from the body cache.** The list, search
+and triage are local reads off envelopes in every design, and an uncached body is already budgeted at
+NFR-4's 600 ms. Requiring a network would therefore leave the store, its encryption, its eviction and its
+budgets exactly as they are — the envelope cache is what NFR-1, NFR-2 and NFR-5 are about — while adding
+a round trip to every message open and stranding the durable queue, which exists so that triage survives
+a bad network.
+
+**The counterweight, which is what licenses everything else.** Because there is no floor, **every byte on
+this machine is discardable**, which is this document's opening claim taken to its conclusion. That is
+what permits shedding under pressure without a correctness argument each time, what permits
+[encryption](encryption.md) to define a strict on-disk format that refuses rather than repairs, and what
+makes [D-32](data-model.md)'s removal-and-resync path an acceptable last resort rather than data loss. A
+guaranteed offline corpus would have quietly withdrawn all three, because a store you promised something
+about is a store you cannot throw away.
+
+**What it costs:** a user who boards a plane without opening their mail first has envelopes, search over
+those envelopes, and few bodies. That is a real disappointment and it is the honest one, since the
+alternative was to have downloaded their mail on cellular to prepare for it.
+
+**Contestable because:** "read it before you lose signal" is a workflow users should not have to know,
+and a small floor — the current folder's visible screen, say — would cover most of the disappointment for
+little data. The reason it is not here is that any floor makes offline a promise, and a promise makes the
+cache undiscardable, which is the property the rest of the design spends.
 
 ## NFR-14, NFR-52 — Two budgets, and together they are the whole of disk
 
