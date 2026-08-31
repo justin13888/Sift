@@ -112,7 +112,7 @@ The other two are bounded. Q-9 needs a number per provider and now has a rule th
 in the meantime. Q-13 asks whether one feature works on one platform. Neither reaches a decision.
 
 Q-8 — the fallback join when the internet message identifier is absent or duplicated — was the fourth, and
-is now [D-44](storage/data-model.md). What it leaves behind is a risk rather than a question: R-5, that the
-headers D-44 corroborates against are assumed rather than measured to survive transit.
+is now [D-44](storage/data-model.md). What it leaves behind is a risk rather than a question: R-5, that
+the headers D-44 corroborates against are assumed rather than measured to survive transit.
 
 Everything not on that list is decided.

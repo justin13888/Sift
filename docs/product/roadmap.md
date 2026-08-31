@@ -82,13 +82,14 @@ NFR-36 is absent because it is struck — see [requirements](../requirements.md)
 
 Seven assignments are not obvious from the phase descriptions, and each is a claim worth disagreeing with:
 
-**FR-13 and FR-14 are P1, not P3.** The slice ships archive, and archive is an intent applied optimistically
-through a durable queue. The mechanism cannot be added afterwards without rewriting how the slice mutates
-anything. P3 ships the rest of the set — undo, conflict resolution, bulk, fan-out, junk — which is what
-"triage depth" means once the mechanism exists.
+**FR-13 and FR-14 are P1, not P3.** The slice ships archive, and archive is an intent applied
+optimistically through a durable queue. The mechanism cannot be added afterwards without rewriting
+how the slice mutates anything. P3 ships the rest of the set — undo, conflict resolution, bulk,
+fan-out, junk — which is what "triage depth" means once the mechanism exists.
 
-**FR-33 and FR-34 are P1.** This phase already requires instrumenting NFR-1, NFR-3, NFR-5, NFR-8 and NFR-10
-from the first commit, and the per-message debug view and the runtime panel are the surfaces that do it.
+**FR-33 and FR-34 are P1.** This phase already requires instrumenting NFR-1, NFR-3, NFR-5, NFR-8 and
+NFR-10 from the first commit, and the per-message debug view and the runtime panel are the surfaces that
+do it.
 This is the retrofit argument P0 makes for the soak harness, one phase later.
 
 **FR-28 and FR-30 are P1.** A phase that renders HTML bodies under FR-8 cannot defer synthetic origin or
