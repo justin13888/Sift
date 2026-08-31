@@ -148,6 +148,10 @@ thing in the store that the provider does not know about, which
 Excluding the whole data directory would therefore make queued triage the single unrecoverable loss in the
 product, quietly, as a side effect of a storage-efficiency decision.
 
+**This is implementable only because an account is two files.** Backup exclusion operates on files, so
+"exclude the store and not the queue" is not an operation that exists while both live in one database.
+[D-74](data-model.md) splits them, and this decision is what forced the split.
+
 **What it costs:** two exclusion scopes rather than one, and a restore that produces an account with
 pending mutations and no cached bodies — a state that must be correct, and which the cache-is-not-the-
 source-of-truth framing at the top of this document already requires it to be.

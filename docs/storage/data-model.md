@@ -2,7 +2,7 @@
 
 What Sift stores, and how it is partitioned.
 
-**Owns:** D-6, D-21, D-32, D-44, NFR-48.
+**Owns:** D-6, D-21, D-32, D-44, D-74, NFR-48.
 
 ## D-6 — One database per account
 
@@ -17,9 +17,81 @@ of corruption to one account.
 assembled in memory by merging per-account result streams, and correct paging over that merge is the main
 cost of this decision.
 
+**"One database per account" is one *store* per account, and D-74 below adds a second file.** Everything
+this decision argues — parallel writers across accounts, removal as a deletion, corruption contained to
+one account — holds unchanged over the pair. What changes is that the account's undiscardable half is not
+in the same file as its discardable one, for reasons D-57 forced and D-73 explains.
+
 **Contestable because:** the unified inbox is a shipped feature (D-4), so the cost is paid in the default
 view rather than an edge case. If the merge proves to be the dominant complexity in the presentation
 layer, this decision is the one to revisit.
+
+## D-74 — An account is two files: a store that may be discarded, and a journal that may not
+
+**Chosen:** each account is a **store** — envelopes, messages, threads, folder sync state, the full-text
+index, account policy — and a separate **journal** holding the mutation queue and the pending overlays
+attached to it. Both are versioned, migrated and encrypted alike; only the journal is backed up.
+**Rejected:** one file per account, which is what D-6 above previously implied.
+
+**Why this was forced rather than chosen.** [D-57](cache-and-blobs.md) excludes *"the account databases'
+cache-shaped content"* from platform backup and states that *"the mutation queue is not excluded"*.
+Backup exclusion is a property of a **file**. With the queue inside the account database there is no
+operation that expresses D-57, and the decision was unimplementable as written — not marginally, but in
+the sense that no correct build could satisfy it.
+
+**Why the split falls exactly here.** [D-73](cache-and-blobs.md) makes every byte of the cache
+discardable, and the queue is the one thing in an account that is not: it holds intents the provider has
+never heard of, which is D-57's own argument and D-32's reason below for requiring a drain before a
+destructive resync. **A file is the unit of discarding as well as
+the unit of backup**, so putting the discardable and the undiscardable in one file makes them share a
+fate in both directions. Splitting them turns three separate operations — exclude from backup, discard a
+corrupt store, remove an account — from awkward into obvious.
+
+The corruption path is where the gain is largest. [Failure model](../runtime/failure-model.md) requires
+that *"the queue is drained or exported before anything is destroyed"* and that *"draining first is not
+optional"*, while [D-42](encryption.md) says a page that fails authentication *"MUST NOT be treated as a
+recoverable read error"*. Those two compose badly on one file: the queue that must be drained lives in
+the pages that cannot be trusted. With two files the store can be discarded whole and the journal read
+independently, and the rule becomes executable instead of aspirational.
+
+**What stays in one transaction, and what only needs ordering.** The atomicity D-6's neighbours depend on
+is entirely within the store: *"advancing a cursor and applying the change it describes MUST commit in
+one transaction"* is a store-only statement and is unaffected. The cross-file relationship is an
+**ordering** rather than an atomicity requirement, and it was already written that way —
+[failure model](../runtime/failure-model.md) says an intent *"MUST be durably enqueued before it is
+applied optimistically to local state"*, which is satisfied by writing the journal first and the store
+second. There is no operation in this design that must commit to both files at once.
+
+The failure mode of that ordering is stated rather than left implied: a crash between the two leaves an
+intent enqueued whose optimistic effect was never applied. That is invisible to the user, and it is
+self-correcting, because the overlay is derived from the queue rather than stored independently of it.
+The reverse order would lose a mutation the user watched succeed, which is why the order is normative.
+
+**The overlay is read from memory, not from the journal, on the message path.**
+[D-51](../mail/mutations.md) makes the overlay small and short-lived and retires it with the intent that
+created it, so it is reconstructible from the queue. It is held in memory and rebuilt at startup, which
+is what keeps a cross-file read off the path NFR-2 and NFR-3 measure. It is written to the journal
+because it must survive termination, not because it is read from there.
+
+**Both files version and migrate together.** D-32's forward-only rule and NFR-48 apply to the pair, and a
+build MUST refuse to open an account whose two halves disagree about their version. The alternative — two
+independently versioned files — would produce a store migrated past a journal it can no longer interpret,
+which is the intent-quarantine case NFR-48 already handles arriving through a door nobody would think to
+guard.
+
+**Account removal is still a deletion**, which was D-6's argument, and is now the deletion of two files
+plus the blob refcount decrement [FR-4](../mail/accounts.md) already requires.
+
+**What it costs:** two file handles, two schema versions, and a second place a reviewer must look before
+believing an account has been fully erased. Also a genuine loss of atomicity that D-6's single file gave
+for free — enqueue-then-apply is now two durable writes rather than one, and the cost of that ordering is
+a real `fsync` on the path NFR-7 budgets at 16 ms.
+
+**Contestable because:** D-57's queue exception is what forces this, and D-57 is itself contestable — an
+account restored onto a new machine has pending mutations, no bodies, and, if the credential material did
+not travel, no way to read either file. If D-57 were reversed to exclude only the blob store, the queue
+could stay in the account database and this decision disappears. That is the thing to revisit if the
+restore story turns out worse than the exclusion is worth.
 
 ## D-21 — The embedded database is SQLite
 
@@ -59,7 +131,7 @@ Per-account, unless noted.
 | Thread | remote thread identifier, normalized subject, last activity, message count | scoped to the account — see [threading](../mail/threading.md) |
 | Tag | tag identity and display name, and its membership | present only where the account declares tag support |
 | Full-text index | subject, body text, sender text, recipient text | see [search](search.md) |
-| Mutation queue | serialized intent, intent schema version, state, attempt count, creation time, per-message sequence, expiry, and the pending overlay the intent contributes | durable across process death *and upgrades* — see [mutations](../mail/mutations.md). The overlay lives here because it is retired with the intent that created it, never independently |
+| Mutation queue — in the account **journal** rather than the store, per D-74 | serialized intent, intent schema version, state, attempt count, creation time, per-message sequence, expiry, and the pending overlay the intent contributes | durable across process death *and upgrades* — see [mutations](../mail/mutations.md). The overlay lives here because it is retired with the intent that created it, never independently |
 | Blob reference | content hash, role | the account's claim on a shared blob; refcounts live elsewhere, see below |
 | Authentication result | per message: signing domain, sender-policy and alignment outcomes | feeds the [synthetic origin](../rendering/sender-origin.md) |
 | Account policy | per-sender remote-content allowlist, per-sender dark-mode choice, notification rules per folder | user decisions scoped to this account — see below |
