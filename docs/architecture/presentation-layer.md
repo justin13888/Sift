@@ -2,7 +2,7 @@
 
 The shared Rust layer that makes two native shells affordable.
 
-**Owns:** D-4, D-18, D-41, FR-7, FR-40, NFR-51.
+**Owns:** D-4, D-18, D-41, D-55, FR-7, FR-40, NFR-51.
 
 ## Purpose
 
@@ -82,6 +82,45 @@ know which of two odd-looking states they are in.
 issued against, and the marking is a display property computed at merge time by comparing the fallback
 identity digests D-44 already stores. Nothing durable is written, and no candidate crosses an account
 boundary.
+
+## D-55 — The list is ordered by when the server received the message
+
+**Chosen:** the **server-assigned received time** is the authoritative sort key, with local identity as a
+stable tiebreak. The `Date` header is what the reader displays and is never what the list is ordered by.
+**Rejected:** ordering on the `Date` header; ordering on received time with no defined tiebreak.
+
+**Why the header cannot order the list.** It is written by the sender, and the sender is the adversary the
+[threat model](../security/threat-model.md) is built around. A message dated ten years in the future pins
+itself to the top of the inbox permanently, on every device, and no triage action removes it because
+nothing about it is wrong except a header nobody validates. That is a defect a sender can cause on
+purpose, at no cost, and it is one this documentation set would otherwise have shipped without noticing —
+the header is not in the attacker-controlled-input table's list of things that reach a decision.
+
+Received time is not attacker-controlled: every provider Sift targets assigns one, and it is the order the
+user has already seen in that provider's own web interface, which is the same argument
+[threading](../mail/threading.md) uses for preferring provider conversation identifiers.
+
+**Why the tiebreak is load-bearing rather than a detail.** D-4 above merges per-account result
+streams in memory, because [D-6](../storage/data-model.md) forbids cross-account SQL. A merge needs a
+**total** order: with equal keys and no tiebreak, two accounts' rows may interleave differently on
+successive merges, so paging can duplicate or skip a row, and D-18 below cannot state where a row
+moved because there is no stable answer. Received times collide routinely — bulk mail delivered in the
+same second is the common case, not the exotic one.
+
+**One consequence worth stating rather than discovering.** NFR-51 makes collation locale-aware, and any
+sort that falls back to a text comparison must use **the same comparator** in each account's own query and
+in the in-memory merge. A merge that compares differently from the queries feeding it produces a wrong
+sequence while every per-account result is individually correct — which is the hardest kind of ordering
+bug to see.
+
+**What it costs:** an indexed column per account database that is not the header the user sees, and a
+reader that can show a date differing from the row's position in the list. That divergence is real and is
+the honest one: the header says when the sender says they wrote it, and the list says when it arrived.
+
+**Contestable because:** for the overwhelming majority of mail the two agree, so this buys correctness in
+a case most users never meet, at the price of a second timestamp in the schema and a permanent small
+inconsistency between the list and the reader. A reader who thinks that is the wrong trade should argue
+for displaying received time as well, not for ordering on the header.
 
 ## D-18 — View models are observed, and observation is cancellable
 

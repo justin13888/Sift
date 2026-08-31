@@ -68,6 +68,18 @@ resume, and cancellation among them. NFR-38's "no retry storm on wake" is a prop
 specifically, and it MUST handle a system wake as an explicit event rather than discovering it through
 expired timers.
 
+**The wheel runs on a monotonic clock, and that is normative rather than incidental.** A wall clock moves
+when the system corrects its time or the offset changes, and every deadline armed behind the new reading
+fires at once — five accounts' worth, simultaneously, from the component whose own requirement forbids
+exactly that. NFR-38's retry storm would arrive from the ordinary operation of time synchronization rather
+than from a network event.
+
+Where an interval must align to wall-clock instants — NFR-37's aligned polls, which exist so that several
+accounts wake together — the alignment is computed against the wall clock and the resulting deadline is
+armed on the monotonic one, so a correction moves the *next* alignment rather than firing every deadline
+already set. A system wake re-derives deadlines from the current time as the explicit event above
+requires, rather than letting a monotonic clock that did not advance during sleep decide nothing is due.
+
 **Contestable because:** it is a component built rather than used, in a project that elsewhere argues
 against that. The justification is narrow — the platform hint is unavailable any other way — and if
 measurement shows the runtime's timer meets NFR-11 regardless, this decision does not earn itself.

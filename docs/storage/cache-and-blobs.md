@@ -22,6 +22,11 @@ set contradicted its own hard constraint. See NFR-52.
 **Bodies and attachments are bounded.** Default budget: 90 days or 2 GB, whichever binds first, evicted
 least-recently-used. The budget is user-configurable.
 
+The ninety days is wall-clock age and the last-use ordering is recorded on the same clock, so that the two
+halves of one policy cannot disagree after a time correction. This is the opposite choice from the
+[timing wheel](../runtime/scheduling.md), and deliberately: a retention policy is about calendar time,
+while a deadline is about elapsed time.
+
 ## Blob store
 
 Bodies and attachments live in a **content-addressed store on disk**, keyed by a **keyed** cryptographic
