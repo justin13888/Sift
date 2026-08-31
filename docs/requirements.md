@@ -78,7 +78,7 @@ two homes and one of them would go stale.
 | ID | Requirement | Owner |
 |---|---|---|
 | NFR-8 | Resident idle footprint with no window open at or under 90 MB, excluding the filter engine — a placeholder pending P0 measurement | [runtime/memory-pressure](runtime/memory-pressure.md) |
-| NFR-9 | Full application idle footprint, window open, at or under 150 MB, inclusive of NFR-42 | [runtime/memory-pressure](runtime/memory-pressure.md) |
+| NFR-9 | Full application idle footprint, window open and no reader visible, at or under 150 MB, inclusive of NFR-42 | [runtime/memory-pressure](runtime/memory-pressure.md) |
 | NFR-10 | Idle CPU at or under 0.1% over 5 minutes | [runtime/scheduling](runtime/scheduling.md) |
 | NFR-11 | At most 2 timer wakeups per minute per account at idle | [runtime/scheduling](runtime/scheduling.md) |
 | NFR-12 | Footprint growth at or under 5% over 14 days: no ratchet | [runtime/memory-pressure](runtime/memory-pressure.md) |

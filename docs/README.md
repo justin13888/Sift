@@ -103,7 +103,7 @@ claim than settled, and the distinction between the two groups is the useful par
 The three that can still move the design: Q-10 leaves every number in this set unfalsifiable until the
 reference rig is recorded. Q-11 is an unclosed injection path into every message body, in a product whose
 central claim is about hostile input. And **Q-12 belongs in this group rather than the next one**: it is
-usually described as two numbers needing measurement, but [its own entry](open-questions.md) and
+usually described as a set of numbers needing measurement, but [its own entry](open-questions.md) and
 [process model](architecture/process-model.md) both say a bad Linux figure reopens D-2 — the process
 model, which is the second document in the reading order and the thing most of the rest hangs from. A
 question that can reverse a settled structural decision is not bounded, whatever its units.

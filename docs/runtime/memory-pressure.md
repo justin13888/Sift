@@ -96,7 +96,7 @@ as `phys_footprint` on macOS and PSS on Linux, never RSS — see [observability]
 | ID | Target |
 |---|---|
 | **NFR-8** | Resident idle footprint with no window open at or under 90 MB at the reference corpus, **excluding the filter engine**, which is not loaded in this state |
-| **NFR-9** | Full application idle — window open, body view warm, filter engine loaded — at or under 150 MB, **inclusive of NFR-42's 40 MB** |
+| **NFR-9** | Full application idle — window open, **no reader visible**, filter engine loaded — at or under 150 MB, **inclusive of NFR-42's 40 MB**. The reading peak is a different state, and no requirement budgets it yet — see below |
 | **NFR-12** | Footprint growth at or under 5% over 14 days of continuous uptime: **no ratchet** |
 | **NFR-13** | L2 shedding is **issued** within 500 ms of the signal, L3 within 1 second — see the note on the two clocks below |
 
@@ -118,14 +118,25 @@ must instead absorb toolkit residue, and the Linux figure is expected to be the 
 GTK4's renderer loads a graphics driver stack it cannot unload. P0 MUST measure both platforms and replace
 this number; it is a placeholder standing in for a measurement, not an estimate anyone should defend.
 
-**NFR-9's number inherits that placeholder and adds a second doubt of its own.** Decomposed against the
-figures on this page it reads: 90 MB of window-less floor, plus NFR-42's 40 MB of filter engine, leaving
-**20 MB for the live window and a warm body view together** — and the body view is a WebKit content
-process, the largest single allocation in the running application and the one L2 exists to reclaim. Twenty
-megabytes for both is not a target anyone should expect to meet. The pair MUST be re-derived together once
-P0 has measured toolkit residue and a warm body view, rather than NFR-8 being replaced in isolation: they
-are one budget stated at two lifecycle points, and moving either without the other reintroduces exactly
-the incoherence the tier targets above were just corrected for. Tracked with NFR-8's placeholder in
+**NFR-9's number inherits that placeholder, and its own definition contradicted another requirement.** It
+previously read "window open, body view warm", but NFR-46 in
+[webview isolation](../rendering/webview-isolation.md) requires the body view to be torn down after a
+configured period with no reader visible. The idle state this target names is the state *after* that
+teardown, so it cannot hold a warm view, and NFR-9 now says so. That is a coherence fix, not a
+measurement.
+
+**The repair is not a rescue.** Decomposed against the figures on this page the target still reads: 90 MB
+of window-less floor, plus NFR-42's 40 MB of filter engine, leaving **20 MB for a live window** — tight
+rather than arithmetically hopeless, which is what the previous reading was when it asked those same
+20 MB to hold a WebKit content process as well.
+
+**What the repair exposes is a third state that no requirement budgets.** Reading a message means the
+window, the filter engine, and a warm body view at once, and that view is the largest single allocation in
+the running application — the one L2 exists to reclaim. It sits above L0, it is what a user sees for most
+of the time they are actually using Sift, and no NFR names it. NFR-8, NFR-9 and that reading peak MUST be
+re-derived together once P0 has measured toolkit residue and a warm body view: they are one budget stated
+at three lifecycle points, and moving any one of them alone reintroduces exactly the incoherence the tier
+targets above were just corrected for. Tracked with NFR-8's placeholder in
 [open questions](../open-questions.md).
 
 **NFR-13 and NFR-46 measure different clocks, and the distinction is normative.** NFR-13 bounds the time

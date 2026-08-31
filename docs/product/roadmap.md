@@ -14,7 +14,7 @@ Nothing else starts until these resolve. Each is capable of invalidating a settl
 |---|---|
 | Hardened body webview on both platforms against the hostile-HTML corpus | [D-3](../rendering/webview-isolation.md), invariant N-1 |
 | Memory soak harness with allocation attribution | [D-1](../architecture/ui-shell.md), NFR-12, and [D-24](../runtime/observability.md)'s attribution overhead against NFR-44 |
-| Toolkit residue measured on both platforms, window destroyed and allocator collected; a warm body view measured alongside it | [D-2](../architecture/process-model.md) and **NFR-8's and NFR-9's numbers**, which are currently placeholders and MUST be re-derived together — see [Q-12](../open-questions.md) |
+| Toolkit residue measured on both platforms, window destroyed and allocator collected; a warm body view measured alongside it | [D-2](../architecture/process-model.md) and **NFR-8's and NFR-9's numbers, with the reading peak neither of them names**, which are placeholders and MUST be re-derived together — see [Q-12](../open-questions.md) |
 | Sandboxed login-item residency on macOS | whether the App Store is a channel at all — [D-33](platforms-and-distribution.md) |
 | Google OAuth restricted-scope verification path | the top business risk — see [credentials](../security/credentials.md) |
 
@@ -24,10 +24,11 @@ which states the same phase requirement.
 
 **The toolkit-residue spike is what makes NFR-8 a number rather than a guess.** It is listed here rather
 than in P1 because [D-2](../architecture/process-model.md) rests on it, and because the Linux figure is
-the one most likely to invalidate a settled decision. It MUST also measure a warm body view, because
-NFR-9 is NFR-8 plus the filter engine plus a live window plus that view, and the shed-tier targets are
-stated as subtractions from the pair — replacing one of them alone leaves the tiers describing a budget
-that no longer exists.
+the one most likely to invalidate a settled decision. It MUST also measure a warm body view — not because
+NFR-9 contains one, since NFR-46's teardown means it cannot, but because the state that *does* contain one
+is what reading a message costs and no requirement budgets it. The shed-tier targets are stated as
+subtractions from that family of figures, so replacing any one of them alone leaves the tiers describing a
+budget that no longer exists.
 
 ## P1 — Vertical slice
 
