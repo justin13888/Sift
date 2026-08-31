@@ -149,6 +149,19 @@ unreadable — a hard-cap-bounded cache the provider can refill, but a visible a
 same. It MUST therefore be covered by the same key-identifier rule as everything else below, so that a
 store orphaned by a lost secret is recognisable as such rather than merely corrupt.
 
+**Recognising an orphaned store is not the same as handling it, and the gap between the two is not
+benign.** The shared blob index holds the reference counts, and the index is encrypted under the same lost
+secret — so an installation that cannot read it can neither enumerate the store, nor collect from it, nor
+evict from it. NFR-14 in [cache and blobs](cache-and-blobs.md) is a hard cap enforced by eviction, and
+eviction reads the index. An orphaned store is therefore not merely unreadable: it is unbounded disk that
+the one requirement bounding disk can no longer reach.
+
+**An orphaned store MUST therefore be discarded wholesale rather than retained.** Every blob under a key
+identifier whose secret is gone is unrecoverable by construction, and this is a cache the provider
+refills — the same reasoning D-22 above already accepts when it makes an account's blobs unreadable on
+removal. Discarding costs a refetch of whatever the user opens next. Retaining costs a permanently
+unaccountable directory that grows once and never shrinks.
+
 **Contestable because:** it accepts a single per-installation secret whose compromise re-enables the
 confirmation attack across every account at once, where per-account derivation would contain it — at the
 cost of the cross-account deduplication D-22 went to some length to preserve. That trade is the whole
