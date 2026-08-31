@@ -473,6 +473,10 @@ version = "0.1.0"
 [[package]]
 name = "sift-sync"
 version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+ "sift-provider",
+]
 
 [[package]]
 name = "smallvec"
