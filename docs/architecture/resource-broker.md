@@ -41,6 +41,23 @@ Every request carries the [capability token](../rendering/webview-isolation.md) 
 [debug view](../runtime/observability.md) MUST surface it rather than silently taking either answer. That
 requirement is what makes the debug view load-bearing rather than a convenience.
 
+## The broker is the enforcement point, and that is a placement decision
+
+Every fetching position in a message reaches the broker, because [the pipeline](../rendering/pipeline.md)
+rewrites all of them to the internal scheme at sanitize time — condemned ones included. The blocker's
+per-message pass records a verdict for [FR-33](../runtime/observability.md); it does not decide the fetch.
+
+**The decision has to live here rather than in the markup**, because its inputs outlive the document. The
+per-sender allowlist under FR-8 changes when the user says "show this sender's images", and the
+[network policy tier](../runtime/network-conditions.md) changes when the user walks out of the building.
+A verdict baked into a rewritten document at sanitize time could only be revised by re-running the
+pipeline, and a per-message decision cache would then need invalidating on both of those events.
+
+**A denied address resolves to a deterministic blocked answer, not to nothing.** The two are different: a
+fabricated or stale address resolves to nothing under D-28, and that is a defect being caught, whereas a
+denied load is ordinary policy and the reader is entitled to see a placeholder it can act on. Conflating
+them would make "this sender is blocked" and "this view has been torn down" the same event.
+
 ## Three rules that are easy to get wrong
 
 **Prefetching is the tracking event.** If the broker fetches a remote image ahead of display, that fetch

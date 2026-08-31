@@ -19,12 +19,16 @@ All stages run in the core, in Rust. Nothing reaches a web engine until the last
   2.  part selection       prefer HTML from a multipart alternative;
       │                    fall back to plain text, linkified
       │
-  3.  sanitize             allowlist over a parsed DOM  → invariants I1–I10
+  3.  sanitize             allowlist over a parsed DOM, and every fetching
+      │                    position — inline part reference or remote URL
+      │                    alike — rewritten to the internal scheme
+      │                                              → invariants I1–I10
       │
-  4.  block                network + cosmetic decisions → content blocking
+  4.  cosmetic filter      element hiding, style injection, procedural
+      │                    selectors                 → content blocking
       │
-  5.  rewrite              inline references and every remaining fetching
-      │                    position rewritten to the internal scheme
+  5.  bind                 each internal-scheme address bound to the
+      │                    capability token of the view about to render it
       │
   6.  transform            optional dark-mode pass, opt-in
       │
@@ -33,9 +37,39 @@ All stages run in the core, in Rust. Nothing reaches a web engine until the last
   content height reported back to size the container
 ```
 
-Stage ordering is normative. Sanitization precedes blocking so the blocker operates on a structure it can
-trust; rewriting precedes rendering so that no absolute external URL survives into the document; the dark
-transform runs last because it must not be able to reintroduce anything the earlier stages removed.
+Stage ordering is normative. Sanitization precedes cosmetic filtering so the filter operates on a
+structure it can trust; rewriting happens *inside* sanitization so that no absolute external URL survives
+the stage whose output I2 is asserted over; the dark transform runs last because it must not be able to
+reintroduce anything the earlier stages removed.
+
+## Rewriting is not the same decision as blocking, and they happen in different places
+
+This is the distinction the stage list above exists to make, because getting it wrong falsifies I2 while
+every test still passes.
+
+**Stage 3 rewrites every fetching position, whether or not the resource will ever be fetched.** A position
+that a filter rule already condemns is rewritten too. The alternative — leaving a condemned URL in the
+document because nothing will load it — puts an external-scheme URL in a fetching position in the
+document handed to the body view, which is exactly what [I2](sanitizer-invariants.md) denies, and it
+would leave [N-1](webview-isolation.md) as the only thing standing between the message and the network
+rather than the second of two.
+
+**Whether a rewritten address actually yields bytes is decided by the
+[resource broker](../architecture/resource-broker.md), at the moment the body view asks for it.** It has
+to be, because the inputs to that decision outlive the document: FR-8's per-sender allowlist and the
+active [network policy tier](../runtime/network-conditions.md) both change without the message changing,
+and a decision baked into markup at stage 3 could only be revised by re-running this pipeline.
+
+**Stage 4 is therefore cosmetic filtering plus bookkeeping.** Element hiding, style injection and
+procedural selectors are structural edits and belong to the document. The network verdict computed here
+is recorded for [FR-33](../runtime/observability.md)'s per-message view — every candidate URL, its verdict
+and the matching rule — and is not the enforcement point. The broker is the enforcement point, and the
+compiled engine rules of [D-10](content-blocking.md) are the backstop beneath it.
+
+**Stage 5 exists because a capability token does not.** [D-28](webview-isolation.md) mints a token per
+view, so stage 3's rewritten addresses are view-independent and stage 5 binds them to the view that is
+about to render. Splitting the two is what lets a sanitized document be reused across views without ever
+carrying a token that outlives one.
 
 The ordering is also what makes the pipeline extensible without weakening it. [D-39](../product/scope.md)
 defers end-to-end encrypted mail and names its seam as a stage between 1 and 2 — deliberately *above*

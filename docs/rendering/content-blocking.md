@@ -43,6 +43,21 @@ Reloading is a list parse on window open, ahead of any message selection, so it 
 on NFR-3. The compiled engine-level backstop rules are installed with the body view's configuration and
 follow the same lifetime.
 
+**Being dropped at L1 leaves a window open with no authority loaded, and that state needs a stated
+answer.** L1 is a mild-pressure tier, so a user may well open a message while the engine is gone. Sift
+MUST NOT silently fall through to the compiled backstop, because the backstop is defence in depth against
+a bug in the authority, not a substitute for it — treating it as one converts a memory-pressure event
+into a quiet reduction in blocking that no surface reports. Nor may the engine be reloaded on demand: a
+40 MB allocation in response to a pressure signal is the shed tier undoing itself.
+
+The rule is therefore that **an absent authority denies.** With no engine loaded, every remote fetch is
+refused, exactly as it would be for a sender the user has not allowed, and the reason recorded for
+[FR-33](../runtime/observability.md) names the shed rather than a rule. FR-29's heuristics are Sift's own
+code and continue to apply; cosmetic filtering is unaffected, having already been baked into the document
+at sanitize time. The engine returns when pressure clears and the next window opens, and the failure
+direction is the one this document chooses everywhere else: a message with missing images rather than a
+message that quietly fetched something.
+
 ## FR-27 — Filter lists
 
 Content blocking with uBlock Origin-syntax filter lists: the standard public blocking and privacy lists,
@@ -51,6 +66,20 @@ plus a **bundled email-specific list**. List subscriptions and custom rules MUST
 **NFR-43.** Filter-list updates MUST NEVER block rendering. A stale list is acceptable; an absent one is
 not. Updates are network traffic and MUST obey the active policy tier in
 [network conditions](../runtime/network-conditions.md).
+
+## Where each half of blocking happens
+
+The two halves run at different times against different inputs, and [the pipeline](pipeline.md)'s stage
+list is where that split is normative. Stating it here too, from the blocker's side:
+
+| Half | When | Why there |
+|---|---|---|
+| Cosmetic filtering — element hiding, style injection, procedural selectors | in the core, over the parsed tree, before the document is emitted | it changes the document, and a document is edited once |
+| The network verdict — is this resource allowed | at request time, in the [resource broker](../architecture/resource-broker.md) | its inputs are the per-sender allowlist and the active policy tier, both of which change without the message changing |
+
+The per-message pass still *computes* a network verdict for every candidate URL, and that computation is
+what [FR-33](../runtime/observability.md) item 5 enumerates. It is a record, not the enforcement.
+Enforcement is the broker's, with the compiled engine rules beneath it as the backstop D-10 describes.
 
 ## Cosmetic filtering without JavaScript
 

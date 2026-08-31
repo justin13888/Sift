@@ -12,7 +12,7 @@ Notation: *S* is the sanitizer, *P* the parser, *W* the serializer.
 | ID | Invariant |
 |---|---|
 | **I1** | **No script.** The output contains no script element, no event-handler attribute, no script-bearing URL scheme in any position, no script embedded via foreign content, and no script-equivalent CSS construct |
-| **I2** | **No implicit egress.** Every URL in a *fetching* position — image sources and source sets, poster attributes, CSS url references, font sources, imports — uses the internal scheme. No external-scheme URL survives in any fetching position |
+| **I2** | **No implicit egress.** Every URL in a *fetching* position — image sources and source sets, poster attributes, CSS url references, font sources, imports — uses the internal scheme. No external-scheme URL survives in any fetching position, **including one a filter rule has already condemned** |
 | **I3** | **No frames, plugins, or forms.** No frame, object, embed, applet, form, or form-control element |
 | **I4** | **No document control.** No base element, no equivalent-header meta, no link element, no title element |
 | **I5** | **Containment.** Structural, because the body renders in its own document; additionally, fixed positioning and viewport-unit escapes are rejected |
@@ -51,6 +51,23 @@ review.
 **Contestable because:** the tree is materialized for every message, including the large hostile ones I7
 exists to bound, and NFR-41 is a shared 30 ms budget that the [full cascade](dark-mode.md) also draws on.
 If that budget is missed, this is where the pressure lands first.
+
+## I2 is asserted over the sanitizer's output, which is why the sanitizer rewrites
+
+The rewrite to the internal scheme is the sanitizer's own work, in the same pass that enumerates fetching
+positions. It is not a later stage, and [the pipeline](pipeline.md) says so in its stage list: an
+invariant asserted over *S(x)* cannot be satisfied by something that happens to *S(x)* afterwards.
+
+Two consequences are easy to get backwards.
+
+**A condemned URL is rewritten too.** Rewriting is not a reward for surviving the blocker; it is how the
+document is made incapable of naming an external host at all. Whether the address then yields bytes is
+the [resource broker](../architecture/resource-broker.md)'s decision at request time, and it has to be,
+because the per-sender allowlist and the network policy tier both change without the message changing.
+
+**Rewritten is not the same as bound.** The address *S* emits is view-independent; the per-view
+[capability token](webview-isolation.md) of D-28 is applied at the pipeline's bind stage, once a view
+exists. I2 is satisfied at *S*, before any token is minted.
 
 ## I9 says what its name says
 

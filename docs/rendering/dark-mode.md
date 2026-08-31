@@ -28,7 +28,7 @@ growing minority of senders do this correctly, and fighting them produces worse 
 A browser extension doing this fights a live style model with script. Sift has neither: email CSS is
 static, inline or in style blocks, and there is no script. The transform is therefore a **static Rust pass
 over a parsed CSS tree**, which is cheaper and far more testable. It runs last in
-[the pipeline](pipeline.md), after sanitization and blocking, and is bounded by NFR-41 there.
+[the pipeline](pipeline.md), after sanitization and cosmetic filtering, and is bounded by NFR-41 there.
 
 ## D-27 — Resolve the full cascade
 

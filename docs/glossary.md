@@ -13,7 +13,7 @@ the definition here wins.
 | **Toolkit residue** | What a UI toolkit leaves resident after its window is destroyed. Sets the idle floor under [D-2](architecture/process-model.md) |
 | **Body view** | The isolated web-engine document that renders one message body. No script, no network. See [webview isolation](rendering/webview-isolation.md) |
 | **Presentation layer** | The shared Rust layer that owns windowing, selection, sort, formatting, and result assembly, so the shells only bind and lay out. See [presentation layer](architecture/presentation-layer.md) |
-| **Resource broker** | The core component through which every byte the body view loads must pass. The place where blocking decisions are made. See [resource broker](architecture/resource-broker.md) |
+| **Resource broker** | The core component through which every byte the body view loads must pass, and where the *network* blocking decision is enforced at request time. Cosmetic filtering is not here — it edits the document at sanitize time. See [resource broker](architecture/resource-broker.md) |
 | **Location** | *Where* a message is. Cardinality is one, or one-or-more, depending on the provider. See [provider model](mail/provider-model.md) |
 | **Tag** | A many-to-many user label, distinct from Location. Called labels, categories, or keywords by different providers |
 | **Intent** | A provider-agnostic mutation — *archive this thread* — resolved to wire operations inside an adapter. Never a wire operation itself. See [mutations](mail/mutations.md) |
