@@ -205,3 +205,26 @@ rather than a reading of it.
   method 4's fuzzing scope alongside the HTML builder.
 - **Licence.** `MPL-2.0`, admitted for the reason recorded in `deny.toml`.
 - **Floor, threads, timers, sockets.** None.
+
+---
+
+## The toolchain floor, and the crate that moved it
+
+`adblock` raised Sift's floor from **1.85 to 1.88**. It uses let-chains, stabilised in 1.88,
+and **declares no `rust-version` of its own** — so nothing announced the change. The
+per-change job that builds against the stated floor is the only reason it was caught rather
+than discovered by a contributor on an older toolchain.
+
+This is the case `docs/build/workspace.md` anticipates in one sentence: *a vendored
+dependency's own floor becomes Sift's on the day it is vendored.* Two things make it worth
+recording rather than just fixing:
+
+- **The dependency was not optional.** D-10 names that engine, so declining it would have
+  meant declining the decision.
+- **The floor moved without a declaration.** A crate that declares its floor makes this a
+  visible diff in `deps/approved.txt`; one that does not makes it a build failure somewhere
+  else, later, on somebody else's machine.
+
+The rule that a build failing on the floor is a defect rather than an invitation to raise it
+still holds — it is about **Sift's own code**. When a vendored dependency genuinely needs
+more, the floor moves, deliberately, with the reason written down. This is that.

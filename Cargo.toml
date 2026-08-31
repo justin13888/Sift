@@ -71,11 +71,19 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/justin13888/Sift"
 publish = false
 
-# The minimum supported toolchain, recorded once, here. Raising it is a deliberate
-# change rather than a consequence of a dependency update: a build failing on this
-# floor is a defect rather than an invitation to raise it. A vendored dependency's
-# own floor becomes Sift's on the day it is vendored.
-rust-version = "1.85"
+# The minimum supported toolchain, recorded once, here. A build failing on this floor is a
+# defect in Sift's own code rather than an invitation to raise it.
+#
+# **Raised from 1.85 to 1.88 when `adblock` was vendored**, and the change is deliberate
+# rather than incidental — which is the distinction workspace.md draws: *a vendored
+# dependency's own floor becomes Sift's on the day it is vendored.*
+#
+# Two things about how that happened are worth recording. D-10 names that filter engine, so
+# this was not an optional dependency somebody could have declined. And the crate **declares
+# no `rust-version` of its own** while using language features stabilised in 1.88, so nothing
+# announced the change — the per-change job that builds against this floor is the only reason
+# it was noticed rather than discovered by a contributor on an older toolchain.
+rust-version = "1.88"
 
 [workspace.lints.rust]
 # Overview confines unsafe to exactly four places, from the first commit. This is the
