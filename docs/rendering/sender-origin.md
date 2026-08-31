@@ -80,3 +80,8 @@ The synthetic origin is consumed by [content blocking](content-blocking.md) for 
 domain-scoped rule evaluation, and by the per-sender allowlist that governs remote content in
 [the pipeline](pipeline.md). A per-sender allowlist keyed on an *unauthenticated* From domain would be
 trivially forgeable, so the allowlist MUST key on the synthetic origin, not on the displayed sender.
+
+That rule has a consequence at priority 4 which is easier to meet in the interface than to discover in the
+code: **where the origin is null there is nothing to key a durable allowance on**, so a persistent "always
+show images from this sender" cannot exist for that message. [The pipeline](pipeline.md) states what is
+offered instead, and why offering a one-time allowance is what keeps this from reading as a refusal.

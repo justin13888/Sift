@@ -55,8 +55,25 @@ pipeline, and a per-message decision cache would then need invalidating on both 
 
 **A denied address resolves to a deterministic blocked answer, not to nothing.** The two are different: a
 fabricated or stale address resolves to nothing under D-28, and that is a defect being caught, whereas a
-denied load is ordinary policy and the reader is entitled to see a placeholder it can act on. Conflating
-them would make "this sender is blocked" and "this view has been torn down" the same event.
+denied load is ordinary policy and the reader is entitled to know it happened. Conflating them would make
+"this sender is blocked" and "this view has been torn down" the same event.
+
+**The placeholder is inert, and every affordance for acting on it is native reader chrome.** This was
+previously written as "a placeholder it can act on", which invited an in-document control — and there is
+no channel for one, because [D-50](../rendering/webview-isolation.md) leaves no script and every
+navigation is intercepted.
+
+The deeper reason is that the channel should not be built even if it could be. **A clickable control
+inside the document is one a sender can counterfeit.** I9 forbids Sift from inventing visible text, and
+nothing forbids a sender from authoring a convincing imitation of Sift's own "show images" affordance —
+next to which the genuine one would be indistinguishable. The genuine control writes the per-sender
+allowlist, which [data model](../storage/data-model.md) calls security state on the grounds that write
+access to it is write access to Sift's egress policy. A counterfeit that merely *looks* like it would
+train the user to click the one that is not.
+
+So the document shows that something was withheld and shows nothing that responds to a click, and the
+reader's own chrome — outside the body view, where the sender cannot draw — carries the count, the reason,
+and the two affordances below.
 
 ## Three rules that are easy to get wrong
 

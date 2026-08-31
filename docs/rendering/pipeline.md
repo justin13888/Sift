@@ -93,6 +93,19 @@ allowlist.
 Every remote image is a tracking pixel until proven otherwise. Blocking by default is the correct default
 even before the blocker's heuristics apply — see [content blocking](content-blocking.md).
 
+**Two affordances, and they are not the same decision.** *Show images once* applies to the message in
+front of the user and is not written down anywhere; *always show images from this sender* writes the
+per-sender allowlist, which is durable [security state](../storage/data-model.md). Offering only the
+second would mean every act of curiosity permanently widens what Sift will fetch, which is not what a user
+means when they want to see one newsletter.
+
+**"Always" is unavailable for an unauthenticated sender, and the interface MUST say so rather than
+quietly doing something weaker.** [Sender origin](sender-origin.md) requires the allowlist to key on the
+synthetic origin, and an origin that resolved from nothing better than a From header is null — there is no
+stable thing to key on, and keying on the displayed sender would be trivially forgeable, which is the
+whole of D-11's argument. So an unattested message offers *show once* and an explanation, and the one-time
+affordance is what makes that an acceptable answer rather than a refusal.
+
 All body resources MUST route through the resource broker. The body view has no direct network access
 whatsoever; this is invariant N-1 in [webview isolation](webview-isolation.md).
 
