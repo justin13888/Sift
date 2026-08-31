@@ -1,6 +1,6 @@
 # Cache and blobs
 
-**Owns:** D-23, D-57, D-73, FR-10, FR-12, NFR-14, NFR-49, NFR-52, NFR-53.
+**Owns:** D-23, D-57, D-73, D-77, FR-10, FR-12, NFR-14, NFR-49, NFR-52, NFR-53.
 
 ## The cache is not the source of truth
 
@@ -54,6 +54,80 @@ rather than on its own schedule, and it is encrypted under the per-installation 
 the index under [D-43](encryption.md).
 
 Reference counting is what makes [account removal](../mail/accounts.md) correct rather than approximate.
+
+## D-77 — A blob is a chunked, sealed file whose name is its address
+
+**Chosen:** a blob is stored as a sequence of independently sealed chunks under one header; its filename
+is its content address and it is placed in a directory fan-out derived from that address; a decrypt
+failure discards the file, and the plaintext hash is **not** re-verified on read.
+**Rejected:** one authenticated seal over the whole blob; a flat directory; storing blobs under a
+per-account name.
+
+**Why chunks rather than one seal.** [L-14](../limits.md) permits a blob of 2 GB, and a single seal over
+the whole file makes it unreadable until all of it has been read and authenticated. Three things in this
+design already need less than the whole file: FR-10's hand-off to the platform's preview facility,
+[NFR-39](../runtime/network-conditions.md)'s byte ceiling on a single fetch, and a body part that streams
+into the pipeline under [NFR-19](../rendering/pipeline.md)'s never-materialize-a-large-part rule. A
+whole-file seal forecloses all three, and would do it invisibly — everything works until the first large
+attachment.
+
+**Chunks inherit [D-76](encryption.md)'s nonce rule exactly**, with the chunk index taking the place of
+the page number and the same durable counter beneath it. A blob is written once and never rewritten, so
+the reuse hazard is smaller here than in a database — but "smaller" is not a construction, and one rule
+for both is what makes it reviewable.
+
+**Why the filename is the address.** The address is already a keyed hash under
+[D-43](encryption.md), which is what makes it safe to expose: it is not derivable by anyone who does not
+hold the per-installation secret, so the filename discloses nothing about the content to a filesystem
+observer. That is the property that lets the store be a flat mapping from address to file with no index
+lookup on the read path. A per-account name would defeat [D-22](encryption.md)'s deduplication, which is
+the entire reason the store is shared.
+
+**Why a fan-out.** A single directory holding hundreds of thousands of entries is a performance cliff on
+some filesystems and an operational hazard on all of them. The fan-out is derived from the address so it
+requires no state to compute, and its depth is one more thing that is fixed at first release, because
+[platform baseline](../product/platform-baseline.md) records that the on-disk layout *"is published in
+the Cask uninstall stanza and depended on by every installed copy"*.
+
+**Why the plaintext hash is not re-verified on read.** The authenticated seal already proves the bytes are
+the bytes Sift wrote, under a key an attacker does not hold. Re-hashing proves the same thing again, at
+the cost of reading the whole blob before yielding any of it — which is exactly the property chunking
+exists to provide. **The two failures are different events and only one of them is real**: a decrypt
+failure means the file was tampered with or corrupted, and a hash mismatch on correctly-decrypting bytes
+would mean Sift stored the wrong content under an address, which is a defect rather than an attack. The
+second is worth asserting in tests and not on every read.
+
+**A blob that fails to authenticate is deleted, not repaired**, and its reference count is left alone —
+the accounts still legitimately reference that content; they simply do not have it. The next fetch
+re-downloads it. This is D-73's discardability doing the work again, and it is why a corrupt attachment
+is a re-download rather than an error.
+
+### Orphans in both directions, and only one of them is a leak
+
+Reference counting handles the case the design already names: a count reaching zero collects the file.
+Two other states exist and neither had a rule.
+
+**A file with no index row** — a write that completed after the crash that lost its index entry, or a
+file left by a partial download. It is invisible to eviction, because eviction reads the index, so it is
+unbounded disk that NFR-14's budget cannot see. **The refcount rebuild [data model](data-model.md)
+already requires after abnormal termination MUST also collect files the index does not name**, which is
+the same pass and the same trigger.
+
+**An index row with no file** — a file deleted beneath Sift, or the failure above already handled. It is
+harmless and MUST NOT be an error: the row is dropped and the content is treated as not cached, which is
+a state FR-12 already has and the user already understands.
+
+The asymmetry is the point. A missing file is a cache miss; a missing row is a leak, and a leak in the
+one place D-73 says the user may throw everything away is the failure that makes them unable to.
+
+**What it costs:** per-chunk overhead, a header format that joins the identifier register in permanence,
+and a collection pass that must walk the store's directories rather than only its index.
+
+**Contestable because:** chunking is complexity bought for large attachments in a client that does not
+send mail and whose users mostly receive small ones. If the corpus shows the large-attachment case is
+rare, a whole-file seal is simpler and the preview hand-off could copy to a temporary file instead —
+which is a real alternative, and a worse one only because it writes plaintext to disk to avoid reading
+ciphertext from it.
 
 ## D-23 — BLAKE3 as the content address
 

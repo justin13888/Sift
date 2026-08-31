@@ -213,7 +213,9 @@ under-counting, which would free bytes another account still points at. Over-ret
 hard cap in NFR-14, so the failure mode costs disk that eviction was going to reclaim anyway.
 
 A refcount rebuild from the union of all account references MUST exist, and MUST run after abnormal
-termination. It is a repair path, not the collection mechanism; collection itself runs as part of eviction
+termination. **It MUST also collect blob files the index does not name**, which
+[D-77](cache-and-blobs.md) requires for the reason eviction cannot: eviction reads the index, so a file
+with no row is disk no budget can see. It is a repair path, not the collection mechanism; collection itself runs as part of eviction
 per NFR-14 in [cache and blobs](cache-and-blobs.md).
 
 ## Identity
