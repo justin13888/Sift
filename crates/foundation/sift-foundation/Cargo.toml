@@ -12,3 +12,14 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+# NFR-54 and D-100. Both are on a hostile-input path — every string they touch is
+# attacker-controlled — so the third dependency gate's question applies: neither is a
+# thin wrapper over unsafe parsing. Both are pure-Rust table-driven implementations from
+# the unicode-rs project, are the implementations the wider ecosystem depends on, and
+# neither starts a thread, arms a timer, or opens a socket.
+#
+# D-81 requires the index's normalization form be the same one NFR-54 applies, and the
+# index cannot reach the presentation layer under D-59 — so the shared implementation has
+# to be here, at the bottom, where both can see it.
+unicode-normalization = "0.1"
+unicode-segmentation = "1"

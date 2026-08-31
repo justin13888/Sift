@@ -56,7 +56,9 @@ pub(crate) fn run(bless: bool) -> Result<(), String> {
              - Does it raise the toolchain floor? A vendored dependency's floor becomes Sift's\n  \
                on the day it is vendored.\n\
              - Does it start a thread, arm a timer, or open a socket of its own? Those are\n  \
-               NFR-11 and NFR-24 respectively, and neither is visible in a diff.\n",
+               NFR-11 and NFR-24 respectively, and neither is visible in a diff.\n\n\
+             Where the answer is not obvious, record it in deps/NOTES.md rather than in a\n\
+             commit message nobody will find again.\n",
         );
     }
     if !removed.is_empty() {
@@ -135,7 +137,8 @@ fn write_approved(set: &BTreeSet<String>) -> Result<(), String> {
          # rather than absorbed. A diff to this file is that review, and it is deliberately\n\
          # noisy — the threshold is low on purpose.\n\
          #\n\
-         # Regenerate with `cargo xtask deps --bless`.\n\n",
+         # Regenerate with `cargo xtask deps --bless`. Where the answers to the gate's\n\
+         # questions were not obvious, they are recorded in deps/NOTES.md.\n\n",
     );
     for line in set {
         s.push_str(line);

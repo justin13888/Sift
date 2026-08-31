@@ -5,7 +5,8 @@
 # rather than absorbed. A diff to this file is that review, and it is deliberately
 # noisy — the threshold is low on purpose.
 #
-# Regenerate with `cargo xtask deps --bless`.
+# Regenerate with `cargo xtask deps --bless`. Where the answers to the gate's
+# questions were not obvious, they are recorded in deps/NOTES.md.
 
 itoa 1.0.18
 memchr 2.8.3
@@ -16,5 +17,9 @@ serde_core 1.0.229
 serde_derive 1.0.229
 serde_json 1.0.151
 syn 3.0.4
+tinyvec 1.12.0
+tinyvec_macros 0.1.1
 unicode-ident 1.0.24
+unicode-normalization 0.1.25
+unicode-segmentation 1.13.3
 zmij 1.0.23
