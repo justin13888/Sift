@@ -124,6 +124,35 @@ mode.
 The classification is cheap; noticing that it was needed is the expensive part, which is why the coupling
 is written down rather than left to review.
 
+### The stylesheet element, classified
+
+`<style>` was admitted after the implementation was found dropping it under **I4, which does not name
+it** — the invariant lists a base element, an equivalent-header meta, a link element and a title element,
+and a stylesheet is none of those. The cost of the mistake was not cosmetic:
+[D-27](dark-mode.md)'s cascade is selector matching, specificity, media queries and inheritance, and none
+of those has any meaning over inline `style` attributes alone. So the largest single commitment in this
+pipeline had no input, L-9's bound "across all stylesheets and style attributes" bounded a set that was
+always empty, and FR-32 could never fire, because the sender declaration it reads was removed before
+anything looked at it.
+
+**It introduces fetching positions**, which is the classification this section requires: `@import`,
+`@font-face`, and every URL-accepting property already enumerated in
+[content blocking](content-blocking.md). All are refused by name so the reason is specific, and the
+vectors are in the sanitizer's own tests.
+
+It also carries a hazard no other allowlist entry does, and the rule that answers it is worth stating
+here rather than only beside the code. **A `<style>` element's contents are raw text**: the serializer
+writes them out unescaped, because the specification requires it, so a stylesheet containing `</style>`
+closes the element on the way back in and everything after it is markup nothing examined. That is the
+shape of much of the published mutation-XSS corpus, and it is an I8 failure rather than an I2 one.
+Escaping is not available — raw text has no entity syntax. So the stylesheet is **regenerated**: rebuilt
+from property-value pairs that each passed the same allowlist a `style` attribute passes, from selector
+text refused outright if it contains a `<` at all. Nothing the sender wrote is copied through, so there is
+no path by which `</style>` reaches the serializer.
+
+**Any future allowlist entry whose content model is raw text or escapable raw text is held to the same
+rule**, and there is one other in the language.
+
 ## I8 is the one that will bite
 
 Mutation-based cross-site scripting lives entirely in the serialize-then-reparse round trip: elements whose
