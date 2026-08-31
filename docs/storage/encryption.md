@@ -96,6 +96,19 @@ attacker-controlled bytes — but it does not extend to the crypto layer itself,
 parsing failure but the **total, silent loss of an account's store**. This layer needs the same review
 posture as the sanitizer despite facing none of the same input.
 
+**It also sits under every read, and no latency target has been re-checked against it.** This decision was
+settled after [D-5](search.md) and NFR-5, and neither was revisited. NFR-5 asks for keystroke-to-results
+under 100 ms at p95 over 500,000 messages, and under [D-6](data-model.md) that is a full-text query
+against five separate account databases on every keystroke, merged in the
+[presentation layer](../architecture/presentation-layer.md) — with every page any of them touches now
+passing through this layer first.
+
+A warm page cache above the crypto layer absorbs most of that, which is why this is a check to run rather
+than an objection to the decision. Where it would show is the cold path: the first search after launch,
+and the first keystroke after the L2 shed tier in [memory pressure](../runtime/memory-pressure.md) has
+released database memory and shrunk the index cache. **NFR-5 MUST be measured with this layer in place**
+rather than against a plaintext store, or the number it reports is not the number the product has.
+
 **Contestable because:** the retreat is to encrypt only the blob store and leave account databases in the
 clear. That is a real weakening rather than a simplification: envelopes are retained **indefinitely** by
 [cache and blobs](cache-and-blobs.md) while bodies are evicted, so the unencrypted half would be the
