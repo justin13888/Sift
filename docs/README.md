@@ -16,7 +16,7 @@ them.
 2. [Architecture overview](architecture/overview.md) — the one structural claim everything follows from
 3. [Provider model](mail/provider-model.md) — how four providers become one abstraction
 4. [Rendering pipeline](rendering/pipeline.md) — how attacker-controlled input becomes pixels
-5. [Decisions](decisions.md) — the fifty-eight calls that shaped the rest, and where each is weak
+5. [Decisions](decisions.md) — the hundred and five calls that shaped the rest, and where each is weak
 
 ## Indexes
 
@@ -26,7 +26,8 @@ them.
 | [Decisions](decisions.md) | Every D-identifier, what was rejected, and why it is contestable |
 | [Open questions](open-questions.md) | Unmade decisions (Q) and load-bearing assumptions that may not hold (R) |
 | [Glossary](glossary.md) | Terms with a specific meaning here |
-| [Limits](limits.md) | Every numeric bound Sift enforces, and what happens when one is exceeded |
+| [Limits](limits.md) | Every numeric bound Sift enforces at runtime, and what happens when one is exceeded |
+| [State register](architecture/state-register.md) | Every identified state that crosses the shell boundary, with its parameters |
 
 ## The graph
 
@@ -112,8 +113,8 @@ contestable. A decision without its counter-argument is an assertion.
 **Open questions are not resolved by deletion.** Answering one means writing the answer into its owning
 document and striking the entry in [open questions](open-questions.md) with a pointer.
 
-**The design is settled *pending* ten open questions, five of which are load-bearing. That is a weaker
-claim than settled, and the distinction between the two groups is the useful part.**
+**The design is settled *pending* fourteen open questions, five of which are load-bearing. That is a
+weaker claim than settled, and the distinction between the two groups is the useful part.**
 
 The three that can still move the design: Q-10 leaves every number in this set unfalsifiable until the
 reference rig is recorded. Q-11 is an unclosed injection path into every message body, in a product whose
@@ -129,19 +130,29 @@ the memory one. Q-15 is the third of this kind: it observes that D-27's resolved
 viewport width while the transform built from it does not, and one of its answers is to drop media queries
 from the cascade — which is D-27 being narrowed by a case D-27 did not consider.
 
-The remaining five are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
+The remaining nine are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
 legal in the meantime. Q-13 asks whether one feature works on one platform. Q-18 asks what the list
-endpoint's address and payload commit Sift to, given that nothing self-updates.
+endpoint's address and payload commit Sift to, given that nothing self-updates, and **Q-19 is that same
+question reaching a second endpoint** — the crash-report upload, which has a decision about its contents,
+a row in the egress table, and no address, operator, or answer about whether it ships at all. Q-20 asks
+whether one guarantee survives one sandbox, and Q-22 asks for the metric and threshold
+[D-64](build/verification.md) requires of every gate and this one lacks.
 
 Two of the five are bounded in design terms and urgent in every other sense, because they are the ones
 that cannot be revisited. Q-16 asks what licence the App Store channel requires of Sift's own code; its
 deadline is the first external contribution. **Q-17 is the same deadline reached from outside** — the
 licences of the filter lists, the sender-infrastructure list and the fonts Sift bundles but does not own,
 which no contributor agreement can reach and which ship inside the binary. Neither reaches a decision, and
-shipping is what spends them.
+shipping is what spends them. **Q-21 is the third population and the largest** — the vendored dependency
+tree, which neither a contributor agreement nor a bundled-artefact audit reaches, and where one copyleft
+crate defeats the same channel.
 
 Q-8 — the fallback join when the internet message identifier is absent or duplicated — was the fourth, and
 is now [D-44](storage/data-model.md). What it leaves behind is a risk rather than a question: R-5, that
 the headers D-44 corroborates against are assumed rather than measured to survive transit.
 
-Everything not on that list is decided.
+Everything not on that list is decided. **D-59 onward decide the parts a build runs into rather than
+reasons about** — the on-disk byte layouts, the boundary's representation, the process lifecycle, the
+screens and the action vocabulary, and the project's own [build and verification](build/README.md)
+machinery. Those were never open questions, because nobody had asked them; they were the answers an
+engineer would have invented alone on the first day, and several of them cannot be taken back.

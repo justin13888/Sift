@@ -1,8 +1,13 @@
 # Decision index
 
 Every architectural decision, what was rejected, and **the one document that owns it**. D-1 through D-38
-settled the original design; D-39 through D-44 close surfaces that were unowned rather than decided; and
-D-45 onward close what an implementer would otherwise have had to invent alone.
+settled the original design; D-39 through D-44 close surfaces that were unowned rather than decided; D-45
+through D-58 close what an implementer would otherwise have had to invent alone; and **D-59 onward are
+what a build actually runs into** — the byte layouts, the boundary's representation, the process
+lifecycle, the screens, and the project's own build and verification machinery. That last group is the
+largest and the least glamorous, and it exists because the set was complete on *what* and *why* while an
+engineer starting work had to invent the answers to *in what order*, *in what shape*, and *how many
+files*.
 
 Rationale lives in the owning document, next to the design it explains. This page is an index. The "why
 it is contestable" column is deliberate: a decision recorded without its weakness is an assertion, not a
