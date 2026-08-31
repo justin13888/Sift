@@ -114,6 +114,7 @@ two homes and one of them would go stale.
 | NFR-25 | Body view sandboxed in its own data store | [rendering/webview-isolation](rendering/webview-isolation.md) |
 | NFR-40 | Invariants I1–I10 verified by property, differential, and fuzz testing in CI | [rendering/sanitizer-invariants](rendering/sanitizer-invariants.md) |
 | NFR-50 | Body-view isolation does not sever the accessibility tree | [rendering/webview-isolation](rendering/webview-isolation.md) |
+| NFR-55 | Local logs carry no content, addresses, subjects, domains or credentials; bounded and time-limited | [product/platform-baseline](product/platform-baseline.md) |
 
 ## Network
 

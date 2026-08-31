@@ -1,7 +1,8 @@
 # Decision index
 
 Every architectural decision, what was rejected, and **the one document that owns it**. D-1 through D-38
-settled the original design; D-39 through D-44 close surfaces that were unowned rather than decided.
+settled the original design; D-39 through D-44 close surfaces that were unowned rather than decided; and
+D-45 onward close what an implementer would otherwise have had to invent alone.
 
 Rationale lives in the owning document, next to the design it explains. This page is an index. The "why
 it is contestable" column is deliberate: a decision recorded without its weakness is an assertion, not a
@@ -60,4 +61,6 @@ rationale was found to be factually wrong about the rendering engine, not becaus
 | **D-41** | Contact names | Read-only from the platform contact store, on demand, nothing stored | Syncing a provider contacts API; deriving an address book from observed mail | Users whose contacts live only in their provider get nothing, which on Microsoft 365 is the common case | [architecture/presentation-layer](architecture/presentation-layer.md) |
 | **D-42** | Database encryption | A page-level encrypting layer beneath the database engine — keyed per account for account databases, per installation for the two installation-scoped stores | Application-level column encryption; relying on whole-disk encryption | A crypto layer beneath a C dependency where a bug is total loss of an account, not a parse failure | [storage/encryption](storage/encryption.md) |
 | **D-43** | Content addressing | Address and blob key derived with keyed BLAKE3 under a per-installation secret; the shared blob index and the installation policy store encrypted under it | Bare plaintext hashes; per-account indexes | One secret whose compromise re-enables known-file confirmation across every account at once, and now also unseals the installation-wide half of the allowlist | [storage/encryption](storage/encryption.md) |
+| **D-45** | macOS app identity | One bundle and team identifier across both macOS channels, with both builds sandboxed | Two identifiers and two coexisting apps; one identifier with the Cask build unsandboxed | Makes the direct-download build pay for the store's constraints, and loses side-by-side installation. It has no remaining argument if the App Store channel is ever dropped | [product/platform-baseline](product/platform-baseline.md) |
+| **D-46** | Platform floor | macOS 13 or later, universal across Intel and Apple silicon | An earlier deployment target; an Apple-silicon-only build | Universal doubles the P0 measurements that gate everything else, because page size makes NFR-8, NFR-9 and NFR-12 different numbers per architecture | [product/platform-baseline](product/platform-baseline.md) |
 | **D-44** | Identity joins | The internet message identifier narrows candidates and never keys a join; a stored fallback identity digest corroborates; an ambiguous candidate set resolves to distinct messages | A normalized-header digest promoted to a second identity key; never joining at all | The normalization tuple is a hypothesis about which headers survive transit, with no corpus behind it yet — R-5 stays open against it | [storage/data-model](storage/data-model.md) |

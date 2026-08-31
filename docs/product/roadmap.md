@@ -68,11 +68,12 @@ broken it — which is why they are gated everywhere rather than somewhere. Four
 constraints the project is defined by: NFR-20 no script in bodies, NFR-21 no unrequested egress, NFR-23
 credentials only in the OS store, NFR-24 never a listening socket. NFR-14 is the no-unbounded-cache rule,
 NFR-16 and NFR-19 are crash-consistency and surviving hostile MIME, and NFR-51 says "from the first
-commit" in its own text.
+commit" in its own text. NFR-55 joins them because a log line written in the wrong shape cannot be
+unwritten on a machine that already ran that build, so there is no phase at which it could be deferred.
 
 | Phase | Ships | Gates |
 |---|---|---|
-| Standing | — | NFR-14, NFR-16, NFR-19, NFR-20, NFR-21, NFR-22, NFR-23, NFR-24, NFR-51 |
+| Standing | — | NFR-14, NFR-16, NFR-19, NFR-20, NFR-21, NFR-22, NFR-23, NFR-24, NFR-51, NFR-55 |
 | P0 | — (spikes only) | NFR-8, NFR-9, NFR-12, NFR-44, NFR-45 |
 | P1 | FR-2, FR-5, FR-6, FR-8, FR-9, FR-11, FR-12, FR-13, FR-14, FR-19, FR-22, FR-24, FR-25, FR-28, FR-30, FR-33, FR-34, FR-41 | NFR-1, NFR-3, NFR-5, NFR-10, NFR-11, NFR-15, NFR-25, NFR-28, NFR-40, NFR-41, NFR-46, NFR-50 |
 | P2 | FR-1, FR-3, FR-4, FR-20, FR-21, FR-37 | NFR-2, NFR-18, NFR-29, NFR-30, NFR-31, NFR-32, NFR-33, NFR-34, NFR-35, NFR-37, NFR-38, NFR-39, NFR-48 |

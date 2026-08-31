@@ -90,6 +90,9 @@ date.
 The alternatives are real and none of them has been argued here, so it is
 [an open question](../open-questions.md) rather than a settled decision.
 
+The versions, architectures, entitlements and permanently-consumed identifiers those channels commit Sift
+to are in [platform baseline](platform-baseline.md), which owns D-45 and D-46.
+
 ## Per-platform surface
 
 The platform-specific surface MUST stay confined to the layers below. Everything else is portable Rust.
