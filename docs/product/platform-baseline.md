@@ -105,10 +105,12 @@ submission to any channel**, and MUST NOT thereafter be changed.
 | Keychain service and access-group names | Published in the Cask uninstall stanza, so a change breaks uninstall for existing users |
 | App Store build number space | Monotonically increasing for the life of the app record; a number is never reused or decreased |
 
-**The repository currently declares a bundle identifier, and it is not a decision.** It sits in a Tauri
-scaffold that [D-1](../architecture/ui-shell.md) rejects and that opens a local development server against
-NFR-24. Inheriting that string by default is how the most permanent identifier in the project would get
-chosen by accident, and it is recorded here so that it does not.
+**The bundle identifier arrived by accident and is kept on purpose.** It was declared by a Tauri scaffold
+that [D-1](../architecture/ui-shell.md) rejects and that opened a local development server against NFR-24;
+that scaffold is now abandoned and removed, for the reasons D-1's own document gives. Inheriting a string
+by default is how the most permanent identifier in the project would get chosen by accident, so the value
+is recorded here as a deliberate reservation rather than carried forward as a leftover. **It is the only
+thing the scaffold leaves behind.**
 
 ## Two schemes, and only one of them is registered
 

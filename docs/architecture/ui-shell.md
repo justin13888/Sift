@@ -36,6 +36,31 @@ layer, so the shells bind and lay out rather than decide.
 went the other way. Revisit only if P0 measurement shows the memory delta under ~50 MB *and* a genuinely
 zero-wakeup web UI can be demonstrated.
 
+## The scaffold this decision rejects is abandoned, not merely disfavoured
+
+D-1 rejects a web UI as an *option*. That is not the same as removing the one that exists, and the
+distinction cost the project nothing while no code was being written.
+
+**The repository's Tauri, React and Vite application is abandoned outright**, along with the Bun
+toolchain and lockfile beside it and the Linux GTK3 development container that was the only declared
+environment for a macOS-first product. None of it is a starting point, a reference, or a prototype to
+migrate from. It is removed, and the documentation says so here rather than leaving an implementer to
+infer it from a rejected alternative.
+
+Saying it explicitly matters because the scaffold is not merely off-strategy — it breaks three things at
+once, two of them gates that admit no phase in which they are allowed to fail:
+
+- **D-1**, directly. It is the rejected option, running.
+- **NFR-24**, which [shell boundary](shell-boundary.md) makes absolute with no carve-out. The
+  development server binds a listening socket, and NFR-24 is a *Standing* gate — true of the first
+  commit and every commit after — so a build that starts there is in violation before it does anything.
+- **NFR-20**, whose disabled-at-the-engine-level guarantee a null content-security policy contradicts in
+  spirit, in the one component the product's central claim is about.
+
+What survives is the bundle identifier, and only because
+[platform baseline](../product/platform-baseline.md) has since reserved it deliberately. Nothing else in
+the scaffold is inherited.
+
 ## The Linux shell is native too
 
 **GTK4 and libadwaita, natively, on Linux.** This was previously left open, to be settled at the end of
