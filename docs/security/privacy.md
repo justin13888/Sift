@@ -112,6 +112,14 @@ Recent queries within a session are a convenience and are not durable.
 
 ## The debug views are not telemetry
 
+**Captive-portal detection adds no row, and that is a decision rather than an omission.**
+[D-96](../runtime/network-conditions.md) detects a portal from the behaviour of connections Sift was
+already making to the user's own providers, so there is no detection endpoint and no beacon. A
+conventional 60-second connectivity check would have been a recurring third-party disclosure of when this
+machine is awake and roughly where — the same disclosure this table already worries about for list
+updates, an order of magnitude more often — and permanent, for the reason [Q-18](../open-questions.md)
+gives about addresses a build keeps calling for years.
+
 The [debug panels](../runtime/observability.md) expose a great deal about a message and about Sift's
 internals. None of it is transmitted. They are local introspection surfaces, and they exist partly so that
 a user can verify these claims for themselves rather than take them on trust.

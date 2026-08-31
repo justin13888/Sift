@@ -134,7 +134,7 @@ Per-account, unless noted.
 | Mutation queue — in the account **journal** rather than the store, per D-74 | serialized intent, intent schema version, state, attempt count, creation time, per-message sequence, expiry, and the pending overlay the intent contributes | durable across process death *and upgrades* — see [mutations](../mail/mutations.md). The overlay lives here because it is retired with the intent that created it, never independently |
 | Blob reference | content hash, role | the account's claim on a shared blob; refcounts live elsewhere, see below |
 | Authentication result | per message: signing domain, sender-policy and alignment outcomes | feeds the [synthetic origin](../rendering/sender-origin.md) |
-| Account policy | per-sender remote-content allowlist, per-sender dark-mode choice, notification rules per folder | user decisions scoped to this account — see below |
+| Account policy | per-sender remote-content allowlist, per-sender dark-mode choice, notification rules per folder, whether the user has paused this account under [D-95](../runtime/network-conditions.md) | user decisions scoped to this account — see below |
 
 Credentials are **not** in this list and MUST NOT be stored here. See
 [encryption](encryption.md) and [credentials](../security/credentials.md).
@@ -163,7 +163,7 @@ beside the shared blob index.
 | Scope | Holds | Erased by |
 |---|---|---|
 | Account policy | per-sender allowlist, per-sender dark-mode choice, per-account and per-folder notification rules, the watched folder set under [FR-43](../runtime/scheduling.md), and the backfill's resume position | [FR-4](../mail/accounts.md) account removal, as part of the database |
-| Installation policy | filter-list subscriptions and custom rules, per-network overrides keyed by network identity, cache and data budgets, the FR-36 accounting window and its running counters, whether sync is paused by the user, quiet-mode and notification defaults, dark-mode default, the debug-view preference, and the view state [D-72](../architecture/lifecycle.md) makes durable | uninstallation only |
+| Installation policy | filter-list subscriptions and custom rules, per-network overrides keyed by network identity, cache and data budgets, the FR-36 accounting window, its running counters and the installation-scoped traffic D-96's rule charges there, quiet-mode and notification defaults, dark-mode default, the debug-view preference, and the view state [D-72](../architecture/lifecycle.md) makes durable | uninstallation only |
 
 **The per-sender allowlist is security state, not a preference, and MUST be treated as such.** It is the
 record of which senders may cause the [resource broker](../architecture/resource-broker.md) to make a

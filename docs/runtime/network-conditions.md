@@ -1,6 +1,6 @@
 # Network conditions
 
-**Owns:** D-14, D-58, FR-35, FR-36, NFR-30 through NFR-39 (NFR-36 struck — see below).
+**Owns:** D-14, D-58, D-95, D-96, FR-35, FR-36, NFR-30 through NFR-39 (NFR-36 struck — see below).
 
 ## D-14 — Build a small network-conditions abstraction
 
@@ -34,12 +34,88 @@ detection is found wanting.
 | **Unrestricted** | wired or wifi, definitely unmetered | full body and inline-image prefetch, attachment prefetch under NFR-39's ceiling, filter-list updates |
 | **Conservative** | metered unknown or guessed, or cellular | envelopes only; bodies on demand; no image prefetch; no filter-list updates; mutations flush normally |
 | **Minimal** | metered, or constrained mode | inbox envelopes only; longest poll interval; mutations flush — they are bytes; everything else deferred |
-| **Offline — portal** | captive portal | queue everything; one portal probe per 60 seconds; no connection churn |
-| **Offline — no path** | offline, airplane mode, or system sleep | queue everything; **zero connection attempts of any kind, including the portal probe**, until the path returns |
+| **Offline — portal** | captive portal | queue everything; one bounded reattempt per 60 seconds against the account's own provider — D-96, never a probe to a detection host; no connection churn |
+| **Offline — no path** | offline, airplane mode, or system sleep | queue everything; **zero connection attempts of any kind, including the reattempt above**, until the path returns |
 | **Paused** | the user pausing sync under FR-22, or cumulative usage reaching FR-36's cap | no delta, no push, no prefetch, no list updates; connections torn down under NFR-33; **mutations still flush** |
 
 Mutations flush in every tier above offline, **including Paused**. They are tiny, and a triage action that
 does not take effect because the user is on cellular is a broken product.
+
+## D-95 — The tier is per account, pause is per account, and the tray gesture is not a state
+
+**Chosen:** the policy tier is evaluated **per account**. The user-paused flag is per-account state;
+FR-22's tray control is a **gesture** that sets it on every account, not a separate global switch.
+**Rejected:** a single application-wide tier; a global paused flag beside the per-account ones.
+
+**Why this needed settling.** Three documents disagreed about the scope of one word. This document made
+pause a row in a table whose other five rows are derived from the network, which reads as global;
+[failure model](failure-model.md) makes *paused by the user* and *paused by the data cap* **per-account
+conditions with different clearing rules**; and [data model](../storage/data-model.md) put *"whether sync
+is paused by the user"* in **installation** policy, singular. An implementer had to pick, and the pick
+decides both the tray's behaviour and a storage schema.
+
+**Per account wins because two of the six rows already are.** FR-36's cap is per account by its own
+wording, and a capped account resumes on its own while a user-paused one never does — D-58 below names
+that difference as its own weakest point. A global tier cannot express either. The network-derived rows
+are simply the same value for every account when the path is shared, which costs nothing to represent per
+account and immediately buys the case where it is not shared.
+
+**Why the tray control is a gesture rather than a state.** A global flag *beside* per-account flags is two
+sources of truth for one question, and every such pair eventually disagrees — a user pauses globally,
+resumes one account, and no rule says what the tray shows. Making it a gesture removes the question:
+"pause sync" sets every account paused, "resume" clears every account the user paused, and the tray
+reflects the accounts rather than remembering a click. **A newly added account is not paused**, which is
+the behaviour a global flag would have got wrong in the direction users notice least and like least.
+
+**What it costs:** the tray must summarize N states into one control, and "some accounts are paused" is a
+state it has to be able to show rather than round to one of the two.
+
+**Contestable because:** most users have one or two accounts and will never see the difference, so this
+is precision bought for a minority, at the cost of a tray affordance that is genuinely harder to design
+than a switch.
+
+## D-96 — Portal detection uses the connection Sift already has, and names no host
+
+**Chosen:** a captive portal is detected from the behaviour of connections to **the user's own
+providers** — a TLS handshake that fails in a way consistent with interception, or a response that is not
+the provider's protocol. Sift contacts **no** detection endpoint, its own or anyone else's.
+**Rejected:** probing a well-known connectivity-check URL; standing up a Sift-operated probe endpoint.
+
+**Why not a probe endpoint, which is the conventional answer.** The tier table above requires a probe
+every 60 seconds while a portal is present, and its destination was never named — while
+[privacy](../security/privacy.md) calls its egress table *"the complete set of permitted outbound
+connections"* and adds *"anything else is a defect"*. A recurring 60-second beacon from a resident
+application is exactly the *"coarse record of when this machine is awake and roughly where"* that document
+spends two paragraphs worrying about for the list-update rows, and it would be worse: those are
+occasional, this is once a minute.
+
+It is also permanent, for the reason [Q-18](../open-questions.md) gives about the list endpoint —
+[D-33](../product/platforms-and-distribution.md) means a build keeps calling the address it shipped with
+for as long as it stays installed. Q-18 is scoped to the list endpoint and does not reach this one, so
+adding a probe endpoint would have created a second permanent operational commitment without anyone
+noticing it was one.
+
+**Why the provider connection is a better signal anyway.** A portal that intercepts a TLS connection
+cannot present a valid certificate for the provider's name, so interception is *distinguishable from
+being offline* — which is the entire distinction this tier exists to draw. A connectivity-check endpoint
+answers "is there a portal between me and that host", which is a proxy for the question Sift actually has:
+"can I reach my mail". Asking the real question is both more accurate and free, because the connection
+attempt was going to happen.
+
+**The 60-second cadence stays and is now retry rather than probe.** It is a bounded reattempt of the
+account's own next scheduled operation, on the wheel like everything else under
+[D-87](../mail/provider-model.md)'s rule, so it takes no wakeup of its own and adds no destination.
+
+**What it costs:** detection is per account rather than global, so a portal is discovered when the first
+account tries and not before, and a Sift with every account paused would not notice a portal at all —
+correctly, since it has nothing to do about it. It also cannot distinguish a portal from a
+misconfigured or hostile network presenting a bad certificate, and treats both as offline-portal, which
+is the safe direction.
+
+**Contestable because:** conventional portal detection is a solved problem with well-known endpoints, and
+declining to use them means Sift's detection is weaker on networks that pass TLS through and interfere
+only with plain HTTP. The answer is that Sift makes no plain HTTP requests, so that class of portal is one
+Sift cannot see and does not need to.
 
 ## D-58 — Pause is a policy tier, not a second mechanism
 
@@ -102,6 +178,24 @@ correct without it.
 
 **FR-36.** Cumulative data usage MUST be accounted per account per link class, be visible to the user, and
 support an optional user-set hard cap that moves the account to the **Paused** tier under D-58.
+
+**What the counter counts, because a counter with no definition silently changes when a cap fires.** It
+counts **bytes on the wire** — transport framing, encryption overhead and retransmissions included, taken
+from the platform's own per-connection accounting where it offers one, and otherwise from the transport's
+own byte counts rather than from application-layer payload sizes. The alternative, counting decoded
+payload, under-reports by the fraction the user is actually paying for, and does it worst on the small
+frequent requests idle sync is made of. The counters are durable installation policy covered by NFR-48,
+so **changing what they count later silently changes when a user's cap fires** — which is why this is
+fixed here rather than left to the first implementation.
+
+**Traffic that belongs to no account is charged to the installation, never spread across accounts.**
+Filter-list and [D-37](../rendering/sender-origin.md) infrastructure-list updates serve every account and
+none; FR-3's autoconfiguration discovery happens **before the account exists**, so there is nothing to
+charge it to even in principle. All of it is accounted at installation scope, is visible to the user
+alongside the per-account figures, and **does not count toward any account's cap** — a cap is a promise
+about one mailbox's traffic, and letting a list update push an account over it would make the cap fire
+for a reason the user cannot connect to that account. NFR-31's per-account steady-state figure reads the
+same counter and excludes the same traffic, so the two cannot disagree about what they are measuring.
 
 "Cumulative" needs a period or it is unanswerable, and the period is a **rolling window whose length the
 user sets alongside the cap**, defaulting to thirty days. A calendar month was the alternative and is
