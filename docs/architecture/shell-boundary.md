@@ -61,6 +61,11 @@ surface grows past what one file can hold, that is the signal this was the wrong
 
 ## What crosses the boundary
 
+The contract itself — threading, reentrancy, cancellation, batch index space, ownership, identifier
+stability and error representation — is in [view protocol](view-protocol.md), which owns D-48. This page
+argues why the boundary exists and what shape it takes; that page specifies what an implementer has to
+honour, which is the writing-down D-17 above requires and did not supply.
+
 The interface is a **command and view-model protocol**, not a database-access protocol. The shells send
 intents and requests and receive prepared view models. **The shells MUST NOT be given a path to the
 store, the index, or a provider adapter.** This keeps the store single-writer, keeps the shell disposable,

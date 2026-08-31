@@ -102,7 +102,9 @@ where that work is expensive — see D-4 above.
 
 **What it costs:** change notifications must be expressed as ordered insert, delete and move operations
 against a known window, and the layer must guarantee a shell that applies them in order arrives at the
-same state. That is materially harder than replacing a list.
+same state. That is materially harder than replacing a list. The index space those operations are
+expressed in, and the threading and cancellation rules they are delivered under, are
+[D-48](view-protocol.md).
 
 **Contestable because:** it puts diff computation in the layer for the benefit of toolkit APIs that
 consume diffs. If both shells end up reloading anyway, this machinery is unearned.
