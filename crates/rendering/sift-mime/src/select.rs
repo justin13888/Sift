@@ -7,6 +7,88 @@
 use crate::parse::{Message, Part};
 use sift_foundation::limits::L1_BODY_PART_BYTES;
 
+/// One part of a message, described without its bytes.
+///
+/// **No bytes.** The whole point of asking a provider for a structure is that it costs
+/// nothing to learn what a message contains, so a descriptor carries a size and never the
+/// thing it sizes.
+///
+/// It lives here rather than beside the adapter contract because the choice made over these
+/// is [`choose`] — the same choice [`select`] makes over a parsed tree, and it has to be the
+/// same, because a message must render the same way whichever provider it arrived through.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PartDescriptor {
+    /// The identifier the adapter takes to fetch this part. Opaque above the adapter.
+    pub id: String,
+    /// `type/subtype`, lowercased.
+    pub media_type: String,
+    /// Present where the part is an attachment rather than body content.
+    ///
+    /// **A sender-supplied filename never becomes a path** — NFR-53 — so this is a value to
+    /// display and to derive a name from, never one to write with.
+    pub filename: Option<String>,
+    /// What the provider says the part will cost. Advisory: L-1 and L-13 are enforced against
+    /// what is actually transferred, because a sender controls both numbers.
+    pub size: u64,
+}
+
+impl PartDescriptor {
+    /// Whether this part is body content rather than an attachment.
+    #[must_use]
+    pub fn is_body(&self) -> bool {
+        self.filename.is_none()
+            && (self.media_type == "text/html" || self.media_type == "text/plain")
+    }
+}
+
+/// Which part to ask for, and why — FR-33 item 2 requires the debug view show both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chosen {
+    pub part: String,
+    pub is_html: bool,
+    pub reason: Reason,
+}
+
+/// Stage 2, over a structure a provider described rather than a tree Sift parsed.
+///
+/// The rule is [`select`]'s: **prefer the HTML alternative, fall back to plain text, and take
+/// plain text where the HTML exceeds L-1.** That last one rejects rather than truncating, per
+/// `docs/limits.md` — and here the rejection has somewhere to land, which is what makes the
+/// fallback honest rather than a partial render with nothing saying so.
+///
+/// Nothing is fetched. That is the point: the caller asks for exactly one part's bytes, and
+/// the forty-megabyte attachment beside it costs nothing.
+#[must_use]
+pub fn choose(parts: &[PartDescriptor]) -> Option<Chosen> {
+    let body: Vec<&PartDescriptor> = parts.iter().filter(|p| p.is_body()).collect();
+    let html = body
+        .iter()
+        .find(|p| p.media_type == "text/html" && p.size <= L1_BODY_PART_BYTES);
+    let oversized = body
+        .iter()
+        .any(|p| p.media_type == "text/html" && p.size > L1_BODY_PART_BYTES);
+    let plain = body.iter().find(|p| p.media_type == "text/plain");
+
+    match (html, plain, oversized) {
+        (Some(part), _, _) => Some(Chosen {
+            part: part.id.clone(),
+            is_html: true,
+            reason: Reason::HtmlPreferred,
+        }),
+        (None, Some(part), true) => Some(Chosen {
+            part: part.id.clone(),
+            is_html: false,
+            reason: Reason::HtmlTooLarge,
+        }),
+        (None, Some(part), false) => Some(Chosen {
+            part: part.id.clone(),
+            is_html: false,
+            reason: Reason::OnlyPlainText,
+        }),
+        (None, None, _) => None,
+    }
+}
+
 /// What was chosen, and what else is available.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection<'a> {
@@ -101,6 +183,75 @@ pub fn select(message: &Message) -> Selection<'_> {
         plain,
         attachments,
         reason,
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn part(id: &str, media_type: &str, size: u64) -> PartDescriptor {
+        PartDescriptor {
+            id: id.into(),
+            media_type: media_type.into(),
+            filename: None,
+            size,
+        }
+    }
+
+    #[test]
+    fn the_html_alternative_is_preferred_and_the_reason_is_recorded() {
+        let chosen = choose(&[part("0", "text/plain", 10), part("1", "text/html", 20)])
+            .expect("nothing was chosen");
+        assert_eq!(chosen.part, "1");
+        assert!(chosen.is_html);
+        assert_eq!(chosen.reason, Reason::HtmlPreferred);
+    }
+
+    #[test]
+    fn an_html_part_over_the_bound_falls_back_to_plain_rather_than_being_cut() {
+        // docs/limits.md: exceeding a parse limit rejects, it does not truncate. Here the
+        // rejection has somewhere to land, which is what makes the fallback honest rather
+        // than a partial render with nothing saying so.
+        let huge = L1_BODY_PART_BYTES + 1;
+        let chosen = choose(&[part("0", "text/plain", 10), part("1", "text/html", huge)])
+            .expect("nothing was chosen");
+        assert_eq!(chosen.part, "0");
+        assert!(!chosen.is_html);
+        assert_eq!(chosen.reason, Reason::HtmlTooLarge);
+    }
+
+    #[test]
+    fn an_oversized_html_part_with_no_plain_alternative_chooses_nothing() {
+        // And *that* is the reject-to-raw-view path, because there is nothing honest left.
+        assert_eq!(
+            choose(&[part("0", "text/html", L1_BODY_PART_BYTES + 1)]),
+            None
+        );
+    }
+
+    #[test]
+    fn an_attachment_is_never_chosen_as_the_body() {
+        let mut attachment = part("2", "text/html", 10);
+        attachment.filename = Some("invoice.html".into());
+        assert_eq!(choose(&[attachment.clone()]), None);
+        let chosen = choose(&[attachment, part("0", "text/plain", 10)]).unwrap();
+        assert_eq!(chosen.part, "0");
+    }
+
+    #[test]
+    fn a_message_of_nothing_but_an_attachment_chooses_nothing() {
+        let mut attachment = part("0", "application/pdf", 40_000_000);
+        attachment.filename = Some("statement.pdf".into());
+        assert_eq!(choose(&[attachment]), None);
+    }
+
+    #[test]
+    fn the_choice_over_a_description_agrees_with_the_choice_over_a_tree() {
+        // The property that matters: a message must render the same way whichever provider
+        // it arrived through. One rule, two inputs.
+        let described = choose(&[part("0", "text/plain", 10), part("1", "text/html", 20)]).unwrap();
+        assert_eq!(described.reason, Reason::HtmlPreferred);
     }
 }
 

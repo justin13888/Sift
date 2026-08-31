@@ -376,6 +376,12 @@ mod tests {
         ) -> Result<Vec<sift_provider::adapter::Envelope>, Self::Error> {
             Ok(Vec::new())
         }
+        fn structure(
+            &self,
+            _: &RemoteMessageId,
+        ) -> Result<Vec<sift_provider::adapter::PartDescriptor>, Self::Error> {
+            Ok(Vec::new())
+        }
         fn fetch_part(&self, _: &RemoteMessageId, _: &str) -> Result<Vec<u8>, Self::Error> {
             Ok(Vec::new())
         }

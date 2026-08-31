@@ -11,6 +11,16 @@
 
 use crate::capability::Capabilities;
 
+/// One part of a message, as the provider describes it.
+///
+/// **Owned by the MIME crate rather than by this one**, and the edge points the way D-59
+/// requires: a part descriptor is an internet-message-format concept, the rendering layer's
+/// stage 2 chooses among them, and the rendering layer may not reach an adapter. So the type
+/// is defined below the adapters and used by them — which is the same shape as the layer
+/// table's own rule, that where a lower crate needs something from a higher one, the lower
+/// crate defines it.
+pub use sift_mime::select::PartDescriptor;
+
 /// A cursor into a provider's change feed. Opaque to everything above the adapter.
 ///
 /// D-82 requires it be acquired **before** a folder's backfill walks history: backfill-first
@@ -65,7 +75,18 @@ pub trait Adapter {
     /// user asks for the attachment.
     fn fetch_envelopes(&self, ids: &[RemoteMessageId]) -> Result<Vec<Envelope>, Self::Error>;
 
-    /// 4. Fetch a specific body part.
+    /// 4a. Describe a message's structure, without fetching any part's bytes.
+    ///
+    /// This is what "structure first" means, stated as an operation rather than as an
+    /// aspiration: a message carrying a forty-megabyte attachment costs a few kilobytes here,
+    /// and the attachment's bytes are fetched only if [`Self::fetch_part`] asks for them.
+    ///
+    /// It is also stage 2 of [the pipeline](../../../../docs/rendering/pipeline.md)'s input:
+    /// choosing which alternative to render is a decision over *this*, and a caller that
+    /// could not see the parts would have to guess.
+    fn structure(&self, id: &RemoteMessageId) -> Result<Vec<PartDescriptor>, Self::Error>;
+
+    /// 4b. Fetch a specific body part.
     fn fetch_part(&self, id: &RemoteMessageId, part: &str) -> Result<Vec<u8>, Self::Error>;
 
     /// 5. Apply a batch of mutations.
@@ -97,6 +118,19 @@ pub trait Adapter {
     /// associated function with no receiver would force the shell to name the type, which is
     /// the special-casing the capability model exists to remove.
     fn classify(&self, error: &Self::Error) -> Failure;
+
+    /// Present a different credential from now on.
+    ///
+    /// **Not a seventh responsibility.** The six are what an adapter *does*; this is the
+    /// material it does them with, and every rule about that material lives in the credential
+    /// broker: D-88's single-flight refresh, its write-before-use ordering, and its
+    /// classifier. NFR-23 makes the broker the one place credential access is brokered, so
+    /// this is the only way a secret reaches an adapter and the broker is the only caller.
+    ///
+    /// An adapter that authenticates some other way — or not at all — ignores it. Silence is
+    /// correct here rather than a refusal: the broker cannot know which adapters take a
+    /// bearer, and an error would make it find out by trying.
+    fn present_credential(&self, _secret: &str) {}
 
     /// Bytes on the wire since this adapter was built — FR-36.
     ///

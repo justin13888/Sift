@@ -758,12 +758,59 @@ fn sync(app: &mut App, args: &[&str]) -> Output {
 
     // Folders first: a delta needs somewhere to put what it finds, and D-83 assigns local
     // identity on discovery rather than on first use.
-    let discovery = sift_sync::run::discover_folders(adapter.as_ref(), &account.store);
-    let outcome = discovery.and_then(|_| {
-        sift_sync::run::sync_account(adapter.as_ref(), &mut account.store, &account.ids, pages)
-    });
+    fn turn(
+        adapter: &crate::account::Live,
+        account: &mut crate::app::OpenAccount,
+        pages: usize,
+    ) -> Result<sift_sync::ingest::PageReport, sift_sync::run::RunError> {
+        sift_sync::run::discover_folders(adapter.as_ref(), &account.store).and_then(|_| {
+            sift_sync::run::sync_account(adapter.as_ref(), &mut account.store, &account.ids, pages)
+        })
+    }
+    let mut outcome = turn(&adapter, account, pages);
+
+    // The token expired. D-88's single-flight refresh runs in the broker — this shell asks
+    // for one and tries again **once**, because a second failure after a fresh credential is
+    // not about the credential.
+    //
+    // The account is not torn down and the user is not prompted: only the refresh itself can
+    // conclude that the *grant* is gone, and treating a rejected access token as that
+    // conclusion is how an application appears to have lost the user's credentials when it
+    // has merely been running for an hour.
+    let mut refreshed = false;
+    if matches!(
+        &outcome,
+        Err(sift_sync::run::RunError::Provider {
+            failure: sift_provider::adapter::Failure::CredentialRefused,
+            ..
+        })
+    ) {
+        let account_id = account.id;
+        match refresh_credential(app, &name, account_id) {
+            Ok(access) => {
+                adapter.present_credential(&access);
+                outcome = turn(&adapter, app.account(&name)?, pages);
+                refreshed = true;
+            }
+            Err(why) => {
+                let account = app.account(&name)?;
+                account.adapter = Some(adapter);
+                return Err(why);
+            }
+        }
+    }
+
+    let account = app.account(&name)?;
+    let account_id = account.id;
     account.adapter = Some(adapter);
     let report = outcome.map_err(|e| e.to_string())?;
+    if refreshed {
+        // The new pair completed a request, so D-88's superseded one can go. It is retained
+        // until exactly this moment, because against a provider that rotates refresh tokens
+        // a crash in between would leave the account holding one the provider has already
+        // invalidated, and no way back.
+        let _ = app.broker.confirm(account_id);
+    }
 
     Ok(vec![
         format!(
@@ -776,6 +823,30 @@ fn sync(app: &mut App, args: &[&str]) -> Output {
             report.delivered
         ),
     ])
+}
+
+/// Ask the broker for a fresh access token.
+///
+/// Every rule about how that happens is the broker's — this only says which registration to
+/// refresh against, which is the shell's because the client identifier is.
+fn refresh_credential(
+    app: &mut App,
+    name: &str,
+    account: sift_foundation::identity::AccountId,
+) -> Result<String, String> {
+    let client_id = app
+        .pending_authorization
+        .get(name)
+        .cloned()
+        .or_else(|| std::env::var("SIFT_OAUTH_CLIENT_ID").ok())
+        .ok_or("no client identifier is known for this account, so it cannot be refreshed")?;
+    let registration = crate::account::registration(&client_id);
+    let mut transport = sift_http::Https::to(&registration.profile.token.host)
+        .map_err(|why| format!("the trust store could not be consulted: {why}"))?;
+    app.broker
+        .refresh(&mut transport, &registration, account)
+        .map(|pair| pair.access)
+        .map_err(|e| e.to_string())
 }
 
 /// Fetch a message's body and run it through the seven stages.
@@ -804,18 +875,24 @@ fn body(app: &mut App, args: &[&str]) -> Output {
         .as_ref()
         .ok_or("this account has no provider behind it")?;
 
-    // Structure first. The part chosen for display is fetched; a forty-megabyte attachment
-    // costs nothing until somebody asks for it, which is a claim about *requests*.
+    // **Structure first, and then one part.** The structure costs a few kilobytes; the
+    // attachment beside it costs nothing until somebody asks for it, which is a claim about
+    // *requests* rather than about intentions.
     let remote_id = sift_provider::adapter::RemoteMessageId(remote);
-    let html = adapter
-        .fetch_part(&remote_id, "1")
-        .or_else(|_| adapter.fetch_part(&remote_id, "0"))
+    let parts = adapter.structure(&remote_id).map_err(|e| e.to_string())?;
+    // Stage 2, and the same rule a parsed tree goes through: HTML preferred, plain text as
+    // the fallback, and plain text where the HTML exceeds L-1 — which rejects rather than
+    // truncating, and here the rejection has somewhere honest to land.
+    let chosen =
+        sift_mime::select::choose(&parts).ok_or("this message carries no renderable part")?;
+    let bytes = adapter
+        .fetch_part(&remote_id, &chosen.part)
         .map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&html).into_owned();
+    let text = String::from_utf8_lossy(&bytes).into_owned();
     let selected = sift_pipeline::Selected {
-        html: Some(text),
-        text: None,
-        reason: Some("the provider's own structure named it text/html".to_owned()),
+        html: chosen.is_html.then(|| text.clone()),
+        text: (!chosen.is_html).then_some(text),
+        reason: Some(format!("{:?}", chosen.reason)),
     };
 
     let mut broker = sift_broker::broker::Broker::new();
@@ -831,6 +908,17 @@ fn body(app: &mut App, args: &[&str]) -> Output {
     let rendered = sift_pipeline::render(&selected, &mut context).map_err(|e| e.to_string())?;
 
     let mut out = vec![
+        format!(
+            "part {} ({}) — {}",
+            chosen.part,
+            if chosen.is_html {
+                "text/html"
+            } else {
+                "text/plain"
+            },
+            selected.reason.clone().unwrap_or_default()
+        ),
+        format!("{} part(s) described, {} fetched", parts.len(), 1),
         format!("stages: {}", rendered.stages.join(" -> ")),
         format!("token: {}", rendered.token.as_str()),
         format!(

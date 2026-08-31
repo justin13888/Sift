@@ -156,6 +156,13 @@ impl Adapter for Scripted {
             .collect())
     }
 
+    fn structure(
+        &self,
+        _id: &RemoteMessageId,
+    ) -> Result<Vec<sift_provider::adapter::PartDescriptor>, Self::Error> {
+        Ok(Vec::new())
+    }
+
     fn fetch_part(&self, _id: &RemoteMessageId, _part: &str) -> Result<Vec<u8>, Self::Error> {
         Ok(Vec::new())
     }

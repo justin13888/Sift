@@ -34,8 +34,16 @@ This is the only way the abstraction survives contact with a fifth provider.
 | Request budget | integer with a period, or unknown | The rate the provider will accept before throttling. Magnitude-valued, so unknown means "plan conservatively" — see D-87 below and the growth rules |
 | Snippet source | provider-supplied; client-derived; none | Where FR-6's list snippet comes from. Three providers return a preview with the envelope and one does not — see [sync engine](sync-engine.md) |
 
-Adapter responsibilities are: enumerate folders, produce a delta against a cursor, fetch envelopes, fetch
-a specific body part, apply a batch of mutations, and expose a change-notification stream. Nothing more.
+Adapter responsibilities are: enumerate folders, produce a delta against a cursor, fetch envelopes,
+**describe a message's structure and fetch a specific part of it**, apply a batch of mutations, and expose
+a change-notification stream. Nothing more.
+
+The fourth was previously stated as "fetch a specific body part" alone, which named the second half of an
+operation and not the first. **A caller cannot ask for a part without knowing which parts exist**, and
+structure-first fetching — the rule that makes a message carrying a forty-megabyte attachment cost a few
+kilobytes until somebody asks for the attachment — is precisely the claim that the structure arrives
+*before* any part's bytes do. [Data model](../storage/data-model.md) already stores it as a column on the
+message, so it was a value the design expected an adapter to produce and no responsibility produced.
 
 ## The capability set is open, and that is what makes a fifth provider cheap
 

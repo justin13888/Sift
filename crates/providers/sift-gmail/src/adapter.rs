@@ -3,8 +3,8 @@
 use core::cell::RefCell;
 use sift_foundation::limits::L26_BACKFILL_PAGE;
 use sift_provider::adapter::{
-    Adapter, Change, Cursor, Delta, Envelope, Failure, MutationOutcome, Operation, RemoteFolder,
-    RemoteFolderId, RemoteMessageId, WireMutation,
+    Adapter, Change, Cursor, Delta, Envelope, Failure, MutationOutcome, Operation, PartDescriptor,
+    RemoteFolder, RemoteFolderId, RemoteMessageId, WireMutation,
 };
 use sift_provider::capability::Capabilities;
 use sift_provider::transport::{Request, Response, Transport, TransportError};
@@ -432,6 +432,22 @@ impl<T: Transport> Adapter for Gmail<T> {
         Ok(out)
     }
 
+    fn structure(&self, id: &RemoteMessageId) -> Result<Vec<PartDescriptor>, Self::Error> {
+        let parts = wire::parse_structure(&self.get(&wire::structure_target(id))?)?;
+        Ok(parts
+            .into_iter()
+            // The container nodes — `multipart/*` — are structure rather than content, and a
+            // caller choosing what to render has nothing to do with them.
+            .filter(|p| !p.mime_type.starts_with("multipart/"))
+            .map(|p| PartDescriptor {
+                id: p.id,
+                media_type: p.mime_type,
+                filename: p.filename,
+                size: p.size,
+            })
+            .collect())
+    }
+
     fn fetch_part(&self, id: &RemoteMessageId, part: &str) -> Result<Vec<u8>, Self::Error> {
         // An attachment is asked for by reference, which is what keeps the structure fetch
         // from carrying its bytes.
@@ -474,6 +490,10 @@ impl<T: Transport> Adapter for Gmail<T> {
         Err(GmailError::Unsupported(
             "this provider offers no change notification that does not also authorize sending",
         ))
+    }
+
+    fn present_credential(&self, secret: &str) {
+        self.set_access_token(secret);
     }
 
     fn wire_bytes(&self) -> (u64, u64) {

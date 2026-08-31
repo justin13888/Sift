@@ -13,6 +13,9 @@ workspace = true
 
 [dependencies]
 sift-foundation.workspace = true
+# A part descriptor is an internet-message-format concept, and stage 2's choice over one has
+# to be the same choice made over a parsed tree — so both live there and this crate uses them.
+sift-mime.workspace = true
 
 # PKCE's S256 challenge, and the randomness the verifier and D-36's state parameter need.
 #
