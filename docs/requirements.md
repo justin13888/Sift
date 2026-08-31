@@ -29,7 +29,7 @@ All performance and resource figures are **hypotheses to be validated** against 
 | FR-12 | Offline read of cached mail; "not cached" distinguished from "not available" | [storage/cache-and-blobs](storage/cache-and-blobs.md) |
 | FR-13 | Triage mutations expressed as provider-agnostic intents, over a closed and explicitly-stated set | [mail/mutations](mail/mutations.md) |
 | FR-14 | Optimistic local application with a durable mutation queue | [mail/mutations](mail/mutations.md) |
-| FR-15 | Undo window executed as a compensating intent | [mail/mutations](mail/mutations.md) |
+| FR-15 | Every intent but permanent delete reversible through its compensation; a timed undo window additionally where the action removes the message from view | [mail/mutations](mail/mutations.md) |
 | FR-16 | Conflict resolution: silent where unambiguous, non-blocking notice where not | [mail/mutations](mail/mutations.md) |
 | FR-17 | Bulk operations over selections and search results, batched to provider limits | [mail/mutations](mail/mutations.md) |
 | FR-18 | Replayed mutations never double-apply | [mail/mutations](mail/mutations.md) |
@@ -66,7 +66,7 @@ All performance and resource figures are **hypotheses to be validated** against 
 | NFR-4 | Uncached message to body painted under 600 ms p95 at 50 Mbps | [rendering/pipeline](rendering/pipeline.md) |
 | NFR-5 | Search keystroke to results under 100 ms p95 at 500k messages | [storage/search](storage/search.md) |
 | NFR-6 | List scroll sustains 60 fps with zero dropped frames over a 10k-row fling | [architecture/ui-shell](architecture/ui-shell.md) |
-| NFR-7 | Triage action reflected in UI within 16 ms, before network | [architecture/ui-shell](architecture/ui-shell.md) |
+| NFR-7 | Triage action reflected in UI within 16 ms, before network — **permanent delete excluded**, being the one intent FR-14 does not apply optimistically | [architecture/ui-shell](architecture/ui-shell.md) |
 | NFR-41 | Sanitize, block, and transform under 30 ms p95 for a 200 KB body | [rendering/pipeline](rendering/pipeline.md) |
 
 ## Resource

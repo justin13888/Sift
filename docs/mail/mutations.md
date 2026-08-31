@@ -88,6 +88,39 @@ closed, and it is the one place the scope boundary moved rather than being clari
 triage means only "where does this message go" should argue for the *folder move only* value applying
 everywhere and this decision reducing to a label.
 
+## The intent set is closed today and has already grown once — here is how it grows again
+
+FR-13 calls its set closed, and D-40 above widened it anyway. That is not a contradiction so much as a
+missing rule: [provider model](provider-model.md) wrote three normative rules for growing the capability
+table and this document wrote none for growing the intent set, even though the two grow together and
+D-40 grew both at once. The rules below are that omission closed, and they are deliberately the same
+shape, because an implementer who has read one should not have to guess at the other.
+
+**A new intent arrives with a capability that gates it.** Never as an intent every adapter is assumed to
+support. The capability follows [provider model](provider-model.md)'s first rule — absent means
+unsupported, so the affordance is absent — which is what let D-40 add junk reporting without touching an
+adapter that does not offer it. An intent with no gating capability is a claim that all four providers,
+and the fifth nobody has written yet, can realise it.
+
+**A new intent declares its compensation, and whether it gets a timed window.** FR-15 below is keyed on
+exactly these two answers, and permanent delete shows what the first one costs when it is *none*: no undo,
+confirmation instead, and an explicit exclusion from FR-14 and NFR-7. An intent that quietly answers
+neither is how the undo window stops covering part of the product without anyone deciding that it should.
+
+**A new intent is a schema change to the queue, and behaves like one.** Serialized intents outlive
+upgrades under [NFR-48](../storage/data-model.md), so a build predating an intent can meet one in a queue
+it otherwise reads. That document already requires such an intent to be quarantined and surfaced rather
+than dropped or guessed at; naming the coupling here is what makes it a step in adding an intent rather
+than a rule someone has to remember.
+
+**Widening the set is a scope change and says so.** [Scope](../product/scope.md) lists the permitted
+mutations, so the two documents move together or they disagree. D-40 is the precedent: it argued the case
+in the open, recorded that it moved the boundary, and amended both.
+
+Together these mean a sixth intent lands as a new capability row, a new intent, and a compensation — with
+no migration for queues that already exist, and no adapter changed that does not offer it. That is the
+same property the capability model is for, applied to the other half of the pair.
+
 ## FR-14 — Optimistic application, durable queue
 
 Intents MUST be applied to local state immediately, giving UI feedback before any network round trip
@@ -99,12 +132,29 @@ The queue is part of the store, not memory. See [data model](../storage/data-mod
 
 ## FR-15 — Undo
 
-Archive, delete, and move MUST offer an undo window — 10 seconds by default — executed as a **compensating
-intent**, not as a queue retraction.
+**Every intent except permanent delete has a compensating intent, and MUST be reversible through it.**
+Reversal is executed as that compensation, never as a queue retraction.
+
+**An intent that removes a message from the view the user is looking at MUST additionally offer a
+timed undo window** — 10 seconds by default. Today that is archive, delete to trash, move, and report
+junk. These are the actions where the user loses sight of what they did and has nothing left to click,
+which is what a window is for; mark-read, flag and tag leave the message in front of the user, where the
+affordance that applied the change is also the affordance that reverses it. Offering a countdown toast for
+every message the reader marks read would make the mechanism worthless by making it constant.
+
+Stating a rule rather than a list is deliberate. The list was previously "archive, delete, and move",
+which D-40 falsified the moment it added an intent whose whole argument is that report-junk and
+report-not-junk compensate each other. A rule keyed on the property that decides the question cannot go
+stale the next time the set grows — and the growth rules above require a new intent to answer both halves
+of it before it lands.
 
 Compensation rather than retraction is the correct model because the original may already have reached the
 server. A design that tries to cancel in flight has two outcomes to reason about; a design that always
 compensates has one.
+
+**What a compensation restores is local state, never a remote side effect.** Reporting not-junk returns
+the message and tells the provider it was wrong; it cannot un-train the classifier. Undo promises the
+first and MUST NOT be described as promising the second.
 
 ## FR-16 — Conflict resolution
 

@@ -86,7 +86,11 @@ Hypotheses, to be validated against the [reference environment](../product/refer
 | **NFR-1** | Cold start — process launch to interactive list — under 400 ms at p95. Opening a window on an already-resident process is bounded by NFR-2, not this | instrumented trace |
 | **NFR-2** | Warm folder or account switch under 50 ms at p95 | frame timing |
 | **NFR-6** | List scroll sustains 60 fps, 120 where available; zero dropped frames over a 10,000-row fling | frame capture |
-| **NFR-7** | Triage action reflected in the UI within 16 ms, optimistically, before any network round trip | trace |
+| **NFR-7** | Triage action reflected in the UI within 16 ms, optimistically, before any network round trip. **Permanent delete is excluded**, for the reason below | trace |
 
 NFR-7 is a consequence of the [optimistic mutation model](../mail/mutations.md), not an independent
-achievement.
+achievement — and it therefore inherits that model's single exception. Permanent delete is confirmed
+before it is issued and is **not** applied optimistically, because there is no compensating intent for
+destruction; [mutations](../mail/mutations.md) owns that reasoning. Stated without the exclusion, NFR-7
+reads as a promise over every FR-13 intent that one of them cannot keep by construction, and a test
+written from this row alone would fail on the one mutation the design deliberately made slow.
