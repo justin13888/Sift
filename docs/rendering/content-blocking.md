@@ -39,9 +39,14 @@ holding it resident with none open would spend the largest single cache budget i
 component nothing can reach. See [memory pressure](../runtime/memory-pressure.md), where NFR-8 excludes it
 and NFR-9 includes it.
 
-Reloading is a list parse on window open, ahead of any message selection, so it falls on NFR-1 rather than
-on NFR-3. The compiled engine-level backstop rules are installed with the body view's configuration and
-follow the same lifetime.
+Reloading is a list parse on window open, ahead of any message selection. It was previously described as
+falling on NFR-1 rather than on NFR-3; [D-69](../architecture/lifecycle.md) moves it off the cold-start
+critical path, because a 40 MB parse is a large fraction of that budget spent preparing an authority the
+first painted list does not consult. **What was being protected is unchanged and is the obligation that
+matters: the engine MUST be loaded before the first body renders**, and until it is, the tier below
+applies — the broker blocks by default, so a body reached before the engine is ready is under-permissive
+rather than over-permissive. The compiled engine-level backstop rules are installed with the body view's
+configuration and follow the same lifetime.
 
 **Being dropped at L1 leaves a window open with no authority loaded, and that state needs a stated
 answer.** L1 is a mild-pressure tier, so a user may well open a message while the engine is gone. Sift
