@@ -79,6 +79,39 @@ pub trait Adapter {
     ///
     /// A doorbell. It says something changed; it never says what.
     fn watch(&self, folders: &[RemoteFolderId]) -> Result<(), Self::Error>;
+
+    /// Classify a failure this adapter produced.
+    ///
+    /// **The adapter says what kind; the scheduler says when.** That split is D-87's and it
+    /// is why this is a classification rather than a retry: an adapter that decided when to
+    /// try again would be a per-account sleep loop, which D-25 prohibits outright.
+    ///
+    /// It is required rather than defaulted because every wrong answer here is expensive in
+    /// a different direction. A cursor invalidation mistaken for a fault degrades an account
+    /// that only needed to recover; a fault mistaken for a cursor invalidation resyncs a
+    /// mailbox for nothing. Neither is a sensible default.
+    fn classify(error: &Self::Error) -> Failure;
+}
+
+/// What a failure means to the layer that has to decide what happens next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    /// The cursor is no longer accepted. **Progress, not a fault** — D-82 moves the folder
+    /// to `Invalidated` and NFR-18 recovers without asking the user anything.
+    CursorInvalidated,
+    /// The credential presented was refused. Only the credential broker can decide whether
+    /// the *grant* is gone; this says only that the request was not answered.
+    CredentialRefused,
+    /// The provider stated a delay. D-87 puts it on the wheel as a deadline, and the number
+    /// is a floor rather than an instruction because the wheel coalesces.
+    Throttled { retry_after_millis: u64 },
+    /// Try again later, at the scheduler's discretion.
+    Transient,
+    /// The request went out and the answer did not come back. D-85 moves an intent to
+    /// *Reconciling* rather than replaying it blindly.
+    Unknown,
+    /// Settled. Retrying changes nothing, and NFR-29 requires the reason be surfaced.
+    Permanent,
 }
 
 /// A provider's own folder identifier. An **attribute** of a folder, never its key: D-83

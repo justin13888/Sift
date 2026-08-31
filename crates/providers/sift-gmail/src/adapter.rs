@@ -3,7 +3,7 @@
 use core::cell::RefCell;
 use sift_foundation::limits::L26_BACKFILL_PAGE;
 use sift_provider::adapter::{
-    Adapter, Change, Cursor, Delta, Envelope, MutationOutcome, Operation, RemoteFolder,
+    Adapter, Change, Cursor, Delta, Envelope, Failure, MutationOutcome, Operation, RemoteFolder,
     RemoteFolderId, RemoteMessageId, WireMutation,
 };
 use sift_provider::capability::Capabilities;
@@ -464,6 +464,31 @@ impl<T: Transport> Adapter for Gmail<T> {
         Err(GmailError::Unsupported(
             "this provider offers no change notification that does not also authorize sending",
         ))
+    }
+
+    fn classify(error: &Self::Error) -> Failure {
+        match error {
+            Self::Error::Refusal(Refusal::CursorInvalidated) => Failure::CursorInvalidated,
+            Self::Error::TokenRejected => Failure::CredentialRefused,
+            Self::Error::Transport(TransportError::Throttled { retry_after_millis }) => {
+                Failure::Throttled {
+                    retry_after_millis: *retry_after_millis,
+                }
+            }
+            Self::Error::Transport(TransportError::Transient) => Failure::Transient,
+            Self::Error::Transport(TransportError::Unknown) => Failure::Unknown,
+            // An answer that did not parse says nothing about the account and everything
+            // about what answered. A captive portal's sign-in page arrives here, and
+            // treating it as settled would degrade every account on a hotel network — which
+            // is NFR-34's cascade, reaching the folder state machine instead of the
+            // credential store.
+            Self::Error::Refusal(Refusal::Malformed(_)) => Failure::Transient,
+            Self::Error::Transport(TransportError::NoFixture(_))
+            | Self::Error::Transport(TransportError::TooLarge { .. })
+            | Self::Error::Transport(TransportError::Refused(_))
+            | Self::Error::Refusal(Refusal::Denied { .. })
+            | Self::Error::Unsupported(_) => Failure::Permanent,
+        }
     }
 }
 

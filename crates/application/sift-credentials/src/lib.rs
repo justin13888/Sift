@@ -10,4 +10,6 @@
 //! backed up, synced, copied for debugging, and attached to bug reports.
 
 pub mod flow;
+pub mod oauth;
 pub mod refresh;
+pub mod store;

@@ -1703,7 +1703,11 @@ dependencies = [
 name = "sift-credentials"
 version = "0.1.0"
 dependencies = [
+ "security-framework",
+ "serde_json",
+ "sha2",
  "sift-foundation",
+ "sift-provider",
 ]
 
 [[package]]
@@ -1872,6 +1876,7 @@ name = "sift-provider"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
+ "serde_json",
  "sha2",
  "sift-foundation",
 ]
@@ -1917,8 +1922,11 @@ version = "0.1.0"
 name = "sift-sync"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "rusqlite",
  "sift-foundation",
  "sift-provider",
+ "sift-store",
 ]
 
 [[package]]

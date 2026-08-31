@@ -14,3 +14,13 @@ workspace = true
 [dependencies]
 sift-foundation.workspace = true
 sift-provider.workspace = true
+sift-store.workspace = true
+rusqlite = { version = "0.37", features = ["bundled", "blob"] }
+# D-44's corroborating digest. The same hash D-23 chose for content addressing, for the
+# same reason — no hardware mandate, no C toolchain.
+blake3 = { version = "1", default-features = false, features = ["pure", "std"] }
+
+[dev-dependencies]
+# The end-to-end tests write through the real schema. A test that kept its messages in a map
+# would be a mock, and would prove nothing about the store.
+sift-store.workspace = true

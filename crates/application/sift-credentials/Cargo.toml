@@ -13,3 +13,16 @@ workspace = true
 
 [dependencies]
 sift-foundation.workspace = true
+sift-provider.workspace = true
+serde_json = "1"
+
+# The OS credential store. NFR-23: credentials exist here and nowhere else — never in a
+# database, never in a log, never in a crash dump.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+
+[dev-dependencies]
+# The PKCE challenge is checked against the verifier that was actually sent, which needs the
+# same hash the challenge names.
+sha2 = "0.10"

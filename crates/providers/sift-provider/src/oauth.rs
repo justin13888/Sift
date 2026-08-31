@@ -224,6 +224,108 @@ fn form(fields: &[(&str, &str)]) -> String {
         .join("&")
 }
 
+/// What the provider granted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenGrant {
+    pub access: String,
+    /// Absent on a refresh against a provider that does not rotate them. The caller keeps
+    /// the one it had rather than treating the absence as a loss.
+    pub refresh: Option<String>,
+    pub expires_in_secs: Option<u64>,
+    /// What was actually granted, which may be narrower than what was asked for.
+    pub scope: Option<String>,
+}
+
+/// What came back from the token endpoint.
+///
+/// The three-way split is D-88's classifier, and the reason the third variant exists at all
+/// is [`TokenAnswer::Unparseable`]'s doc comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenAnswer {
+    Granted(TokenGrant),
+    /// A well-formed provider error explicitly denying the grant — RFC 6749's
+    /// `invalid_grant`. **The only non-transient case.**
+    GrantDenied {
+        error: String,
+        description: Option<String>,
+    },
+    /// A well-formed provider error that is not a denial of the grant. Something about the
+    /// request, or about the client's registration — retrying it unchanged will not help,
+    /// and re-authenticating the user will not either.
+    Refused {
+        error: String,
+        description: Option<String>,
+    },
+    /// **A response that does not parse as the provider's own error document.**
+    ///
+    /// This is the one that matters. A captive portal answering with a sign-in page produces
+    /// exactly this, and treating it as authoritative would prompt for re-authentication on
+    /// **every account at once** — an application that appears to have lost the user's
+    /// credentials, when in fact it is on a hotel network.
+    Unparseable,
+}
+
+/// Read the token endpoint's answer.
+///
+/// The status is taken into account but is not trusted on its own: a 200 carrying an error
+/// document is an error, and a 400 carrying nothing parseable is not evidence about the
+/// grant.
+#[must_use]
+pub fn read_token_answer(status: u16, body: &[u8]) -> TokenAnswer {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return TokenAnswer::Unparseable;
+    };
+    if let Some(error) = value.get("error").and_then(|e| e.as_str()) {
+        let description = value
+            .get("error_description")
+            .and_then(|d| d.as_str())
+            .map(str::to_owned);
+        let error = error.to_owned();
+        // RFC 6749 §5.2: `invalid_grant` is the refresh token being expired, revoked, or
+        // otherwise no longer valid. Everything else says something about the request.
+        return if error == "invalid_grant" {
+            TokenAnswer::GrantDenied { error, description }
+        } else {
+            TokenAnswer::Refused { error, description }
+        };
+    }
+    let Some(access) = value.get("access_token").and_then(|t| t.as_str()) else {
+        // A success with no token, or a failure with no error field. Neither is the
+        // provider's own error document, so neither is authoritative about the grant.
+        let _ = status;
+        return TokenAnswer::Unparseable;
+    };
+    TokenAnswer::Granted(TokenGrant {
+        access: access.to_owned(),
+        refresh: value
+            .get("refresh_token")
+            .and_then(|t| t.as_str())
+            .map(str::to_owned),
+        expires_in_secs: value.get("expires_in").and_then(serde_json::Value::as_u64),
+        scope: value
+            .get("scope")
+            .and_then(|s| s.as_str())
+            .map(str::to_owned),
+    })
+}
+
+/// Whether what was granted covers what was asked for.
+///
+/// A provider may grant less than was requested. Sift's scope set is already the minimum for
+/// read, search and the FR-13 intent set, so a narrower grant is an account that will fail
+/// later in a way nothing connects back to the consent screen — better to say so at the
+/// moment it happens.
+#[must_use]
+pub fn granted_covers(requested: &[String], granted: Option<&str>) -> bool {
+    let Some(granted) = granted else {
+        // The provider did not say. Believed, because the alternative is refusing an account
+        // over a field the specification makes optional.
+        return true;
+    };
+    let granted: Vec<&str> = granted.split_whitespace().collect();
+    requested.iter().all(|want| granted.contains(&want.as_str()))
+}
+
 /// Pull one parameter out of a callback address.
 ///
 /// The callback arrives through a registered URI scheme (D-36), so it is a string handed to
@@ -384,6 +486,79 @@ mod tests {
         let body = refresh_body("client", "r");
         assert!(!body.contains("client_secret"));
         assert!(body.contains("grant_type=refresh_token"));
+    }
+
+    #[test]
+    fn a_grant_is_read_with_everything_the_caller_needs() {
+        let answer = read_token_answer(
+            200,
+            br#"{"access_token":"at","refresh_token":"rt","expires_in":3599,"scope":"a b"}"#,
+        );
+        assert_eq!(
+            answer,
+            TokenAnswer::Granted(TokenGrant {
+                access: "at".into(),
+                refresh: Some("rt".into()),
+                expires_in_secs: Some(3599),
+                scope: Some("a b".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_refresh_that_returns_no_new_refresh_token_is_not_a_loss() {
+        let TokenAnswer::Granted(grant) = read_token_answer(200, br#"{"access_token":"at"}"#)
+        else {
+            panic!("not granted");
+        };
+        assert_eq!(grant.refresh, None);
+    }
+
+    #[test]
+    fn only_an_explicit_denial_of_the_grant_is_a_denial() {
+        assert!(matches!(
+            read_token_answer(400, br#"{"error":"invalid_grant","error_description":"expired"}"#),
+            TokenAnswer::GrantDenied { .. }
+        ));
+        // Something about the request or the registration. Re-authenticating the user does
+        // not help, so this must not present as "please sign in again".
+        assert!(matches!(
+            read_token_answer(401, br#"{"error":"invalid_client"}"#),
+            TokenAnswer::Refused { .. }
+        ));
+    }
+
+    #[test]
+    fn a_captive_portals_sign_in_page_is_unparseable_rather_than_a_denial() {
+        // The specific failure D-88's classifier exists to prevent: treating this as
+        // authoritative prompts for re-authentication on every account at once.
+        for body in [
+            &b"<html>Sign in to the network</html>"[..],
+            b"",
+            b"Service Unavailable",
+            b"{}",
+            b"{\"error_description\":\"no error field\"}",
+        ] {
+            assert_eq!(read_token_answer(400, body), TokenAnswer::Unparseable, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn a_success_carrying_an_error_document_is_an_error() {
+        assert!(matches!(
+            read_token_answer(200, br#"{"error":"invalid_grant"}"#),
+            TokenAnswer::GrantDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn a_narrower_grant_than_was_asked_for_is_noticed() {
+        let want = vec!["read".to_owned(), "modify".to_owned()];
+        assert!(granted_covers(&want, Some("read modify extra")));
+        assert!(!granted_covers(&want, Some("read")));
+        // A provider that does not say is believed: the field is optional, and refusing an
+        // account over its absence would be worse than the failure it prevents.
+        assert!(granted_covers(&want, None));
     }
 
     #[test]

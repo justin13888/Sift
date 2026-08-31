@@ -4,6 +4,7 @@
 //! reaches Sift through C.
 
 pub mod account;
+pub mod flags;
 
 // D-65's first harness. Absent from release: the flag register declares it off, and it MUST
 // NOT be compilable into a shipped binary.
