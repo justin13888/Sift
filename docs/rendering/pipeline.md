@@ -2,7 +2,7 @@
 
 How an attacker-controlled message becomes pixels.
 
-**Owns:** FR-8, FR-9, NFR-3, NFR-4, NFR-19, NFR-28, NFR-41.
+**Owns:** D-92, FR-8, FR-9, NFR-3, NFR-4, NFR-19, NFR-28, NFR-41.
 
 **Every message body is attacker-controlled input.** Not "may be" — the sender chose every byte, and the
 sender is unauthenticated by default. The pipeline is designed on that assumption throughout.
@@ -45,6 +45,75 @@ Stage ordering is normative. Sanitization precedes cosmetic filtering so the fil
 structure it can trust; rewriting happens *inside* sanitization so that no absolute external URL survives
 the stage whose output I2 is asserted over; the dark transform runs last because it must not be able to
 reintroduce anything the earlier stages removed.
+
+## D-92 — The pipeline runs off the shared runtime, and one boundary serves three concerns
+
+**Chosen:** stages run on the **blocking pool**, not on the shared work-stealing runtime's workers; a
+render is **cancellable at stage boundaries** and is cancelled when its message is superseded; and the
+stage boundary is where the subsystem tag changes, where the catch boundary sits, and where cancellation
+is observed — one point, three concerns.
+**Rejected:** running the pipeline on the shared runtime; a non-cancellable render; separate
+synchronization points for attribution, panic containment and cancellation.
+
+**Why not the shared runtime.** NFR-41 budgets stages 3 through 6 at *"under 30 ms at p95 for a
+200 KB body"*, and that is 30 ms of uninterrupted CPU rather than 30 ms of waiting.
+[D-19](../architecture/overview.md) chose a work-stealing runtime because *"dozens of concurrent
+operations … are almost always waiting"*; a task that never yields for 30 ms is the opposite of what that
+runtime is tuned for, and it occupies a worker that [NFR-7](../architecture/ui-shell.md)'s 16 ms
+optimistic feedback and [NFR-6](../architecture/ui-shell.md)'s frame budget are competing for. Work
+stealing does not help, because there is nothing to steal — the work is one long task.
+
+**This broadens what the blocking pool is for, and the broadening is the point.** D-19 describes it as
+being for *"database and filesystem calls"*. The property that actually matters is not that a call
+touches a device; it is that it occupies a worker long enough to matter. The pipeline is the case that
+makes the distinction visible, and the rule going forward is the general one: **work that will not yield
+promptly goes to the pool, whether or not it is I/O.**
+
+**Why the render is cancellable, which nobody had said.** [D-18](../architecture/presentation-layer.md)
+argues cancellation for list windows because *"a fast scroll supersedes window requests faster than they
+can be served"*. Arrowing through a thread under [D-54](webview-isolation.md) supersedes renders exactly
+the same way and faster, because a render costs more than a window query — and that argument was never
+made for the reader. An uncancellable pipeline means a user traversing ten messages pays for ten full
+renders and sees the tenth after nine wasted 30 ms passes, with the pool occupied throughout.
+
+**Cancellation is observed at stage boundaries and nowhere else.** A stage runs to completion or is
+abandoned whole; nothing checks for cancellation inside the sanitizer's tree walk. That bounds the
+latency of a cancellation to one stage rather than to the pipeline, which is enough, and it keeps every
+stage a pure function of its input — which is the property [D-47](../architecture/overview.md) relies on
+when it says abandoning a stage *"loses a message"* and *"nothing upstream of stage 1 is invalidated"*.
+
+**Three concerns meet at the stage boundary, and that coincidence is worth making normative.**
+
+| Concern | Why it lands there |
+|---|---|
+| **Panic containment** | [D-47](../architecture/overview.md) puts a catch boundary at each stage, because that is *"the granularity at which the state is discardable"* |
+| **Attribution** | [D-24](../runtime/observability.md) requires the subsystem tag be task-scoped and *"re-established at each poll"*; the [subsystem partition](../runtime/observability.md) splits this pipeline across **Parse** and **Sanitize**, so the tag has to change mid-pipeline, and the stage boundary is the only place that is well defined |
+| **Cancellation** | above |
+
+Three mechanisms that each need a synchronization point, all landing on the same one, is what makes the
+pipeline implementable rather than a place where three disciplines interleave badly. **An implementer who
+introduces a fourth boundary for any of them has made the other two harder to reason about**, which is
+worth stating because each would look locally reasonable.
+
+**A shed that destroys the view mid-render cancels the render.** L2 in
+[memory pressure](../runtime/memory-pressure.md) destroys the body view and L3 destroys every window,
+either of which can arrive while a pipeline is running. The render is cancelled at its next stage
+boundary and its output discarded; nothing is left half-applied, because the output is a fresh document
+that simply never reaches a view. This is the same property that makes D-47's recovery honest.
+
+**A caught panic produces a state, not just a degradation.** D-47 requires that it not be *"silently
+absorbed as an ordinary parse failure"*, and the [state register](../architecture/state-register.md)
+carries the state the reader shows and the [C ABI](../architecture/view-protocol.md) its own status. The
+degradation to FR-9's raw view is what the user sees; the state is what distinguishes it from a message
+that was merely unparseable, which is the distinction D-47 says must not be lost.
+
+**What it costs:** a pool sized for long CPU tasks as well as for blocking I/O, and a cancellation check
+that must be at every stage boundary rather than at the ones an implementer remembers.
+
+**Contestable because:** giving the pipeline its own pool rather than sharing the blocking one would keep
+a large decode from delaying a database read, and the reason it is not proposed is that two pools are two
+things to size against [Q-12](../open-questions.md)'s unmeasured budgets. If contention between rendering
+and storage shows up in the P0 measurements, splitting them is the answer rather than reweighting one.
 
 ## Rewriting is not the same decision as blocking, and they happen in different places
 
