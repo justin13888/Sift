@@ -2,7 +2,7 @@
 
 What Sift stores, and how it is partitioned.
 
-**Owns:** D-6, D-21, D-32, D-44, D-74, D-78, NFR-48.
+**Owns:** D-6, D-21, D-32, D-44, D-74, D-78, D-104, NFR-48.
 
 ## D-6 — One database per account
 
@@ -127,8 +127,8 @@ Per-account, unless noted.
 | Account | provider, display name, declared capabilities | one row; the file *is* the account |
 | Folder | local identity, remote identifier, semantic kind, display name, retired flag | kind is semantic, never a display name — see FR-5. Local identity is what FR-43's watched set and the per-folder notification rules key on, per [D-83](../mail/sync-engine.md); the remote identifier is an attribute, for the reason it is one on Message |
 | Folder sync state | per folder: state, cursor, validity identifier, last successful sync, degradation reason | one row per folder; the state is one of the six [D-82](../mail/sync-engine.md) enumerates, and the other columns are only meaningful in some of them |
-| Message | remote identifier, internet message identifier, fallback identity digest, thread identifier, location, sender, recipients, subject, received time, origination date, flags, attachment presence, size, MIME structure, body reference, snippet | body reference is null when not cached; received time is the server's and is what [D-55](../architecture/presentation-layer.md) orders on, while the origination date is the sender's `Date` header and is only displayed; the snippet is present only where the account declares a snippet source, and is bounded by L-16; the digest is computed at ingest under D-44. Location and flags are the **base** state [D-51](../mail/mutations.md) defines; the pending overlay is held with the queue, not here |
-| Thread | remote thread identifier, normalized subject, last activity, message count | scoped to the account — see [threading](../mail/threading.md) |
+| Message | remote identifier, internet message identifier, fallback identity digest with its rule version, thread identifier, location, sender, recipients, subject, received time, origination date, flags, attachment presence, size, MIME structure, body reference, snippet | body reference is null when not cached; received time is the server's and is what [D-55](../architecture/presentation-layer.md) orders on, while the origination date is the sender's `Date` header and is only displayed; the snippet is present only where the account declares a snippet source, and is bounded by L-16; the digest is computed at ingest under D-44. Location and flags are the **base** state [D-51](../mail/mutations.md) defines; the pending overlay is held with the queue, not here |
+| Thread | local identity, remote thread identifier, normalized subject, last activity, message count | scoped to the account — see [threading](../mail/threading.md), which owns the local identity under D-103 and the merge rule that needs it. Last activity and message count describe the messages still held, per [D-102](cache-and-blobs.md) |
 | Tag | tag identity and display name, and its membership | present only where the account declares tag support |
 | Full-text index | subject, body text, sender text, recipient text | see [search](search.md) |
 | Mutation queue — in the account **journal** rather than the store, per D-74 | serialized intent, intent schema version, state, attempt count, creation time, per-message sequence, expiry, and the pending overlay the intent contributes | durable across process death *and upgrades* — see [mutations](../mail/mutations.md). The overlay lives here because it is retired with the intent that created it, never independently |
@@ -379,6 +379,38 @@ succeed, which is the single failure [mutations](../mail/mutations.md) says the 
 executing a best guess at it is worse, because the guess is a write to the user's mail. Holding it,
 showing it in the queue under FR-34, and letting a later build execute it is the only option that loses
 nothing.
+
+## D-104 — Everything Sift can misread carries a version, including the two it forgot
+
+**Chosen:** the two installation-scoped stores carry schema versions and the same forward-only,
+refuse-a-newer-store rule as account stores; and D-44's fallback identity digest carries the version of
+the rule that produced it, with a comparison across versions counting as **no corroboration**.
+**Rejected:** versioning account stores only; an unversioned digest reindexed in place.
+
+**Why the installation stores.** D-32 above stamps a version *"in each account database"*. The shared
+blob index and the installation policy store are databases of the same engine, holding refcounts, image
+classifications, the network-override map, the FR-36 counters, and the installation-wide half of the
+per-sender allowlist — which this document calls **security state**. They had no version, no migration
+ordering, and no rule against a downgrade opening them. **A downgrade silently reading a newer policy
+store is the exact failure D-32 exists to prevent, reaching the one store that holds egress policy**, and
+it was outside the rule only because the rule was written per account.
+
+**Why the digest.** D-44 says changing the normalization rules is *"a reindex of one column, not a
+resync"*, which is true and leaves a window during which some rows carry the old digest and some the new.
+Without a version on the value, a comparison across that window is a comparison of two different
+functions' outputs — which does not fail loudly; it **fails to corroborate**, silently, so joins that
+should succeed quietly resolve to distinct messages for the duration of the reindex.
+
+Recording the version makes the mixed comparison explicit, and the answer is D-44's own: a comparison it
+cannot make is not corroboration, so the candidate set stays ambiguous and the messages stay distinct.
+That is the same safe direction, arrived at deliberately rather than by accident.
+
+**What it costs:** a few bytes per message and two more version stamps to migrate.
+
+**Contestable because:** the digest version will change approximately never, so this is a permanent
+per-row cost against a one-off event. The answer is that the one-off event is a reindex over every
+message in every account, and the cost of getting it wrong is joins failing quietly for as long as it
+runs.
 
 ## Durability
 
