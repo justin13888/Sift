@@ -2,7 +2,7 @@
 
 The one structural claim everything else follows from, and the map of the layers that implement it.
 
-**Owns:** D-8, D-19.
+**Owns:** D-8, D-19, D-47.
 
 ## The central claim
 
@@ -102,6 +102,72 @@ coalescing, which NFR-11 depends on. See [scheduling](../runtime/scheduling.md).
 **Contestable because:** a pinned-per-subsystem runtime would make the thread-local attribution mechanism
 sound by construction and give per-subsystem wakeup counts for free. That is a real simplification in the
 observability story, traded away for scheduling fairness that has not yet been measured to matter.
+
+## D-47 — Panics unwind, and they are caught at the pipeline's stage boundaries
+
+**Chosen:** the release binary unwinds on panic; the [rendering pipeline](../rendering/pipeline.md)
+establishes a catch boundary at each stage, and a caught panic degrades that message to FR-9's raw source
+view. No unwind may cross the [C ABI](shell-boundary.md).
+**Rejected:** aborting on panic; catching nothing and relying on the code being correct.
+
+**Why this is a requirement rather than a build setting.** NFR-19 says a malformed or hostile message
+"MUST NEVER crash the process", and the process in question holds every account's sync state, the mutation
+queue, and credential material read out of the OS store to be used. Aborting on panic makes that
+requirement **unachievable by construction**: a single slice index or arithmetic overflow anywhere in the
+MIME parser, the sanitizer or the [cascade](../rendering/dark-mode.md) terminates the resident
+application, and under [D-2](process-model.md) it takes every open window with it. The sender chooses the
+input and pays nothing per attempt, so that is a remote denial of service on the user's mail available to
+anyone who can send them a message.
+
+Rust's memory safety is what makes the hostile-input path defensible under D-8, and it is not what makes
+it *total*: a panic is the safe behaviour of a bounds check, not the absence of one. The panic is the
+mechanism working. NFR-19 is a statement about what happens next, and without a catch boundary the answer
+is "the process dies", which is the outcome the requirement names.
+
+**The boundary is per stage rather than per process** because that is the granularity at which the state
+is discardable. A stage's inputs are its bytes and its output is a fresh tree or document; abandoning one
+loses a message, and the pipeline already has somewhere to put that message. Nothing upstream of stage 1
+is invalidated, which is what makes the recovery honest rather than a caught panic that resumes into
+unknown state.
+
+**Nothing may unwind across the ABI.** An unwind through an `extern "C"` frame is undefined behaviour, and
+[shell boundary](shell-boundary.md) already concedes this is the one place in the core where memory-safety
+bugs are possible. Every exported entry point terminates unwinding and returns a failure the shell can
+render, which is the same obligation the states-not-strings rule in
+[presentation layer](presentation-layer.md) places on every other value crossing that line.
+
+**What it costs:** a larger binary, unwinding tables, and a catch boundary that must be established and
+tested at every stage rather than assumed. It also creates a category the code has to take seriously — a
+caught panic is a defect that reached production, so it MUST be counted per subsystem under
+[observability](../runtime/observability.md) and MUST NOT be silently absorbed as an ordinary parse
+failure. A pipeline that quietly degrades a thousand messages a day is failing, not coping.
+
+**Contestable because:** catching panics is widely and correctly regarded as a poor substitute for not
+having them, and a caught panic leaves the offending stage's allocations to the allocator rather than to a
+tidy teardown, which touches NFR-12's no-ratchet property in a way nothing has measured. If the fidelity
+corpus and NFR-40's fuzzing drive the panic rate to zero, this decision buys only insurance — but it is
+insurance against the one failure the product's central claim is about.
+
+## Unsafe code and dependencies
+
+Two policies follow from D-47 and D-8 and are code-review rules of the same kind as
+[memory pressure](../runtime/memory-pressure.md)'s no-unbounded-cache line.
+
+**Unsafe code is confined to four places and forbidden elsewhere**, from the first commit rather than as a
+later cleanup: the C ABI of [D-17](shell-boundary.md), the tagging global allocator of
+[D-24](../runtime/observability.md), the page-level encryption layer of
+[D-42](../storage/encryption.md), and the database engine's foreign-function interface under
+[D-21](../storage/data-model.md). Those four are unavoidable and each is named in its own document as
+carrying risk. Everywhere else — and in particular everywhere that parses attacker-controlled input —
+unsafe code is refused rather than reviewed, because a policy that permits it anywhere it seems justified
+is not a policy.
+
+**Dependencies are vendored and vetted.** Vendoring is not optional in any case: a Flatpak build has no
+network, so every crate must be present as a declared source, and discovering that late is a build-system
+change rather than a configuration one. Vetting is the part that needs stating —
+[R-12](../open-questions.md) counts the components this project builds and cannot count the ones it
+imports, and a mail client that
+parses hostile input is a supply-chain target whether or not anyone plans for it.
 
 ## Related
 
