@@ -2,7 +2,7 @@
 
 What is encrypted, what is not, and where the keys live.
 
-**Owns:** D-22, D-42, D-43.
+**Owns:** D-22, D-42, D-43, D-75, D-76.
 
 ## Message data
 
@@ -180,6 +180,107 @@ confirmation attack across every account at once, where per-account derivation w
 cost of the cross-account deduplication D-22 went to some length to preserve. That trade is the whole
 point of D-22 and is not worth reversing here, but it is where an attacker with the secret gets the most.
 
+## D-75 — The primitives are the platform's, behind one portable interface
+
+**Chosen:** the authenticated cipher and the key-derivation function are the platform's own audited
+implementations where the platform offers them, reached through a single interface that both platforms
+implement identically. **The on-disk format is one format**, produced and consumed byte-for-byte the same
+on macOS and Linux.
+**Rejected:** a vendored Rust implementation used identically on both platforms; per-platform formats
+chosen for each platform's convenience.
+
+**Why the platform's primitives.** This is the most security-critical code in the product and the place
+where a defect is total rather than partial: D-42 already concedes it is one of the four places unsafe
+code is permitted, and
+[decisions](../decisions.md) records that a bug here *"is total loss of an account, not a parse
+failure"*. A platform crypto library is audited, maintained, frequently hardware-accelerated, and updated
+by the operating system on a schedule Sift does not control and does not want to — which under
+[D-33](../product/platforms-and-distribution.md), where Sift never updates itself, is the one dependency
+whose fixes should not wait for App Review.
+
+**Why one format nonetheless.** The primitives may come from two libraries; the bytes may not come in two
+shapes. A per-platform format would make a store non-portable, which sounds acceptable for a product with
+no sync until it reaches the two places it is not: the [fidelity](../product/reference-environment.md) and
+scale corpora are fixtures shared by both platforms' test runs, and
+[verification](../build/verification.md) requires both platforms to report against the same data. A
+format that differs by platform makes a cross-platform fixture impossible and hides a class of bug in the
+gap.
+
+**What "one interface" obliges.** Both platforms MUST implement the same construction with the same
+parameters, and the interface MUST be narrow enough that a reviewer can confirm they agree by reading it.
+Where a platform library cannot supply the chosen construction, the fallback is a vendored implementation
+of **that** construction — never a different one chosen because it was available.
+
+**What it costs:** two implementations of one interface, and a class of bug — the two platforms
+disagreeing — that a single vendored implementation would not have. That is precisely what the
+byte-for-byte fixture check in [verification](../build/verification.md) exists to catch, and it is a test
+that must exist from the first commit rather than after the first divergence.
+
+**Contestable because:** a single vendored, audited Rust implementation is simpler, is portable by
+construction, and removes the disagreement class entirely — at the cost of putting the product's most
+security-critical code in the supply chain [workspace](../build/workspace.md) treats as a threat, and of
+owning its patch cadence in a product that cannot self-update. The two arguments genuinely oppose each
+other and this decision is the weaker of the two only if the platform libraries turn out to disagree in
+practice.
+
+## D-76 — What the page format has to nail down
+
+**Chosen:** each page is independently sealed with an authenticated cipher; the seal's nonce is derived
+from the page number **and a per-write counter** that is part of the file's state, never from the page
+number alone and never randomly. Every file carries a header identifying it as a Sift store, its format
+version, and the identifier of the key it is sealed under.
+**Rejected:** deriving the nonce from the page number alone; a random nonce per write; a single seal over
+the whole file.
+
+**Why the nonce rule is the whole decision.** A page is rewritten every time its contents change, and an
+authenticated cipher that seals two different plaintexts under the same key and nonce is not weakened —
+it is broken, in a way that leaks plaintext and forges ciphertext. **Page number alone is exactly that
+failure**, and it is the derivation an implementer reaches for first because it is stateless and obvious.
+It does not fail a test. It does not corrupt a file. Nothing observable goes wrong, and the property the
+encryption exists for is simply absent.
+
+A random nonce avoids reuse only probabilistically, and the probability is a function of how many times
+pages are rewritten over a store's life — which in an application that is resident for months and rewrites
+the same hot pages continuously is the wrong side of the birthday bound to be relying on. A counter that
+advances on every write is the construction that is correct by argument rather than by odds, and it costs
+a monotonic value in the file's own state.
+
+**Why per page rather than per file.** D-42 already argues this from the database engine's side: the
+index, the query planner and the write-ahead log work unchanged because everything above the page layer
+sees plaintext. A whole-file seal would mean
+reading a store to open it, which is NFR-1's budget spent on a 2 GB file.
+
+**What every file carries, and why each field is not optional.**
+
+| Field | Why |
+|---|---|
+| A magic identifying a Sift store, and the format version | [D-32](data-model.md) refuses to open a newer schema rather than guessing at it; a file that cannot say what it is forces the same guess one layer lower, where the guess is a decryption attempt against arbitrary bytes |
+| The key identifier | The key lifecycle below already requires it. Without it, a file encrypted under a destroyed key is *"merely unreadable"* rather than recognisable, which is the difference between FR-4 being provable and being believed |
+| The write counter's high-water mark | It is what makes nonce derivation resumable across a restart. A counter that resets on open reuses every nonce it has already issued, which is the failure above arriving through the recovery path |
+
+**Everything in the file is covered, including the journal and the write-ahead log.** D-42 already says
+the write-ahead log MUST be covered — *"a journal written in the clear would defeat the whole arrangement
+while looking correct in every test that inspects only the main file"* — and the same sentence now
+applies to [D-74](data-model.md)'s account journal, which holds intents naming the user's mail.
+
+**A file that fails to authenticate is discarded, never repaired.** This follows D-42's existing rule
+that a failed verification *"MUST NOT be treated as a recoverable read error"*, and it is affordable
+because [D-73](cache-and-blobs.md) makes the store discardable — the account resynchronizes, and
+[D-74](data-model.md) keeps the journal in a separate file so pending triage survives the store being
+thrown away. **The store is the half that may be discarded; a journal that fails to authenticate is
+exported rather than discarded**, because nothing can reconstruct it.
+
+**What it costs:** per-page overhead for the seal and its nonce, which reduces the usable bytes in every
+page and therefore changes the store's size and its page-fault behaviour — a cost
+[Q-10](../open-questions.md)'s rig must measure, since D-42 already records page decryption as
+unvalidated against the search budget. And a counter that must be
+durable, which is one more thing that must survive an abrupt termination correctly.
+
+**Contestable because:** the counter is state, and state that must be monotonic across crashes is exactly
+the kind of thing that is subtly wrong for a long time. A construction with a nonce large enough to be
+chosen randomly without a birthday concern would remove it, at the cost of per-page overhead — and that
+trade is a real one that should be re-examined once the page overhead is measured rather than assumed.
+
 ## Integrity, not only confidentiality
 
 Encryption on both paths MUST be authenticated. A store that decrypts attacker-influenced bytes without
@@ -202,4 +303,36 @@ read its data even if a file is later recovered from a backup. Key destruction M
 path, not a consequence of it.
 
 Every encrypted artefact MUST carry a key identifier, so that a key can be rotated without a flag day and
-so that a file encrypted under a destroyed key is recognisable as such rather than merely unreadable.
+so that a file encrypted under a destroyed key is recognisable as such rather than merely unreadable. The
+identifier is one of the header fields D-76 requires.
+
+**The hierarchy has one shape, and the other two readings are excluded.** "Wrapped by the credential
+store" admits three readings — a per-account key held directly as a credential item; a per-account key
+wrapped by a key-encrypting key that is the credential item; or a per-account key **derived** from
+D-43's per-installation secret and an account identifier. **The account key is held directly as its own
+credential item**, and the other two are refused.
+
+Derivation is refused because it makes the per-installation secret load-bearing for every account:
+D-43 already requires a store orphaned by a lost secret to be *"discarded wholesale"*, and under
+derivation that event silently extends from the blob store to every account database at once — turning a
+cache loss into total loss, through a coupling no document states. A key-encrypting key is refused for a
+smaller reason: it buys one rewrap-instead-of-many at rotation time, and costs a second secret whose
+compromise is equivalent to compromising all of them, in a design that already has exactly one such
+secret and treats it as a named risk.
+
+**This is what makes FR-4 provable rather than believed.** [Account removal](../mail/accounts.md)
+requires that erasure be *"verifiable by test"*. With the key held directly, removal deletes one
+credential item and the account's ciphertext is unreadable by construction — a property a test can assert
+by attempting to open the files afterwards. Under derivation the key is recomputable from a secret that
+still exists, so removal would have to be proven by the absence of files rather than by the absence of a
+key, which is a strictly weaker claim about a device that may hold backups.
+
+**Rotation is lazy, and bounded by the identifier.** A rotation installs a new key, and pages are
+re-sealed under it as they are next written; both generations are readable while any page carries the old
+identifier, and the old key is destroyed only when none does. Eager rewriting of a 2 GB store on a
+schedule the user did not ask for is the alternative, and it is worse in a resident application. **The
+per-installation secret of D-43 is the exception and does not rotate lazily**, because its rotation
+re-derives every convergent blob address — the total cache invalidation
+[platform baseline](../product/platform-baseline.md) already describes for a re-scoped installation. It
+is therefore a discard-and-refill of the blob store, which [D-73](cache-and-blobs.md) makes affordable
+and which MUST be stated as what it is rather than presented as a rotation like the others.
