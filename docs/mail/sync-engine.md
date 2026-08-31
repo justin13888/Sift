@@ -2,7 +2,7 @@
 
 How Sift learns that mail changed, and what it fetches when it does.
 
-**Owns:** D-53, D-82, D-83, NFR-18.
+**Owns:** D-53, D-82, D-83, D-84, NFR-18.
 
 ## Planning against capabilities
 
@@ -227,6 +227,68 @@ separately durable write path. There is none: marking read is an intent under FR
 the durable queue under FR-14, and unflushed read state is therefore queued mutations already named. The
 phrase invited an implementer to build a batched side-channel with its own durability and its own
 precedence against a delta, which is the one thing [D-51](mutations.md) exists to prevent.
+
+## D-84 — Recovery re-enumerates, reconciles by identity, and sweeps what it did not see
+
+**Chosen:** recovery acquires a fresh cursor, re-enumerates the folder, matches each observed message to
+an existing local one under D-44's rules, and **treats a local message the enumeration did not produce as
+gone from that folder**, in one pass, marked complete only when the enumeration finished.
+**Rejected:** adding rows only and leaving unmatched local rows in place; discarding the folder's rows and
+re-fetching; asking the user.
+
+**Why the additive-only recovery is the one to rule out.** It is what an implementer builds first, because
+it is obviously safe: re-enumerate, insert what is missing, touch nothing else. It leaves **tombstones
+forever** — every message deleted or moved elsewhere while the cursor was dead stays in the folder, in
+the list, in search, and as a target for FR-13 intents that will fail against a server that no longer has
+it there. Nothing reports it, and the only cure a user has is removing the account. NFR-18 above forbids
+exactly that cure.
+
+**The sweep is what makes it correct, and it needs the enumeration to have finished.** A local message not
+produced by a complete enumeration is not in that folder. A local message not produced by an
+**interrupted** enumeration is simply unobserved, so an interrupted recovery MUST NOT sweep: it stays in
+*Recovering* under D-82 and resumes. The distinction is the whole safety property, and it is the one an
+implementer under time pressure would collapse.
+
+**"Gone from that folder" is not "deleted."** For a provider with one location per message the message
+may have been moved to another folder, which the other folder's own sync will discover; for a provider
+where a message has several locations, losing one is exactly that and no more. Recovery therefore removes
+a location, and a message left in no location is the state D-83 already
+describes for a retired folder.
+**Recovery MUST NOT delete a message's row and MUST NOT delete its blobs**, because the message may exist
+elsewhere and because the row carries local state — the identity a shell holds, the queued intents
+against it, and the D-44 digest that lets it be recognised if it reappears.
+
+**This is a fourth join, and it is D-44's.** [D-44](../storage/data-model.md) defines three joins and
+this document introduces another: matching a re-observed message to an existing local row when the remote
+identifier may have changed. It is legal under D-44's own terms and uses its rules unchanged — the
+internet message identifier narrows candidates and never keys the join, the stored digest corroborates,
+an ambiguous candidate set resolves to distinct messages — and it satisfies the scoping constraint that
+made one rule serve all three, because **this join is also within one account**. Naming it here rather
+than leaving it implied matters because an implementer who did not notice it was a join would match on
+the remote identifier, which is the assumption D-44 exists to refuse.
+
+Where the join does not corroborate, the outcome is D-44's: the re-observed message is a new arrival and
+the old row loses this location. That costs the local flags and read state of a message whose server-side
+identifier changed under a dead cursor — the same cost [D-44](../storage/data-model.md) already accepts
+for an unresolvable move on Microsoft Graph, arriving through a second door.
+
+**Nothing recovery discovers is new mail.** [FR-23](../architecture/ui-shell.md) defines a new message as
+one *delivered* — discovered by a delta as an arrival — and that document already names cursor recovery
+as a case that rediscovers a mailbox without any of it being new. **Recovery MUST mark every message it
+observes as discovered rather than arrived**, including ones it inserts, and that flag is recorded at the
+moment of observation because that document says it *"cannot be reconstructed later"*.
+
+**What it costs:** a full enumeration of the folder, which is the expensive operation NFR-18 accepts and
+makes visible, plus one identity comparison per observed message against local candidates. On a provider
+with no efficient enumeration this is the cost the next section already calls explicit degradation.
+
+**Contestable because:** the sweep trusts a single complete enumeration to be authoritative about
+absence, and a server that answers a complete-looking enumeration incompletely will remove locations for
+mail that still exists. That is the same trust D-83 refuses to extend to folder
+enumeration, and the inconsistency is deliberate: a wrongly retired *folder*
+hides a mailbox, while a wrongly removed *location* costs a message that reappears on the next sync.
+If that proves optimistic, the retreat is to require two consecutive agreeing enumerations before
+sweeping, which doubles the cost of the operation NFR-18 already calls expensive.
 
 ## Degradation is explicit
 
