@@ -55,8 +55,10 @@ need a process split of its own to reclaim the engine**, which is the reasoning 
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Everything above the body view is one address space. The **shell** is the only part that is created and
-destroyed with the window; everything beneath it is resident for the life of the process.
+Everything above the body view is one address space. The **window shell** is the only part that is
+created and destroyed with the window; everything beneath it is resident for the life of the process,
+along with the thin **application shell** that owns the always-on surface — see
+[UI shell](ui-shell.md), which separates the two lifetimes and says why FR-22 requires it.
 
 The **resource broker** deserves note: every byte the body view loads passes through it. This is what
 makes content blocking a decision function in code Sift owns rather than an interception of a fetch path

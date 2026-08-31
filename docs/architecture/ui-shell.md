@@ -87,6 +87,34 @@ pause sync. See [process model](process-model.md) for the quit semantics it must
 [D-58](../runtime/network-conditions.md) for what pausing does — which is defined once, as a policy tier,
 so that this requirement and FR-36's cap three phases later cannot mean different things by one word.
 
+**The shell has two lifetimes, and FR-22 is the requirement that proves it.** A menu-bar or tray presence
+must exist when no window does — that is what "always-on surface" means, and FR-2 and FR-25 are both
+specified in terms of it. But a shell described as *created with a window and destroyed with it* has no
+state in which it can hold one, so on the previous reading the tray either does not exist when it is
+needed or is held by the core, which would put AppKit in the layer
+[presentation layer](presentation-layer.md) requires to have no widget toolkit in it. Neither is
+acceptable and the choice between them was never made.
+
+**The resolution is that "shell" names two things with different lifetimes, and they are separated here.**
+
+- The **application shell** is resident for the life of the process. It owns the tray or menu-bar item,
+  the application menu, notification delivery, and the [D-67](view-protocol.md) host callbacks. It holds
+  no view hierarchy, no window, and nothing authoritative.
+- A **window shell** is created when a window opens and destroyed when it closes, and is what every
+  existing statement about the shell being disposable is about.
+
+This costs nothing structurally and it is not a new component: the application shell is the small amount
+of native code that must already exist for a process to be an application at all on either platform. What
+changes is that it is named, so that "the shell is destroyed" has one meaning. **L3 in
+[memory pressure](../runtime/memory-pressure.md) destroys every window shell and not the application
+shell** — which is what that tier already intended, since a tier that removed the tray would make the
+application unreachable in the state it is trying to survive, and its own text says L3 *"terminates
+nothing"*.
+
+**The application shell is still shell code, and the toolkit boundary is unmoved.** The core does not
+link AppKit; the resident native code sits above the C ABI like the rest of the shell. That is the whole
+point of separating the two lifetimes rather than moving the tray downward.
+
 **Windows are plural, and several requirements already assume it.** NFR-42 releases the filter engine when
 the *last* window closes, and L3 in [memory pressure](../runtime/memory-pressure.md) destroys the shell
 view hierarchy — which is every window, not one. Stating it here rather than leaving it implied matters

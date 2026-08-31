@@ -2,7 +2,7 @@
 
 What crosses the shell boundary, and under what contract.
 
-**Owns:** D-48, D-66.
+**Owns:** D-48, D-66, D-67.
 
 [Shell boundary](shell-boundary.md) settles *that* the boundary is a narrow C ABI and argues why
 ([D-17](shell-boundary.md)). [Presentation layer](presentation-layer.md) settles what the layer beneath it
@@ -217,6 +217,54 @@ mutating stream D-4 admits is the hard case — is where the disagreement first 
 **An observation is anchored, not an integer range.** D-4 merges per-account streams that mutate
 independently, so a window expressed as "rows 40 through 80" is already wrong by the time it is served.
 The shell declares the window it is looking at and the layer maintains it across change.
+
+## D-67 — The boundary has a second direction, and it is not an observation
+
+**Chosen:** the shell registers, once at initialization, a small closed set of **host callbacks** the
+layer may invoke on its own initiative; they are not scoped to any view, they are not cancellable, and
+they survive the destruction of every window.
+**Rejected:** modelling core-initiated events as observations the shell must register; letting the core
+reach a toolkit directly.
+
+**Why anything is needed at all.** The protocol as previously stated is entirely shell-initiated: the
+shells *"send intents and requests and receive prepared view models"*, and every callback answers an
+observation the shell registered. Six things in this design are core-initiated and answer no observation,
+and each of them is a requirement rather than a convenience:
+
+| Event | Requirement | Why no observation can carry it |
+|---|---|---|
+| Destroy every window | L3 in [memory pressure](../runtime/memory-pressure.md) | The governor decides; a window cannot observe its own destruction being ordered |
+| Re-authentication is needed | [FR-2](../security/credentials.md) | Its own text requires the prompt *"through the always-on surface"* because there may be nothing on screen |
+| The bundle was replaced | [FR-26](process-model.md) | The restart prompt has no window to be requested from |
+| A notification was activated | [FR-23](ui-shell.md) | *"May mean opening a window on a process that has none"* |
+| The account condition changed | [D-49](../runtime/failure-model.md) | The annunciator must reach the user with no window open, by that decision's own rule |
+| An authorization callback arrived | [D-36](../security/credentials.md) | The platform delivers it to the process, not to a view |
+
+**Why a closed registered set rather than a general channel.** Every one of these is a case where the
+core must reach the *application*, not a view, so the natural implementation is for the core to hold
+something toolkit-shaped — and that is the one thing [presentation layer](presentation-layer.md) forbids,
+since *"the shared logic below them is Rust with no widget toolkit in it"* is the premise D-1's whole
+two-shell economics rests on. Registering callbacks inverts it: the shell hands the layer function
+pointers, the layer knows nothing about what they do, and the toolkit stays entirely above the boundary.
+
+Keeping the set **closed and enumerated here** is what stops it becoming the general escape hatch that
+dissolves the command-and-view-model shape. A seventh host callback is an amendment to this table, which
+is the same discipline [mutations](../mail/mutations.md) applies to FR-13's intent set.
+
+**They are delivered under D-48's rules like everything else** — on the main loop, non-reentrant — with
+one difference that must be stated: **a host callback has no observation and therefore no generation**,
+so the D-66 discard mechanism does not apply to it. What replaces it is that the set above is
+process-scoped: a host callback is valid for as long as the process is, and the shell unregisters only at
+shutdown. This is why they are not cancellable, and why cancellability would be meaningless.
+
+**What it costs:** a second shape on a boundary D-17 wants narrow, and a set that will be under pressure
+to grow every time something in the core wants to tell somebody.
+
+**Contestable because:** six entries is enough that a general event channel with an identified payload
+would be a smaller surface than six signatures, and would fold neatly into the
+[state register](../runtime/failure-model.md)'s identified-and-parameterized shape. That design is
+better if the set grows and worse while it is small, because it replaces six checked signatures with one
+that carries a discriminant — reintroducing exactly the runtime dispatch D-66 refused.
 
 ## Ownership
 

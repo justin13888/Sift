@@ -6,7 +6,9 @@ the definition here wins.
 | Term | Meaning |
 |---|---|
 | **Core** | The always-resident Rust layers — sync, storage, index, mutation queue, brokers, and the rendering pipeline. Contains no web engine. See [overview](architecture/overview.md) |
-| **Shell** | The native application interface — list, sidebar, reader chrome. AppKit on macOS, GTK4 on Linux. Not a web engine. Created with a window and destroyed with it; nothing in it is authoritative |
+| **Shell** | The native application interface. AppKit on macOS, GTK4 on Linux. Not a web engine, and nothing in it is authoritative. It has two lifetimes — see the two rows below — and an unqualified "shell" means the window shell |
+| **Application shell** | The part of the shell resident for the life of the process: the tray or menu-bar item, the application menu, notification delivery, and the host callbacks of [D-67](architecture/view-protocol.md). Holds no view hierarchy. See [UI shell](architecture/ui-shell.md) |
+| **Window shell** | The part created with a window and destroyed with it: list, sidebar, reader chrome. What every statement about the shell being disposable refers to, including L3 in [memory pressure](runtime/memory-pressure.md) |
 | **Subsystem** | The unit memory is attributed to, and one of the two axes wakeups are attributed to — the other is the account, because NFR-11 is stated per account and an account is not a subsystem. The enumeration is in [observability](runtime/observability.md), and it is exhaustive, non-overlapping, and stable |
 | **Pressure governor** | The component that reads declared cache sizes, subscribes to the OS pressure signal, and drives the shed tiers. See [memory pressure](runtime/memory-pressure.md) |
 | **Capability token** | The unguessable, per-view identifier under which a body view addresses its resources. Revoked wholesale on teardown — see [webview isolation](rendering/webview-isolation.md) |

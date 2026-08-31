@@ -20,7 +20,7 @@ reflects it.
 | **L0** | normal | steady state | NFR-9 — at or under 150 MB, window open |
 | **L1** | mild | drop decoded-image caches, rendered-body caches, and prefetch queues; release the filter engine | L0 less the filter engine and those caches |
 | **L2** | warning | destroy the body view; drop parsed-MIME caches; release database memory; shrink the search index cache | L1 less the body view and those caches; **never below the NFR-8 floor, because a window is still live** |
-| **L3** | critical | destroy every window and the entire shell view hierarchy; drop every remaining cache to its floor; collect the allocator; repaint from cold on next activation | toolkit residue plus the resident floor — the NFR-8 state with every cache at its floor |
+| **L3** | critical | destroy every window and every window shell's view hierarchy, leaving the application shell that owns the always-on surface; drop every remaining cache to its floor; collect the allocator; repaint from cold on next activation | toolkit residue plus the resident floor — the NFR-8 state with every cache at its floor |
 
 **Tier targets are compositions, not percentages, and the change is a coherence fix rather than a
 measurement.** They previously read −30% at L1 and −50% at L2 against L0's 150 MB, which is arithmetically
@@ -42,9 +42,12 @@ depend on Sift's own process count, which is the reasoning behind
 
 **L3 no longer terminates anything.** Under the earlier two-process design it killed the UI process
 outright. With one process it is instead the deepest in-process shed: every window and its view hierarchy
-goes, every cache drops to its floor, and the allocator is told to return what it can. What cannot be
-returned is **toolkit residue** — whatever AppKit or GTK4 keeps resident once initialized. That residue is
-the honest floor, and it is why L3's target is stated as a composition rather than a number.
+goes, every cache drops to its floor, and the allocator is told to return what it can. What stays is the
+[application shell](../architecture/ui-shell.md) — a tier that removed the tray would leave the
+application unreachable in the state it is trying to survive, which is why this tier terminates nothing.
+What cannot be returned is **toolkit residue** — whatever AppKit or GTK4 keeps resident once
+initialized. That residue is the honest floor, and it is why L3's target is stated as a composition
+rather than a number.
 
 If the operating system needs more than L3 can give, it will terminate the process, and Sift MUST be
 correct across that — the store and the mutation queue are crash-consistent under NFR-16 in
