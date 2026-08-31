@@ -67,6 +67,20 @@ requirement exists anywhere in this documentation set.
 
 This is a real gap rather than a deferred choice, and it is [tracked as a risk](../open-questions.md).
 
+**The prior question is whether Sift should operate that channel at all.**
+[D-33](../product/platforms-and-distribution.md) removed self-update on the reasoning that an application
+resident on a user's machine, reading their mail, "is the wrong place to put a bespoke code-delivery
+path". The list-update rows in the [egress table](privacy.md) are a bespoke delivery path into every
+message body, from a source Sift operates, carrying content that becomes CSS. That is content delivery
+rather than code delivery, but it is the shape D-33's own sentence describes, reached from a different
+direction. Signing the lists is one answer. Not having the endpoint — shipping lists bundled and updating
+them through the platform channel with the rest of the binary — is the other, and it is the one consistent
+with D-33.
+
+It cuts both ways, which is why this is a question rather than a conclusion. An endpoint that is already
+signed and revocable is most of the machinery [R-11](../open-questions.md) says Sift does not have for
+urgent fixes. Keeping it changes what R-11 costs; removing it makes R-11 permanent.
+
 ## Non-defences
 
 Sift does not claim to defend against a provider that serves malicious content as if it were mail, nor
