@@ -99,9 +99,22 @@ the odd one out not for *having* labels but for **conflating labels with locatio
 | Read state | absence of an unread system label | read flag | seen keyword | seen flag |
 | Flagged | starred system label | flag | flagged keyword | flagged flag |
 
-**Ruling:** in the Gmail adapter, system labels map to **Location** and user labels map to **Tags**. This
-matches the user's mental model, keeps location cardinality meaningful, and makes Gmail structurally
-similar to JMAP rather than a special case.
+**Ruling:** in the Gmail adapter, user labels map to **Tags**, and system labels map to **Location** —
+except those the rows above have already spent on another axis. The unread and starred system labels *are*
+the read-state and flagged rows of that table, so mapping them to Location as well would make a message
+change location when it is read. **A system label is a Location only where no other axis already claims
+it**, and the adapter enumerates the claimed ones rather than leaving a reader to infer them from a table
+that says both things at once.
+
+With that narrowing the ruling does what it was for: it matches the user's mental model, keeps location
+cardinality meaningful, and makes Gmail structurally similar to JMAP rather than a special case.
+
+Two consequences are worth stating rather than discovering. Gmail's category labels are Locations under
+this rule, which is right — Gmail presents them to the user as inbox tabs, and a tab is a place a message
+is rather than a label it carries. The importance label is the residual awkward case: it is neither a
+place nor a user label, and which axis it lands on is an adapter decision this document deliberately does
+not make, because the capability table has no per-tag granularity in which to express "a tag the user may
+read but not create".
 
 **FR-37.** Tags are a first-class concept distinct from Location, rendered only where the account declares
 tag support.

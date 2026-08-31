@@ -9,7 +9,7 @@ Capability notes for the Gmail adapter. The abstraction it implements is in
 
 | Capability | Value |
 |---|---|
-| Location cardinality | one or more — system labels are locations, see [D-12](../provider-model.md) |
+| Location cardinality | one or more — system labels are locations except where another axis claims them, see [D-12](../provider-model.md) |
 | Tag support | read-write — user labels |
 | Archive semantics | remove from inbox |
 | Trash semantics | move to trash |
