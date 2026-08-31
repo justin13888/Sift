@@ -75,6 +75,11 @@ them.
 - [Threat model](security/threat-model.md) · [Credentials](security/credentials.md) ·
   [Privacy](security/privacy.md)
 
+**Build** — how the specification becomes a repository, a binary, and evidence.
+
+- [Build and verification](build/README.md) — [Workspace](build/workspace.md) ·
+  [Packaging](build/packaging.md) · [Verification](build/verification.md)
+
 **Cross-cutting** — normative pages that belong to no single area.
 
 - [Limits](limits.md) — the numeric bounds three separate consumers must assert identically
