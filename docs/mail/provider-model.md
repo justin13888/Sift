@@ -1,0 +1,245 @@
+# Provider model
+
+The abstraction every provider is reached through.
+
+**Owns:** D-12, D-13, D-30, D-87, FR-5, FR-37.
+
+## The rule
+
+Sift MUST NOT build IMAP-with-special-cases. It defines one provider abstraction with a **declared
+capability set**, and the sync engine, mutation queue, and UI plan against *capabilities* rather than
+provider names.
+
+**The UI binds to capabilities, never to provider names.** If an account declares no tag support, the tag
+affordance is absent for that account. If an account's location cardinality is exactly one, "add tag"
+renders as "move to folder". A `match` on provider identity anywhere above the adapter layer is a defect.
+This is the only way the abstraction survives contact with a fifth provider.
+
+## Capabilities an adapter declares
+
+| Capability | Values | Meaning and UI consequence |
+|---|---|---|
+| Location cardinality | exactly one; one or more | Whether a message can be in several locations at once. Drives move-versus-add affordances |
+| Tag support | none; read-only; read-write (limits are L-15 in [limits](../limits.md)) | Whether tags exist and whether they can be edited |
+| Archive semantics | remove from inbox; move to special-use folder | How the archive intent is realised |
+| Trash semantics | move to trash; flag and expunge | How the delete intent is realised |
+| Permanent delete | supported or not | Whether the permanent-delete intent is offered at all — see [mutations](mutations.md), which owns its confirmation and no-undo rules |
+| Thread operations | native; client fan-out | Whether a thread-level intent is one call or N — see [mutations](mutations.md) |
+| Junk reporting | native report; folder move only; none | Whether report-junk and report-not-junk are offered — see [D-40](mutations.md) |
+| Delta mechanism | monotonic history cursor; OData delta link; JMAP changes; QRESYNC; full scan | How [sync](sync-engine.md) discovers change |
+| Push mechanism | event stream; IDLE; NOTIFY; poll only | How sync learns that change exists |
+| ID stability | stable globally; stable per folder; unstable on move | Whether a remote identifier may be used as a join key |
+| Server search | per-provider capability set | What can be delegated to the server — see [search](../storage/search.md) |
+| Maximum batch size | integer, or unknown | Batching limit for bulk operations. Magnitude-valued: unknown means "plan conservatively", never "unsupported" — see the growth rules below |
+| Request budget | integer with a period, or unknown | The rate the provider will accept before throttling. Magnitude-valued, so unknown means "plan conservatively" — see D-87 below and the growth rules |
+| Snippet source | provider-supplied; client-derived; none | Where FR-6's list snippet comes from. Three providers return a preview with the envelope and one does not — see [sync engine](sync-engine.md) |
+
+Adapter responsibilities are: enumerate folders, produce a delta against a cursor, fetch envelopes, fetch
+a specific body part, apply a batch of mutations, and expose a change-notification stream. Nothing more.
+
+## The capability set is open, and that is what makes a fifth provider cheap
+
+This table will grow. [D-32](../storage/data-model.md) already anticipates "a stored capability set that
+will gain fields", and D-40's junk-reporting row above is the first one added after the fact. Three rules
+make that growth non-breaking, and they are normative:
+
+**An absent capability means unsupported.** Never "assume yes", never "probe and hope". A build reading a
+capability set written by an older build, or by an adapter that does not declare a given capability, MUST
+treat it as declining the capability — so the affordance is absent, exactly as FR-37 already requires for
+tags. Defaulting the other way would turn every new capability into a silent claim that every existing
+adapter supports it.
+
+**An unrecognised capability is ignored, not fatal.** An adapter MAY declare a capability the planner does
+not know about; the planner MUST ignore it and continue, never refuse the account. This is what lets a
+newer adapter's declaration outlive a downgrade, and it is the same direction of failure D-32 chose when
+it refused to *read* a newer schema — decline the unknown, do not guess at it.
+
+**A new capability value is additive within its own row.** Adding a value to an existing capability — a
+third trash semantic, say — MUST leave the existing values meaning exactly what they meant. A value whose
+meaning shifts is a renumbering by another name, and the same rule that protects identifiers protects
+these.
+
+**A capability that carries a magnitude declares a conservative default, never "unsupported".** The first
+rule reads a missing capability as a refusal, which is right for every row that answers *can it*, and
+wrong for every row that answers *how much*. Maximum batch size is the row that exposes this: absent, it
+cannot mean "no batching supported", because batching is not a feature an adapter opts into — it is a
+limit the server imposes whether or not anyone has looked it up. So a magnitude-valued capability MUST
+declare either a value with its source — published limit, measured, or conservative default — or the
+explicit **unknown** state, and the planner MUST treat unknown as the most conservative value it can
+operate at rather than as a refusal to plan. This is what lets [Q-9](../open-questions.md) sit open in
+four adapter tables without any of those tables being ill-typed, and it is the rule a future
+magnitude-valued capability — a rate limit, a maximum request size — inherits without further argument.
+
+**A probed capability is a cached observation, and a failed probe is not an observation.** The first rule
+above reads absence as refusal, which is correct for a capability nobody declared — and wrong for one
+that was declared last week and could not be re-checked today. [Generic IMAP](providers/imap.md) is the
+adapter where this bites, because it is the only one whose capabilities are probed on connect: a server
+that fails to answer once, or answers from behind a proxy mid-upgrade, would otherwise have the account's
+tag support and junk reporting silently written down to *none* and left there. So a probed capability set
+MUST be stored with the fact that it was probed and when, an unsuccessful probe MUST leave the last
+successful answer standing rather than overwriting it, and a capability that genuinely disappears MUST be
+surfaced under NFR-29 rather than absorbed. Absence at first contact still means unsupported; absence
+after a successful contact means the probe failed, and the two MUST NOT be stored as the same thing.
+
+Together these mean a fifth provider lands as a new adapter and new rows, with no migration for accounts
+that already exist. That is the property the whole capability model is for, and it is worth more than any
+individual row in the table.
+
+## D-87 — Throttling is scheduled, not slept, and it is degradation before it is a condition
+
+**Chosen:** a throttling response is a first-class outcome with its own handling: any delay the provider
+states is honoured **through the scheduler's timing wheel**, absent one the backoff is the scheduler's
+existing exponential curve with cap and jitter, and throttling surfaces as *transient degradation* until
+it is sustained enough to stop progress, at which point the account enters the existing **degraded**
+condition with throttling as its stated reason.
+**Rejected:** treating a throttling response as an ordinary transient error; adding a *throttled*
+condition to D-49's set; sleeping for the stated delay.
+
+**Why this needed writing at all.** Nothing in this set mentioned rate limiting. The only trace was one
+sentence in [Microsoft Graph](providers/microsoft-graph.md) — that its throttling *"deserves bespoke
+handling rather than a generic retry policy"* — which says a generic policy is insufficient without
+establishing that one exists. Every provider here throttles, and the behaviour that follows a throttling
+response is the difference between a mail client and one that gets an account suspended.
+
+**Why it goes through the wheel, which is the part an implementer will get wrong.** A provider that
+states a retry delay is handing over a duration, and the reflexive response is to wait for it. That is a
+per-account sleep loop, which [scheduling](../runtime/scheduling.md) prohibits outright as *"the dominant
+cause of idle battery drain"* — and it arrives disguised as protocol compliance rather than as the
+pattern that rule forbids. A stated delay is a deadline; deadlines are the wheel's job, and a throttled
+account contributes no wakeups of its own while it waits.
+
+**Why the delay is a floor rather than an instruction.** The wheel coalesces, so a throttled account
+resumes on the first tick at or after the stated instant, not at the instant itself. Resuming late is
+always safe; resuming early is the thing that compounds a throttle into a suspension.
+
+**Why not a new condition.** [D-49](../runtime/failure-model.md) makes the condition set closed and
+precedence-ordered, and it *"reaches the user through one surface"* — so adding a value costs both
+shells under [D-56](../architecture/presentation-layer.md), permanently. Throttling does not earn that,
+because [failure model](../runtime/failure-model.md)'s own test is whether there is anything the user can
+do: a throttle is a transient the user cannot act on, and its correct expression is the episodic notice
+that document already defines. **Only when a throttle stops progress does it become a condition, and then
+it is the existing *degraded* one with a reason**, which is what that condition is for.
+
+**Throttled traffic still counts.** A throttled request consumed bytes and reached the provider, so it
+counts against [FR-36](../runtime/network-conditions.md)'s accounting like any other. Excluding it would
+make the burn least visible during the period the client is behaving worst.
+
+**The declared budget is a magnitude, and inherits the rule that already exists.** The capability row
+above is magnitude-valued, so **unknown** means plan conservatively rather than "unlimited" — the rule
+this document already states for maximum batch size, applied to the second row it anticipated when it
+said *"a rate limit, a maximum request size"* would inherit it *"without further argument"*. A declared
+budget lets the scheduler pace work before a throttle rather than after it; an unknown one means pacing
+against a conservative default and learning from the throttles that arrive.
+
+**What it costs:** one more magnitude row per adapter that nobody has values for, joining
+[Q-9](../open-questions.md) in that state, and a pacing mechanism in the scheduler that has nothing to do
+with wakeups and lives there anyway because that is where deadlines are.
+
+**Contestable because:** pacing against a declared budget is optimization for a client whose steady-state
+request rate is deliberately tiny — fifteen watched folders, coalesced — so the throttle that matters is
+almost always [D-53](sync-engine.md)'s backfill, which is one burst per account per lifetime. A design
+that only reacted, never paced, would be simpler and would be wrong exactly once per account, at the
+worst possible moment.
+
+## D-12 — Location and Tags are separate concepts
+
+**Chosen:** model **Location** (where a message is) and **Tags** (many-to-many user labels) as distinct
+axes, and map each provider onto both.
+**Rejected:** a flat folder model with labels as a Gmail special case.
+
+**Why.** The many-to-many concept exists on effectively every provider; only its name differs. Gmail is
+the odd one out not for *having* labels but for **conflating labels with location**.
+
+| Concept | Gmail | Microsoft Graph | JMAP | IMAP |
+|---|---|---|---|---|
+| Location | system labels | folder (exactly one) | mailbox ids (one or more) | folder (exactly one) |
+| Tags | user labels | categories | keywords | custom keywords, where the server permits them |
+| Read state | absence of an unread system label | read flag | seen keyword | seen flag |
+| Flagged | starred system label | flag | flagged keyword | flagged flag |
+
+**Ruling:** in the Gmail adapter, user labels map to **Tags**, and system labels map to **Location** —
+except those the rows above have already spent on another axis. The unread and starred system labels *are*
+the read-state and flagged rows of that table, so mapping them to Location as well would make a message
+change location when it is read. **A system label is a Location only where no other axis already claims
+it**, and the adapter enumerates the claimed ones rather than leaving a reader to infer them from a table
+that says both things at once.
+
+With that narrowing the ruling does what it was for: it matches the user's mental model, keeps location
+cardinality meaningful, and makes Gmail structurally similar to JMAP rather than a special case.
+
+Two consequences are worth stating rather than discovering. Gmail's category labels are Locations under
+this rule, which is right — Gmail presents them to the user as inbox tabs, and a tab is a place a message
+is rather than a label it carries. The importance label is the residual awkward case: it is neither a
+place nor a user label, and which axis it lands on is an adapter decision this document deliberately does
+not make, because the capability table has no per-tag granularity in which to express "a tag the user may
+read but not create".
+
+**FR-37.** Tags are a first-class concept distinct from Location, rendered only where the account declares
+tag support.
+
+## D-13 — Hand-written client subsets; no additional language runtime
+
+**Chosen:** hand-written request and response types for Microsoft Graph; a generated client for Gmail,
+tracking the published schema. No shim in another language.
+**Rejected:** a Go or other-language sidecar to reuse an official SDK.
+
+**Why.** Adding a garbage-collected runtime to an app whose primary requirement is idle footprint costs a
+GC, a floor of tens of megabytes, pause jitter, and either a third process or a foreign-function boundary.
+That attacks the resource targets directly, and it is unnecessary: both proprietary providers publish
+machine-readable schemas, so a Rust client is a code-generation or transcription problem, not a
+reverse-engineering one.
+
+Between the two Rust paths — generate from schema, or hand-write the subset — the deciding factor is
+surface area. A read-and-triage client needs on the order of 12 to 20 endpoints per provider. Graph's
+published schema covers an enormous product surface and must be sliced hard before generation is viable,
+so hand-writing its mail subset is smaller, faster to compile, and easier to audit, and it gives exact
+control over throttling and retry behaviour. Gmail's generated client is already scoped to one API and
+tracks schema revisions, so generation is the cheaper path there.
+
+Where clients are hand-written, CI MUST diff the hand-written types against the current published schema
+and fail on drift. The schema stays the source of truth for correctness even when it is not the source of
+the code.
+
+## D-30 — Rust TLS, verifying against the operating system's trust store
+
+**Chosen:** a Rust TLS implementation, verifying certificates against the platform trust store.
+**Rejected:** the platform's own TLS stack on each platform; a bundled root store.
+
+**Why.** Every provider connection carries the user's mail and is authenticated with the user's
+credentials, and TLS record parsing is remote-input parsing — the same argument D-8 makes for the core
+applies here, and it argues against a large C implementation in the process.
+
+Verification is the half that is easy to get wrong. A **bundled** root store is reproducible and
+host-independent, and it breaks generic IMAP immediately: corporate inspection proxies and
+enterprise-issued or self-signed certificates are routine on the servers FR-3's manual configuration path
+exists to reach. Deferring to the platform trust store means enterprise policy, user-installed roots, and
+administrator distrust decisions all work without Sift implementing any of them.
+
+**What it costs:** trust evaluation differs between the two platforms in ways that are visible only on
+unusual certificates, so certificate-failure behaviour must be tested per platform rather than reasoned
+about once.
+
+**Contestable because:** the platform stack would make trust behaviour exactly right by construction, and
+would match what the user's other mail clients do on the same machine. That is a real argument for
+consistency; it is outweighed here by keeping a parser of remote input in Rust.
+
+## FR-5 — Special-use folders resolve semantically
+
+Each account exposes a folder or label tree in which special-use locations — inbox, archive, sent, trash,
+spam, drafts — are identified **semantically, regardless of localized display names**.
+
+Resolution MUST NOT use string matching on folder names. It uses the provider's own mechanism: the IMAP
+special-use extension with its legacy fallback, Graph's stable well-known folder identifiers, Gmail's
+system label identifiers, JMAP's mailbox roles. If nothing resolves, Sift MUST prompt the user once and
+persist the answer.
+
+A German Exchange server's localized deleted-items folder must not require a locale table. A locale table
+is a bug.
+
+## Related
+
+- [Accounts](accounts.md) — adding, configuring, and removing accounts
+- [Sync engine](sync-engine.md) — planning against delta and push capabilities
+- [Mutations](mutations.md) — planning against archive, trash, and thread capabilities
+- Per-provider notes: [Gmail](providers/gmail.md), [Microsoft Graph](providers/microsoft-graph.md),
+  [JMAP](providers/jmap.md), [IMAP](providers/imap.md)
