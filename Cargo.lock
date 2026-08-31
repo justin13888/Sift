@@ -272,6 +272,9 @@ dependencies = [
 [[package]]
 name = "sift-alloc"
 version = "0.1.0"
+dependencies = [
+ "sift-subsystem",
+]
 
 [[package]]
 name = "sift-blobs"
