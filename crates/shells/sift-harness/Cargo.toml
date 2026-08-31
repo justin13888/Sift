@@ -34,3 +34,13 @@ sift-sync.workspace = true
 sift-scheduler.workspace = true
 sift-subsystem.workspace = true
 sift-alloc.workspace = true
+# A shell names providers. `cargo xtask invariants` applies D-12's rule to the layers above
+# the adapters and stops below the shells for exactly this reason: "add a Gmail account" is a
+# thing a person clicks, and the register of what a user can add is the shell's.
+sift-gmail.workspace = true
+sift-http.workspace = true
+sift-credentials.workspace = true
+sift-pipeline.workspace = true
+sift-block.workspace = true
+sift-broker.workspace = true
+sift-mime.workspace = true

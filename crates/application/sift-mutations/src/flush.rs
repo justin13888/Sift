@@ -57,6 +57,26 @@ pub enum FlushError {
     Provider { failure: Failure, said: String },
 }
 
+/// A failure, **with what the flush had already done when it happened**.
+///
+/// The report is not discarded on the error path, and that is not tidiness: a batch that
+/// went out and was not answered has moved to `Reconciling`, and a throttle carries a number
+/// the wheel needs. Returning a bare error would throw both away at the one moment they
+/// matter, leaving the caller to rediscover the queue's state by reading it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlushFailure {
+    pub report: FlushReport,
+    pub error: FlushError,
+}
+
+impl core::fmt::Display for FlushFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
+impl std::error::Error for FlushFailure {}
+
 impl core::fmt::Display for FlushError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -117,12 +137,12 @@ pub fn operation_for(intent: &Intent, resolve: &impl Resolve) -> Result<Operatio
 /// # Errors
 /// See [`FlushError`]. A provider failure leaves the batch in `Issued` or `Reconciling`
 /// rather than back in `Pending`, because an intent whose request left is not pending.
-pub fn flush_once<A: Adapter>(
+pub fn flush_once<A: Adapter + ?Sized>(
     adapter: &A,
     queue: &mut Queue,
     resolve: &impl Resolve,
     mark_issued: &mut impl FnMut(&[u128]) -> Result<(), String>,
-) -> Result<FlushReport, FlushError>
+) -> Result<FlushReport, FlushFailure>
 where
     A::Error: core::fmt::Display,
 {
@@ -154,7 +174,10 @@ where
             report.deferred += 1;
             continue;
         };
-        let operation = operation_for(&intent, resolve)?;
+        let operation = operation_for(&intent, resolve).map_err(|error| FlushFailure {
+            report: report.clone(),
+            error,
+        })?;
         batch.push(WireMutation {
             message: remote,
             // The client-assigned identifier, sent as an idempotency key where the provider
@@ -182,9 +205,12 @@ where
     );
 
     // Durable, and before the request leaves.
-    mark_issued(&ids).map_err(|said| FlushError::Provider {
-        failure: Failure::Transient,
-        said,
+    mark_issued(&ids).map_err(|said| FlushFailure {
+        report: report.clone(),
+        error: FlushError::Provider {
+            failure: Failure::Transient,
+            said,
+        },
     })?;
     for id in &ids {
         queue.set_state(*id, State::Issued);
@@ -194,7 +220,7 @@ where
     let outcomes = match adapter.apply(&batch) {
         Ok(outcomes) => outcomes,
         Err(e) => {
-            let failure = A::classify(&e);
+            let failure = adapter.classify(&e);
             // The request left. Whether the server applied it is unknown, and D-85's answer
             // is to establish server state before trying again rather than replaying blindly
             // — which is what NFR-17 means by exactly-once *observable*.
@@ -207,9 +233,12 @@ where
             if let Failure::Throttled { retry_after_millis } = failure {
                 report.retry_after_millis = Some(retry_after_millis);
             }
-            return Err(FlushError::Provider {
-                failure,
-                said: e.to_string(),
+            return Err(FlushFailure {
+                report,
+                error: FlushError::Provider {
+                    failure,
+                    said: e.to_string(),
+                },
             });
         }
     };
@@ -365,7 +394,7 @@ mod tests {
         fn watch(&self, _: &[RemoteFolderId]) -> Result<(), Self::Error> {
             Ok(())
         }
-        fn classify(error: &Self::Error) -> Failure {
+        fn classify(&self, error: &Self::Error) -> Failure {
             match *error {
                 "unknown" => Failure::Unknown,
                 "throttled" => Failure::Throttled {
@@ -386,12 +415,6 @@ mod tests {
             q.enqueue(*id, *m, intent.clone(), 0);
         }
         q
-    }
-
-    /// A durable marker, faked so the ordering can be asserted.
-    #[derive(Default)]
-    struct Marker {
-        marked: Vec<Vec<u128>>,
     }
 
     #[test]
@@ -490,9 +513,15 @@ mod tests {
         let adapter = Fake::failing("unknown");
         let mut queue = queue_with(&[(1, message(1), Intent::Archive)]);
         let mut mark = |_: &[u128]| Ok(());
-        let outcome = flush_once(&adapter, &mut queue, &Map, &mut mark);
-        assert!(outcome.is_err());
+        let Err(failure) = flush_once(&adapter, &mut queue, &Map, &mut mark) else {
+            panic!("the flush did not fail");
+        };
         assert_eq!(queue.entries()[0].state, State::Reconciling);
+        assert_eq!(failure.report.reconciling, 1);
+        assert_eq!(
+            failure.report.issued, 1,
+            "the report lost what had happened"
+        );
     }
 
     #[test]
@@ -501,17 +530,21 @@ mod tests {
         let adapter = Fake::failing("throttled");
         let mut queue = queue_with(&[(1, message(1), Intent::Archive)]);
         let mut mark = |_: &[u128]| Ok(());
-        let Err(FlushError::Provider { failure, .. }) =
-            flush_once(&adapter, &mut queue, &Map, &mut mark)
-        else {
+        let Err(failure) = flush_once(&adapter, &mut queue, &Map, &mut mark) else {
             panic!("the flush did not fail");
         };
         assert_eq!(
-            failure,
-            Failure::Throttled {
-                retry_after_millis: 5_000
+            failure.error,
+            FlushError::Provider {
+                failure: Failure::Throttled {
+                    retry_after_millis: 5_000
+                },
+                said: "throttled".to_owned(),
             }
         );
+        // The number the wheel needs survives the error rather than being thrown away at
+        // the one moment it matters.
+        assert_eq!(failure.report.retry_after_millis, Some(5_000));
         assert_eq!(
             queue.entries()[0].state,
             State::Issued,

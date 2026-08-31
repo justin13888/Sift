@@ -78,6 +78,40 @@ pub fn list_messages(account: &OpenAccount) -> Result<Vec<(LocalId, String)>, St
     Ok(out)
 }
 
+/// A message's and a folder's provider identifiers, read out of the store.
+///
+/// The mutation queue cannot reach the store — they sit side by side in the application
+/// layer and D-59 gives neither an edge to the other — so the lookup crosses as a trait the
+/// shell implements. That is the same reason the durable `Issued` marker crosses as a
+/// callback rather than being something the flush does for itself.
+pub struct Remote<'a>(pub &'a rusqlite::Connection);
+
+impl sift_mutations::flush::Resolve for Remote<'_> {
+    fn message(&self, local: LocalId) -> Option<sift_provider::adapter::RemoteMessageId> {
+        self.0
+            .query_row(
+                "SELECT remote_id FROM message WHERE id = ?1",
+                rusqlite::params![local.to_bytes().to_vec()],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+            .map(sift_provider::adapter::RemoteMessageId)
+    }
+
+    fn folder(&self, local: i64) -> Option<sift_provider::adapter::RemoteFolderId> {
+        self.0
+            .query_row(
+                "SELECT remote_id FROM folder WHERE id = ?1",
+                rusqlite::params![local],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+            .map(sift_provider::adapter::RemoteFolderId)
+    }
+}
+
 /// One account, as the harness holds it.
 pub struct OpenAccount {
     pub id: AccountId,
@@ -85,6 +119,14 @@ pub struct OpenAccount {
     pub store: Account,
     pub queue: Queue,
     pub ids: LocalIdGenerator,
+    /// The adapter, where this account has one.
+    ///
+    /// `None` is the capability-shape account: a store and a queue with no provider behind
+    /// them, which is what the planner tests are driven against. **Nothing below the
+    /// `account` command knows which provider a live one is** — that question is asked once,
+    /// when the user adds it, and after that every command plans against what the account
+    /// declares.
+    pub adapter: Option<crate::account::Live>,
     /// The subject of each ingested message, so the harness can print something a person
     /// recognises. A shell would read this from the store; keeping it here keeps the
     /// harness's own printing out of the store's query paths.
@@ -99,9 +141,15 @@ impl std::fmt::Debug for OpenAccount {
     }
 }
 
-#[derive(Debug, Default)]
 pub struct App {
     accounts: BTreeMap<String, OpenAccount>,
+    /// NFR-23's single place, which the shell holds and never reaches into.
+    ///
+    /// The shell asks it to begin a flow and to complete one; it never reads a token, and
+    /// there is no path from here to the credential store that does not go through it.
+    pub broker: sift_credentials::oauth::Broker<sift_credentials::store::Platform>,
+    /// Authorizations begun but not yet returned from, by account name.
+    pub pending_authorization: BTreeMap<String, String>,
     /// D-99: a set keyed on identity with an anchor, cleared by a scope change.
     pub selection: Vec<LocalId>,
     pub open_message: Option<LocalId>,
@@ -111,10 +159,66 @@ pub struct App {
     next_ordinal: u16,
 }
 
+impl std::fmt::Debug for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("App")
+            .field("accounts", &self.accounts.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            accounts: BTreeMap::new(),
+            // On a platform with no backend this refuses every write, which is D-71 doing
+            // its job: a security absence refuses, and the only fallback available here is a
+            // file — exactly what the constraint forbids by name.
+            broker: sift_credentials::oauth::Broker::new(sift_credentials::store::Platform),
+            pending_authorization: BTreeMap::new(),
+            selection: Vec::new(),
+            open_message: None,
+            has_window: false,
+            root: None,
+            next_intent: 0,
+            next_ordinal: 0,
+        }
+    }
+
+    /// Add an account with a provider behind it.
+    ///
+    /// Its capability set comes from the adapter rather than from a name, which is the
+    /// difference between this and [`Self::add_account`]: a shape is something a test picks,
+    /// and this is what an account actually declares.
+    pub fn add_provider_account(
+        &mut self,
+        name: &str,
+        adapter: crate::account::Live,
+    ) -> Result<AccountId, String> {
+        let capabilities = adapter.capabilities().clone();
+        let id = self.create_account(name, capabilities, "provider")?;
+        self.accounts
+            .get_mut(name)
+            .ok_or("the account vanished")?
+            .adapter = Some(adapter);
+        Ok(id)
+    }
+
+    /// The identity an account will be given, so a flow can be keyed on it before the
+    /// account's files exist.
+    ///
+    /// D-89: Sift's own, assigned when the account is added, independent of address and
+    /// provider — and **re-adding is a new account**, which is what makes FR-4's erasure
+    /// provable by enumeration.
+    pub fn reserve_identity(&mut self) -> AccountId {
+        AccountId::from_u128(u128::from(self.next_ordinal) + 1)
     }
 
     fn root(&mut self) -> PathBuf {
@@ -130,10 +234,20 @@ impl App {
     /// Add an account. Its capability set is chosen by name so that a test can exercise the
     /// planner against a shape rather than against a provider.
     pub fn add_account(&mut self, name: &str, shape: &str) -> Result<(), String> {
+        let capabilities = shape_named(shape)?;
+        self.create_account(name, capabilities, shape)?;
+        Ok(())
+    }
+
+    fn create_account(
+        &mut self,
+        name: &str,
+        capabilities: Capabilities,
+        shape: &str,
+    ) -> Result<AccountId, String> {
         if self.accounts.contains_key(name) {
             return Err(format!("account `{name}` already exists"));
         }
-        let capabilities = shape_named(shape)?;
         // D-89: the identity is Sift's own, assigned when the account is added, and
         // independent of address and provider. Re-adding is a new account.
         let id = AccountId::from_u128(u128::from(self.next_ordinal) + 1);
@@ -160,14 +274,20 @@ impl App {
                 ],
             )
             .map_err(|e| e.to_string())?;
-        store
-            .store
-            .execute(
-                "INSERT INTO folder (id, remote_id, special_use, display_name, watched)
-                 VALUES (1, 'INBOX', 'Inbox', 'Inbox', 1)",
-                [],
-            )
-            .map_err(|e| e.to_string())?;
+        // A shape account has no provider to enumerate folders, so it is given the one it
+        // needs. **A provider account is not**: D-83 assigns local identity on first
+        // discovery, and pre-seeding a folder here would give the enumeration a row it did
+        // not create and a remote identifier it did not choose.
+        if shape != "provider" {
+            store
+                .store
+                .execute(
+                    "INSERT INTO folder (id, remote_id, special_use, display_name, watched)
+                     VALUES (1, 'INBOX', 'Inbox', 'Inbox', 1)",
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+        }
 
         self.accounts.insert(
             name.to_owned(),
@@ -177,10 +297,11 @@ impl App {
                 store,
                 queue: Queue::new(),
                 ids: LocalIdGenerator::new(ordinal),
+                adapter: None,
                 subjects: BTreeMap::new(),
             },
         );
-        Ok(())
+        Ok(id)
     }
 
     pub fn account(&mut self, name: &str) -> Result<&mut OpenAccount, String> {
@@ -196,6 +317,27 @@ impl App {
 
     pub fn accounts(&self) -> impl Iterator<Item = (&String, &OpenAccount)> {
         self.accounts.iter()
+    }
+
+    /// The account whose **store** holds a message, by local identity.
+    ///
+    /// Distinct from [`Self::owner_of`], which answers from the harness's own map of what it
+    /// ingested by hand. A synced message was never in that map, and asking the store is the
+    /// only way to find it — which is also the only way a real shell could.
+    #[must_use]
+    pub fn owner_of_stored(&self, message: LocalId) -> Option<String> {
+        self.accounts.iter().find_map(|(name, account)| {
+            account
+                .store
+                .store
+                .query_row(
+                    "SELECT 1 FROM message WHERE id = ?1",
+                    rusqlite::params![message.to_bytes().to_vec()],
+                    |_| Ok(()),
+                )
+                .ok()
+                .map(|()| name.clone())
+        })
     }
 
     /// The account a message belongs to, by local identity.
@@ -221,10 +363,20 @@ impl App {
     pub fn selection_capabilities(&self) -> Option<Capabilities> {
         let mut owners: Vec<&OpenAccount> = Vec::new();
         for m in &self.selection {
-            let owner = self
-                .accounts
-                .values()
-                .find(|a| a.subjects.contains_key(m))?;
+            // The store rather than the harness's own map of what it ingested by hand: a
+            // synced message was never in that map, and a selection over one would resolve
+            // to no capabilities at all — every mutation absent, for a reason nothing said.
+            let owner = self.accounts.values().find(|a| {
+                a.subjects.contains_key(m)
+                    || a.store
+                        .store
+                        .query_row(
+                            "SELECT 1 FROM message WHERE id = ?1",
+                            rusqlite::params![m.to_bytes().to_vec()],
+                            |_| Ok(()),
+                        )
+                        .is_ok()
+            })?;
             if !owners.iter().any(|o| o.id == owner.id) {
                 owners.push(owner);
             }

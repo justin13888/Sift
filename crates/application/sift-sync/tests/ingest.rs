@@ -168,7 +168,7 @@ impl Adapter for Scripted {
         Ok(())
     }
 
-    fn classify(error: &Self::Error) -> Failure {
+    fn classify(&self, error: &Self::Error) -> Failure {
         match *error {
             "cursor" => Failure::CursorInvalidated,
             "gone" => Failure::Permanent,

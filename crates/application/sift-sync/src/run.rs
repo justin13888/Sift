@@ -41,12 +41,12 @@ impl core::fmt::Display for RunError {
     }
 }
 
-fn provider<A: Adapter>(error: A::Error) -> RunError
+fn provider<A: Adapter + ?Sized>(adapter: &A, error: A::Error) -> RunError
 where
     A::Error: core::fmt::Display,
 {
     RunError::Provider {
-        failure: A::classify(&error),
+        failure: adapter.classify(&error),
         said: error.to_string(),
     }
 }
@@ -55,14 +55,16 @@ where
 ///
 /// # Errors
 /// See [`RunError`].
-pub fn discover_folders<A: Adapter>(
+pub fn discover_folders<A: Adapter + ?Sized>(
     adapter: &A,
     account: &Account,
 ) -> Result<ingest::FolderReport, RunError>
 where
     A::Error: core::fmt::Display,
 {
-    let folders = adapter.enumerate_folders().map_err(provider::<A>)?;
+    let folders = adapter
+        .enumerate_folders()
+        .map_err(|e| provider(adapter, e))?;
     Ok(ingest::reconcile_folders(&account.store, &folders)?)
 }
 
@@ -78,7 +80,7 @@ where
 ///
 /// # Errors
 /// See [`RunError`].
-pub fn sync_one_page<A: Adapter>(
+pub fn sync_one_page<A: Adapter + ?Sized>(
     adapter: &A,
     account: &mut Account,
     folder: i64,
@@ -92,7 +94,7 @@ where
     let page = match adapter.delta(remote, cursor.as_ref()) {
         Ok(page) => page,
         Err(e) => {
-            let error = provider::<A>(e);
+            let error = provider(adapter, e);
             // The one failure that is progress. D-82 moves the folder to `Invalidated`,
             // which is not a resting state — NFR-18 forbids requiring the user to ask — so
             // the caller is told to recover rather than to back off.
@@ -148,7 +150,11 @@ where
     let batch = adapter.capabilities().batch_size() as usize;
     let mut envelopes = Vec::with_capacity(fetch.len());
     for chunk in fetch.chunks(batch.max(1)) {
-        envelopes.extend(adapter.fetch_envelopes(chunk).map_err(provider::<A>)?);
+        envelopes.extend(
+            adapter
+                .fetch_envelopes(chunk)
+                .map_err(|e| provider(adapter, e))?,
+        );
     }
 
     let report = ingest::apply_page(&mut account.store, folder, &page, &envelopes, ids)?;
@@ -177,7 +183,7 @@ pub enum Turn {
 ///
 /// # Errors
 /// See [`RunError`].
-pub fn sync_folder<A: Adapter>(
+pub fn sync_folder<A: Adapter + ?Sized>(
     adapter: &A,
     account: &mut Account,
     folder: i64,
@@ -235,7 +241,7 @@ pub fn clear_cursor(account: &Account, folder: i64) -> Result<(), RunError> {
 ///
 /// # Errors
 /// See [`RunError`].
-pub fn sync_account<A: Adapter>(
+pub fn sync_account<A: Adapter + ?Sized>(
     adapter: &A,
     account: &mut Account,
     ids: &LocalIdGenerator,

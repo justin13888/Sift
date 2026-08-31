@@ -90,7 +90,21 @@ pub trait Adapter {
     /// a different direction. A cursor invalidation mistaken for a fault degrades an account
     /// that only needed to recover; a fault mistaken for a cursor invalidation resyncs a
     /// mailbox for nothing. Neither is a sensible default.
-    fn classify(error: &Self::Error) -> Failure;
+    ///
+    /// It takes `&self` rather than being an associated function, and that is not a
+    /// stylistic choice: **the trait has to be object-safe.** A shell holds one account's
+    /// adapter without knowing which of the four it is — that is the whole of D-12 — and an
+    /// associated function with no receiver would force the shell to name the type, which is
+    /// the special-casing the capability model exists to remove.
+    fn classify(&self, error: &Self::Error) -> Failure;
+
+    /// Bytes on the wire since this adapter was built — FR-36.
+    ///
+    /// Zero for an adapter that does not touch a socket. The replay harness is not on
+    /// anybody's data plan.
+    fn wire_bytes(&self) -> (u64, u64) {
+        (0, 0)
+    }
 }
 
 /// What a failure means to the layer that has to decide what happens next.

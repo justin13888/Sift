@@ -419,7 +419,13 @@ impl<T: Transport> Adapter for Gmail<T> {
             if !(200..300).contains(&item.status) {
                 continue;
             }
-            if let Ok(envelope) = wire::parse_envelope(&item.body) {
+            let Ok(envelope) = wire::parse_envelope(&item.body) else {
+                continue;
+            };
+            // **Only what was asked for.** An answer carrying an envelope nobody requested
+            // is not something to believe: it would enter the store as a message this folder
+            // never listed, with a provenance the delta never assigned it.
+            if ids.contains(&envelope.id) {
                 out.push(envelope);
             }
         }
@@ -470,7 +476,11 @@ impl<T: Transport> Adapter for Gmail<T> {
         ))
     }
 
-    fn classify(error: &Self::Error) -> Failure {
+    fn wire_bytes(&self) -> (u64, u64) {
+        self.transport.borrow().wire_bytes()
+    }
+
+    fn classify(&self, error: &Self::Error) -> Failure {
         match error {
             Self::Error::Refusal(Refusal::CursorInvalidated) => Failure::CursorInvalidated,
             Self::Error::TokenRejected => Failure::CredentialRefused,

@@ -3,6 +3,7 @@
 //! script that happens to call the same crates.
 
 use crate::app::App;
+use sift_credentials::store::CredentialStore as _;
 use sift_foundation::identity::LocalId;
 use sift_mutations::intent::{Intent, State};
 use sift_presentation::action::{self, Context, MutationKind};
@@ -20,9 +21,12 @@ pub fn run(app: &mut App, line: &str) -> Output {
     // D-24: the tag is task-scoped and re-established at each boundary, not set once. A
     // command is this shell's equivalent of a stage boundary.
     let subsystem = match verb {
-        "ingest" | "list" => Subsystem::Store,
+        "ingest" | "list" | "folders" | "watch" => Subsystem::Store,
         "do" | "queue" | "flush" | "restart" => Subsystem::Mutations,
         "actions" | "select" | "open" => Subsystem::Presentation,
+        "sync" => Subsystem::Sync,
+        "body" => Subsystem::Sanitize,
+        "net" => Subsystem::Network,
         _ => Subsystem::Shell,
     };
     sift_alloc::tagged(subsystem, || dispatch(app, verb, &rest))
@@ -44,6 +48,11 @@ fn dispatch(app: &mut App, verb: &str, rest: &[&str]) -> Output {
         "flush" => flush(app, &rest),
         "restart" => restart(app, &rest),
         "memory" => memory(),
+        "folders" => folders(app, &rest),
+        "watch" => watch(app, &rest),
+        "sync" => sync(app, &rest),
+        "body" => body(app, &rest),
+        "net" => net(app, &rest),
         other => Err(format!("unknown command `{other}` — try `help`")),
     }
 }
@@ -51,7 +60,16 @@ fn dispatch(app: &mut App, verb: &str, rest: &[&str]) -> Output {
 fn help() -> Vec<String> {
     [
         "account add <name> <rich|minimal|unstable-ids>   add an account of a capability shape",
+        "account add-replayed <name>                      an account backed by D-65's fixture corpus",
+        "account authorize <name> <client-id>             begin a real authorization; prints the address",
+        "account callback <name> <url>                    finish one, from what the scheme handed back",
+        "account forget <name>                            FR-4: erase every credential, by enumeration",
         "account list                                     accounts and what they declare",
+        "folders <account>                                what the provider enumerates (D-83)",
+        "watch <account> <remote-id> <on|off>             FR-43's watched set",
+        "sync <account> [max-pages]                       cursor, delta, envelopes, one transaction",
+        "body <id|#n>                                     fetch and render through the seven stages",
+        "net [account]                                    bytes on the wire (FR-36)",
         "ingest <account> <subject>...                    ingest a message (delivered)",
         "list [account]                                   the message list, read THROUGH the overlay",
         "select <id>...                                   set the selection (D-99, keyed on identity)",
@@ -74,6 +92,66 @@ fn account(app: &mut App, args: &[&str]) -> Output {
         ["add", name, shape] => {
             app.add_account(name, shape)?;
             Ok(vec![format!("added `{name}` ({shape})")])
+        }
+        ["add-replayed", name] => {
+            // D-65. Not a convenience: a cursor outside the retained window, a throttle and
+            // a batch answered out of order cannot be arranged against a real account on
+            // demand, and a shell drivable only against one would leave every one of them
+            // untested end to end.
+            let adapter = crate::account::replayed();
+            let id = app.add_provider_account(name, adapter)?;
+            Ok(vec![format!("added `{name}` (replayed)  id={id}")])
+        }
+        ["authorize", name, client_id] => {
+            // D-36's registration is checked *before* the flow starts. This shell has not
+            // registered the scheme with the system — a bundle does that, and a bundle is
+            // what this binary is not — so it says so rather than opening a browser the user
+            // would return from to nothing.
+            let registered = std::env::var("SIFT_CALLBACK_SCHEME_REGISTERED").is_ok();
+            let url = crate::account::begin(&mut app.broker, client_id, registered, now_millis())
+                .map_err(|e| e.to_string())?;
+            app.pending_authorization
+                .insert((*name).to_owned(), (*client_id).to_owned());
+            Ok(vec![
+                format!(
+                    "the callback returns through the registered scheme{}",
+                    if crate::account::callback_arrives_on_a_socket() {
+                        " and a socket"
+                    } else {
+                        ", never a socket — NFR-24 admits none for any purpose"
+                    }
+                ),
+                format!(
+                    "open this, then paste what comes back to `account callback {name} <url>`:"
+                ),
+                url,
+            ])
+        }
+        ["callback", name, callback] => {
+            let client_id = app
+                .pending_authorization
+                .get(*name)
+                .cloned()
+                .ok_or_else(|| format!("no authorization is in progress for `{name}`"))?;
+            let id = app.reserve_identity();
+            let adapter =
+                crate::account::complete(&mut app.broker, &client_id, id, callback, now_millis())
+                    .map_err(|e| e.to_string())?;
+            app.pending_authorization.remove(*name);
+            let id = app.add_provider_account(name, adapter)?;
+            Ok(vec![format!("added `{name}`  id={id}")])
+        }
+        ["forget", name] => {
+            let id = app.account(name)?.id;
+            // FR-4's erasure is local and provable, and it does **not** block on revoking
+            // the grant at the provider: that would mean an account the user asked to remove
+            // staying until a server answered.
+            app.broker.erase(id).map_err(|e| e.to_string())?;
+            let remaining = app.broker.store().remaining(id);
+            Ok(vec![format!(
+                "{name}: {} credential item(s) remain",
+                remaining.len()
+            )])
         }
         ["list"] => {
             let mut out = Vec::new();
@@ -319,14 +397,47 @@ fn invoke(app: &mut App, args: &[&str]) -> Output {
     let now = now_millis();
     let mut out = Vec::new();
     let selection = app.selection.clone();
+    // D-85's undo group is assigned **at the gesture**, which is what makes FR-17's bulk
+    // operation one undoable unit rather than a hundred.
+    let undo_group = app.next_intent_id();
     for message in selection {
-        let Some(owner) = app.owner_of(message).cloned() else {
+        let Some(owner) = app
+            .owner_of(message)
+            .cloned()
+            .or_else(|| app.owner_of_stored(message))
+        else {
             out.push(format!("{message}: no account holds this message"));
             continue;
         };
         let intent_id = app.next_intent_id();
         let a = app.account(&owner)?;
-        a.queue.enqueue(intent_id, message, intent.clone(), now);
+        let sequence = a.queue.enqueue(intent_id, message, intent.clone(), now);
+
+        // **Journal first, store second** — D-74's ordering, and the reverse would lose a
+        // mutation the user watched succeed. The failure this order can leave is an intent
+        // enqueued whose optimistic effect was never applied, which is invisible and
+        // self-correcting because the overlay is derived from the queue.
+        let durable =
+            a.store.journal.execute(
+                "INSERT INTO intent (id, undo_group, message_id, operation, intent_version,
+                                 state, created_millis, per_message_seq, expires_millis)
+             VALUES (?1, ?2, ?3, ?4, 1, 'Pending', ?5, ?6, ?7)",
+                rusqlite::params![
+                    intent_id.to_be_bytes().to_vec(),
+                    undo_group.to_be_bytes().to_vec(),
+                    message.to_bytes().to_vec(),
+                    intent.name(),
+                    i64::try_from(now).unwrap_or(i64::MAX),
+                    i64::try_from(sequence).unwrap_or(i64::MAX),
+                    i64::try_from(now.saturating_add(
+                        sift_foundation::limits::L17_INTENT_EXPIRY.as_millis() as u64
+                    ))
+                    .unwrap_or(i64::MAX),
+                ],
+            );
+        if let Err(e) = durable {
+            return Err(format!("the journal refused the intent: {e}"));
+        }
         out.push(format!("{message}: {} enqueued", intent.name()));
     }
     out.push(format!(
@@ -400,30 +511,101 @@ fn flush(app: &mut App, args: &[&str]) -> Output {
         [name, "--leave-in-flight"] => ((*name).to_owned(), true),
         _ => return Err("flush <account> [--leave-in-flight]".to_owned()),
     };
-    let a = app.account(&name)?;
-    let limit = a.capabilities.batch_size();
-    let batch: Vec<u128> = a.queue.next_batch(limit).iter().map(|q| q.id).collect();
-    let mut out = vec![format!("issuing {} of at most {limit}", batch.len())];
-    // D-85: the transition into Issued is durable and happens **before the request leaves**.
-    for id in &batch {
-        a.queue.set_state(*id, State::Issued);
-    }
-    if in_flight {
+    let account = app.account(&name)?;
+
+    // An account with no provider behind it: the queue's own state machine, driven without a
+    // wire. This is what the planner tests use, and it is deliberately still a real queue.
+    let Some(adapter) = account.adapter.take() else {
+        let limit = account.capabilities.batch_size();
+        let batch: Vec<u128> = account
+            .queue
+            .next_batch(limit)
+            .iter()
+            .map(|q| q.id)
+            .collect();
+        let mut out = vec![format!("issuing {} of at most {limit}", batch.len())];
+        for id in &batch {
+            account.queue.set_state(*id, State::Issued);
+        }
+        if in_flight {
+            out.push(format!(
+                "{} left Issued — the request went out and no answer came back",
+                batch.len()
+            ));
+            return Ok(out);
+        }
+        for id in &batch {
+            account.queue.set_state(*id, State::Settled);
+        }
+        account.queue.collect_settled();
         out.push(format!(
-            "{} left Issued — the request went out and no answer came back",
-            batch.len()
+            "{} settled, {} still queued",
+            batch.len(),
+            account.queue.len()
         ));
         return Ok(out);
+    };
+
+    if in_flight {
+        // Against a real provider there is nothing to stop between the marker and the
+        // request: the whole point of D-85's ordering is that the two are not separable from
+        // outside. The crash path is driven with `restart` instead.
+        account.adapter = Some(adapter);
+        return Err(
+            "--leave-in-flight is for an account with no provider; use `restart` to drive              what a crash leaves"
+                .to_owned(),
+        );
     }
-    for id in &batch {
-        a.queue.set_state(*id, State::Settled);
+
+    // The durable half of D-85's marker. It is a callback because the journal is the store's
+    // and the queue cannot reach it — the two sit side by side in the application layer and
+    // D-59 gives neither an edge to the other.
+    let journal = &account.store.journal;
+    let mut mark_issued = |ids: &[u128]| -> Result<(), String> {
+        let transaction = journal.unchecked_transaction().map_err(|e| e.to_string())?;
+        for id in ids {
+            transaction
+                .execute(
+                    "UPDATE intent SET state = 'Issued' WHERE id = ?1",
+                    rusqlite::params![id.to_be_bytes().to_vec()],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        transaction.commit().map_err(|e| e.to_string())
+    };
+
+    let resolve = crate::app::Remote(&account.store.store);
+    let outcome = sift_mutations::flush::flush_once(
+        adapter.as_ref(),
+        &mut account.queue,
+        &resolve,
+        &mut mark_issued,
+    );
+    account.adapter = Some(adapter);
+
+    let (report, failure) = match outcome {
+        Ok(report) => (report, None),
+        Err(failure) => (failure.report.clone(), Some(failure.error)),
+    };
+
+    let mut out = vec![format!(
+        "{} issued: {} applied, {} refused, {} deferred, {} reconciling, {} quarantined",
+        report.issued,
+        report.applied,
+        report.refused,
+        report.deferred,
+        report.reconciling,
+        report.quarantined
+    )];
+    if let Some(delay) = report.retry_after_millis {
+        out.push(format!(
+            "the provider stated {delay} ms — a deadline on the wheel, never a sleep"
+        ));
     }
-    a.queue.collect_settled();
-    out.push(format!(
-        "{} settled, {} still queued",
-        batch.len(),
-        a.queue.len()
-    ));
+    if let Some(error) = failure {
+        out.push(format!("failed: {error}"));
+    }
+    out.push(format!("{} still queued", account.queue.len()));
     Ok(out)
 }
 
@@ -470,4 +652,238 @@ fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+// ---------------------------------------------------------------------------
+// A live account: folders, the watched set, syncing, and reading a message.
+// ---------------------------------------------------------------------------
+
+/// D-83's enumeration, reconciled into the store.
+fn folders(app: &mut App, args: &[&str]) -> Output {
+    let [name] = args else {
+        return Err("folders <account>".to_owned());
+    };
+    let account = app.account(name)?;
+    let adapter = account
+        .adapter
+        .as_ref()
+        .ok_or("this account has no provider behind it")?;
+    let report = sift_sync::run::discover_folders(adapter.as_ref(), &account.store)
+        .map_err(|e| e.to_string())?;
+
+    let mut out = vec![format!(
+        "{} discovered, {} retired, {} unchanged",
+        report.discovered.len(),
+        report.retired.len(),
+        report.unchanged
+    )];
+    let mut stmt = account
+        .store
+        .store
+        .prepare(
+            "SELECT id, remote_id, special_use, display_name, watched, retired
+             FROM folder ORDER BY id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)? != 0,
+                r.get::<_, i64>(5)? != 0,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (id, remote, special, display, watched, retired) = row.map_err(|e| e.to_string())?;
+        out.push(format!(
+            "  {id}  {remote:<20} {display:<16} use={special:<8} {}{}",
+            if watched { "watched" } else { "-" },
+            // D-83: retired, never deleted. Its messages stop being present *in it* and stay
+            // reachable through search and threads.
+            if retired { "  retired" } else { "" }
+        ));
+    }
+    Ok(out)
+}
+
+/// FR-43's watched set, per account and persisted.
+fn watch(app: &mut App, args: &[&str]) -> Output {
+    let [name, remote, state] = args else {
+        return Err("watch <account> <remote-id> <on|off>".to_owned());
+    };
+    let on = match *state {
+        "on" => true,
+        "off" => false,
+        _ => return Err("watch <account> <remote-id> <on|off>".to_owned()),
+    };
+    let account = app.account(name)?;
+    let folder = sift_sync::ingest::folder_local_id(
+        &account.store.store,
+        &sift_provider::adapter::RemoteFolderId((*remote).to_owned()),
+    )
+    .map_err(|e| e.to_string())?;
+    sift_sync::ingest::set_watched(&account.store.store, folder, on).map_err(|e| e.to_string())?;
+    Ok(vec![format!(
+        "{remote} {}",
+        if on {
+            "watched"
+        } else {
+            // Deliberately not a seventh folder state: an unwatched folder stops being
+            // scheduled and its stored state is *retained*, so re-watching does not restart
+            // from Unsynced.
+            "unwatched — its state is kept, so re-watching resumes"
+        }
+    )])
+}
+
+/// One turn of the sync: cursor, delta, envelopes, one transaction.
+fn sync(app: &mut App, args: &[&str]) -> Output {
+    let (name, pages) = match args {
+        [name] => ((*name).to_owned(), 20usize),
+        [name, pages] => (
+            (*name).to_owned(),
+            pages.parse().map_err(|_| "max-pages must be a number")?,
+        ),
+        _ => return Err("sync <account> [max-pages]".to_owned()),
+    };
+    let account = app.account(&name)?;
+    let adapter = account
+        .adapter
+        .take()
+        .ok_or("this account has no provider behind it")?;
+
+    // Folders first: a delta needs somewhere to put what it finds, and D-83 assigns local
+    // identity on discovery rather than on first use.
+    let discovery = sift_sync::run::discover_folders(adapter.as_ref(), &account.store);
+    let outcome = discovery.and_then(|_| {
+        sift_sync::run::sync_account(adapter.as_ref(), &mut account.store, &account.ids, pages)
+    });
+    account.adapter = Some(adapter);
+    let report = outcome.map_err(|e| e.to_string())?;
+
+    Ok(vec![
+        format!(
+            "{} inserted, {} updated, {} removed",
+            report.inserted, report.updated, report.removed
+        ),
+        format!(
+            "{} delivered — FR-23's new mail, which is delivered-and-unread at this moment \
+             and cannot be reconstructed later",
+            report.delivered
+        ),
+    ])
+}
+
+/// Fetch a message's body and run it through the seven stages.
+fn body(app: &mut App, args: &[&str]) -> Output {
+    let [reference] = args else {
+        return Err("body <id|#n>".to_owned());
+    };
+    let id = resolve(app, reference)?;
+    let owner = app
+        .owner_of_stored(id)
+        .ok_or("no account holds this message")?;
+    let account = app.account(&owner)?;
+    let remote: String = account
+        .store
+        .store
+        .query_row(
+            "SELECT remote_id FROM message WHERE id = ?1",
+            rusqlite::params![id.to_bytes().to_vec()],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .ok_or("this message has no remote identifier yet — sync first")?;
+    let adapter = account
+        .adapter
+        .as_ref()
+        .ok_or("this account has no provider behind it")?;
+
+    // Structure first. The part chosen for display is fetched; a forty-megabyte attachment
+    // costs nothing until somebody asks for it, which is a claim about *requests*.
+    let remote_id = sift_provider::adapter::RemoteMessageId(remote);
+    let html = adapter
+        .fetch_part(&remote_id, "1")
+        .or_else(|_| adapter.fetch_part(&remote_id, "0"))
+        .map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&html).into_owned();
+    let selected = sift_pipeline::Selected {
+        html: Some(text),
+        text: None,
+        reason: Some("the provider's own structure named it text/html".to_owned()),
+    };
+
+    let mut broker = sift_broker::broker::Broker::new();
+    let mut context = sift_pipeline::Context {
+        // Nothing has authenticated this message yet, so the origin is null and every
+        // resource is third-party under the strictest rules. That is the correct answer
+        // rather than a placeholder: D-11's fourth priority is exactly this case.
+        origin: sift_block::origin::Origin::Null,
+        blocker: None,
+        dark: false,
+        broker: &mut broker,
+    };
+    let rendered = sift_pipeline::render(&selected, &mut context).map_err(|e| e.to_string())?;
+
+    let mut out = vec![
+        format!("stages: {}", rendered.stages.join(" -> ")),
+        format!("token: {}", rendered.token.as_str()),
+        format!(
+            "{} fetching position(s), {} link(s), {} removal(s)",
+            rendered.positions.len(),
+            rendered.links.len(),
+            rendered.removals.len()
+        ),
+    ];
+    for (position, verdict) in rendered.positions.iter().zip(rendered.verdicts.iter()) {
+        out.push(format!(
+            "  [{}] {}@{}  {}  -> {}",
+            position.index,
+            position.element,
+            position.attribute,
+            position.original,
+            if verdict.permits_fetch() {
+                "allowed"
+            } else {
+                "blocked"
+            }
+        ));
+    }
+    for removal in &rendered.removals {
+        out.push(format!("  removed {} — {}", removal.what, removal.rule));
+    }
+    out.push(rendered.html);
+    Ok(out)
+}
+
+/// FR-36 counts bytes on the wire.
+fn net(app: &mut App, args: &[&str]) -> Output {
+    let names: Vec<String> = match args {
+        [] => app.account_names().into_iter().map(str::to_owned).collect(),
+        [name] => vec![(*name).to_owned()],
+        _ => return Err("net [account]".to_owned()),
+    };
+    let mut out = Vec::new();
+    for name in names {
+        let account = app.account(&name)?;
+        let Some(adapter) = account.adapter.as_ref() else {
+            continue;
+        };
+        let (sent, received) = adapter.wire_bytes();
+        out.push(format!("{name}  sent {sent}  received {received}"));
+    }
+    if out.is_empty() {
+        out.push("no account has a provider behind it".to_owned());
+    }
+    out.push(
+        "   (bytes on the interface, so the handshake, the framing and the headers are in \
+         there — a count above the encryption would understate a metered link)"
+            .to_owned(),
+    );
+    Ok(out)
 }
