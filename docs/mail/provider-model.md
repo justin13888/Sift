@@ -68,6 +68,17 @@ operate at rather than as a refusal to plan. This is what lets [Q-9](../open-que
 four adapter tables without any of those tables being ill-typed, and it is the rule a future
 magnitude-valued capability — a rate limit, a maximum request size — inherits without further argument.
 
+**A probed capability is a cached observation, and a failed probe is not an observation.** The first rule
+above reads absence as refusal, which is correct for a capability nobody declared — and wrong for one
+that was declared last week and could not be re-checked today. [Generic IMAP](providers/imap.md) is the
+adapter where this bites, because it is the only one whose capabilities are probed on connect: a server
+that fails to answer once, or answers from behind a proxy mid-upgrade, would otherwise have the account's
+tag support and junk reporting silently written down to *none* and left there. So a probed capability set
+MUST be stored with the fact that it was probed and when, an unsuccessful probe MUST leave the last
+successful answer standing rather than overwriting it, and a capability that genuinely disappears MUST be
+surfaced under NFR-29 rather than absorbed. Absence at first contact still means unsupported; absence
+after a successful contact means the probe failed, and the two MUST NOT be stored as the same thing.
+
 Together these mean a fifth provider lands as a new adapter and new rows, with no migration for accounts
 that already exist. That is the property the whole capability model is for, and it is worth more than any
 individual row in the table.

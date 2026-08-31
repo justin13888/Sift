@@ -9,6 +9,11 @@ This is the only adapter whose capabilities are **probed rather than known**. Tw
 more from each other than Gmail differs from JMAP, so the adapter's first job on connect is to determine
 what this particular server can do and declare capabilities accordingly.
 
+Probed declarations are held under the rule
+[provider model](../provider-model.md) states for them: a probe that fails leaves the last successful
+answer standing, and does not silently write the account down to *unsupported*. A capability that really
+has gone away is surfaced under NFR-29 below, like every other degradation on this adapter.
+
 ## Declared capabilities
 
 | Capability | Value |
