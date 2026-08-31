@@ -91,8 +91,15 @@ Hypotheses, validated against the [reference environment](../product/reference-e
 | ID | Target |
 |---|---|
 | **NFR-10** | Idle CPU at or under 0.1%, averaged over 5 minutes with no network events |
-| **NFR-11** | At most 2 timer wakeups **per minute** per account at idle, coalesced onto the shared scheduler |
+| **NFR-11** | At most 2 wakeups **per minute** per account at idle — timer fires and socket wakes alike — coalesced onto the shared scheduler |
 | **NFR-15** | Network at idle at or under 1 KB per minute per account, steady-state keepalive |
+
+**NFR-11 counts socket wakes as well as timer fires, and that too is a coherence fix.** It previously said
+"timer wakeups" while [observability](observability.md) instruments both, so the requirement named half of
+what its own instrument measured — and a socket wake prevents deep sleep exactly as a timer fire does,
+which is this document's opening argument. Counting only timers would have let fifteen keepalive-bearing
+connections meet the budget on paper. See [reference environment](../product/reference-environment.md) for
+the protocol.
 
 **NFR-11 previously read "per second", and was restated for internal coherence — not adjusted to match a
 measurement.** Nothing has been measured. At the five accounts the

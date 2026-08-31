@@ -83,7 +83,7 @@ two homes and one of them would go stale.
 | NFR-8 | Resident idle footprint with no window open at or under 90 MB, excluding the filter engine — a placeholder pending P0 measurement | [runtime/memory-pressure](runtime/memory-pressure.md) |
 | NFR-9 | Full application idle footprint, window open and no reader visible, at or under 150 MB, inclusive of NFR-42 | [runtime/memory-pressure](runtime/memory-pressure.md) |
 | NFR-10 | Idle CPU at or under 0.1% over 5 minutes | [runtime/scheduling](runtime/scheduling.md) |
-| NFR-11 | At most 2 timer wakeups per minute per account at idle | [runtime/scheduling](runtime/scheduling.md) |
+| NFR-11 | At most 2 wakeups per minute per account at idle, timer fires and socket wakes alike | [runtime/scheduling](runtime/scheduling.md) |
 | NFR-12 | Footprint growth at or under 5% over 14 days: no ratchet | [runtime/memory-pressure](runtime/memory-pressure.md) |
 | NFR-13 | L2 shed **issued** within 500 ms of signal, L3 within 1 second; reclaim itself is timed by NFR-46. L3 sheds in-process and terminates nothing | [runtime/memory-pressure](runtime/memory-pressure.md) |
 | NFR-14 | Bodies, attachments and blobs bounded by the configured cache budget, hard-capped | [storage/cache-and-blobs](storage/cache-and-blobs.md) |
