@@ -96,27 +96,50 @@ every measurement.
 Each of these is consumed once, for the life of the project. **Each MUST be recorded here before first
 submission to any channel**, and MUST NOT thereafter be changed.
 
-| Identifier | Constraint |
-|---|---|
-| Bundle identifier | Reverse-DNS under a domain the copyright holder controls. One value for both macOS channels, per D-45. Permanently bound to the App Store record and never reusable |
-| Team identifier | Prefixes the Keychain access group; fixed by the developer account |
-| OAuth redirect URI scheme | Registered in the bundle's URL types. Derived from the OAuth client where a provider requires it, so it is bound to the bundle identifier and to R-1's verified client — see [credentials](../security/credentials.md) |
-| Flatpak application id | Must correspond to a namespace the publisher controls. It is also the D-Bus well-known name, the desktop-file name, the portal identity for autostart and permission grants, and the data root. Renaming creates a new application with no upgrade path |
-| Keychain service and access-group names | Published in the Cask uninstall stanza, so a change breaks uninstall for existing users |
-| App Store build number space | Monotonically increasing for the life of the app record; a number is never reused or decreased |
+| Identifier | Value | Constraint |
+|---|---|---|
+| Bundle identifier | `net.justinchung.sift` | Reverse-DNS under a domain the copyright holder controls. One value for both macOS channels, per D-45. Permanently bound to the App Store record and never reusable |
+| Team identifier | **outstanding** — fixed by the developer account | Prefixes the Keychain access group; fixed by the developer account |
+| OAuth redirect URI scheme | `net.justinchung.sift` | Registered in the bundle's URL types. Derived from the OAuth client where a provider requires it, so it is bound to the bundle identifier and to R-1's verified client — see [credentials](../security/credentials.md) |
+| Flatpak application id | `net.justinchung.Sift` | Must correspond to a namespace the publisher controls. It is also the D-Bus well-known name, the desktop-file name, the portal identity for autostart and permission grants, and the data root. Renaming creates a new application with no upgrade path |
+| Keychain service and access-group names | service `net.justinchung.sift`; access group `<team>.net.justinchung.sift` | Published in the Cask uninstall stanza, so a change breaks uninstall for existing users |
+| App Store build number space | begins at 1 | Monotonically increasing for the life of the app record; a number is never reused or decreased |
 
-**The bundle identifier arrived by accident and is kept on purpose.** It was declared by a Tauri scaffold
-that [D-1](../architecture/ui-shell.md) rejects and that opened a local development server against NFR-24;
-that scaffold is now abandoned and removed, for the reasons D-1's own document gives. Inheriting a string
-by default is how the most permanent identifier in the project would get chosen by accident, so the value
-is recorded here as a deliberate reservation rather than carried forward as a leftover. **It is the only
-thing the scaffold leaves behind.**
+Two of the six are **not** free choices once the first is made. The OAuth redirect scheme is derived from
+the bundle identifier because that is what the providers requiring a custom scheme expect, and the Keychain
+access group is the team identifier prefixed to it. So the bundle identifier is the only one of the three
+that is genuinely decided, and the other two follow. The team identifier is the one value here that is
+issued rather than chosen, and it is outstanding until the developer account exists.
+
+**The bundle identifier arrived by accident and was inspected rather than kept.** It was declared by a
+Tauri scaffold that [D-1](../architecture/ui-shell.md) rejects and that opened a local development server
+against NFR-24; that scaffold is now abandoned and removed, for the reasons D-1's own document gives. The
+string it left behind was `com.justin13888.sift`, and inheriting it would have failed the one constraint
+the row above places on this identifier: **the copyright holder does not control `justin13888.com`.** It
+is a code-hosting account name, which is not a domain, and reverse-DNS under a namespace somebody else may
+register later is exactly the collision the convention exists to prevent.
+
+So the value is `net.justinchung.sift`, under a domain the copyright holder does hold, and **the scaffold
+leaves nothing behind at all.** That is a worse outcome than the one previously recorded here and a better
+one than shipping the alternative: this identifier is permanently bound to the App Store record and can
+never be reused, so the last moment it costs nothing to change is the moment before first submission.
+Inheriting a string by default is how the most permanent identifier in the project would get chosen by
+accident, and the correction is what that warning was for.
 
 ## Two schemes, and only one of them is registered
 
 Sift has a registered URI scheme for the authorization callback ([D-36](../security/credentials.md)) and
 an internal scheme for body-view resources ([D-28](../rendering/webview-isolation.md)). Different
 documents call each of them "the scheme".
+
+| Scheme | Value | Registered with |
+|---|---|---|
+| Authorization callback | `net.justinchung.sift` | the operating system, in the bundle's URL types |
+| Body-view resources | `sift-resource` | the web engine, and nowhere else |
+
+The internal scheme's value is deliberately **not** derived from the bundle identifier. The two must be
+impossible to confuse at a glance in a debug view, a filter rule, or a policy callback, because the whole
+of the rule below is that one of them is reachable from outside the process and the other MUST NOT be.
 
 **The internal scheme MUST NOT appear in the bundle's registered URL types, on either platform.** It is
 registered with the web engine and nowhere else. Registering it with the operating system would let any

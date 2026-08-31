@@ -8,6 +8,7 @@
 //! several independent consumers assert them and a second copy is a copy that drifts.
 
 pub mod condition;
+pub mod identifiers;
 pub mod identity;
 pub mod limits;
 pub mod normalize;
