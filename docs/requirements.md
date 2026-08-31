@@ -92,7 +92,7 @@ two homes and one of them would go stale.
 | NFR-44 | Allocation-attribution overhead at or under 2% in release | [runtime/observability](runtime/observability.md) |
 | NFR-45 | Soak harness in CI with a slope gate over at least 72 hours | [runtime/observability](runtime/observability.md) |
 | NFR-46 | Body view torn down when unused; footprint returns within 1 second | [rendering/webview-isolation](rendering/webview-isolation.md) |
-| NFR-48 | Schema migrations preserve envelopes, blobs, queued mutations, read state and policy state; never require resync | [storage/data-model](storage/data-model.md) |
+| NFR-48 | Schema migrations preserve envelopes, blobs, queued mutations with their pending overlays, and both scopes of policy state; never require resync | [storage/data-model](storage/data-model.md) |
 | NFR-49 | Attachments written to disk carry the platform's untrusted-source provenance marking | [storage/cache-and-blobs](storage/cache-and-blobs.md) |
 | NFR-53 | A sender-supplied filename never becomes a path; the final path is shown and nothing is overwritten | [storage/cache-and-blobs](storage/cache-and-blobs.md) |
 | NFR-52 | Envelopes and their full-text index entries bounded by their own budget, evicted oldest-first together | [storage/cache-and-blobs](storage/cache-and-blobs.md) |
