@@ -224,6 +224,13 @@ disagree about which are authoritative — a subtler failure than a migration th
 state was rejected because rebuilding a full-text index over 500,000 messages is exactly the visible,
 expensive, network-free-but-not-free resync that NFR-18 works to avoid.
 
+**Forward-only means the chain has no natural end, and one is stated elsewhere.** A build must migrate
+from whatever it finds, and [D-33](../product/platforms-and-distribution.md) removes any ability to make
+a user upgrade — so without a bound the chain reaches back to the oldest build still installed, forever.
+[D-62](../build/packaging.md) bounds it with a stated migration floor and makes advancing that floor a
+deliberate amendment. Nothing about forward-only changes; what changes is that the obligation it creates
+is now owned by something.
+
 **Contestable because:** forward-only means a downgrade is unsupported once a migration has run, and the
 only recovery is account removal and resync. For a cache-shaped store that is defensible; a reader who
 finds it indefensible should argue for reversible migrations, not for additive-only.
