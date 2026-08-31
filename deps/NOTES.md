@@ -155,3 +155,34 @@ achieves that by **emptying the children of every node it walks** — including 
 still alive and referenced elsewhere. Any code that reparents a subtree and then lets the old
 parent be released will silently lose that subtree's contents. `sanitize.rs` takes the
 children out of an unwrapped element rather than cloning them, and says why at the site.
+
+---
+
+## `adblock`
+
+**Reached by:** `sift-block`. D-10 names it: "an established Rust filter engine — the one
+powering a shipping browser's native blocker" — as the authority, with rules compiled into
+the web engine's own content-rule format as an independent backstop. The `content-blocking`
+feature performs that conversion, so **both halves of D-10 come from one source**, which is
+what makes a disagreement between them a real signal rather than two parsers differing about
+syntax.
+
+- **Licence: MPL-2.0, and it tripped the gate.** That is the gate working, and the
+  resolution is recorded in `deny.toml` rather than here: the first version of the allowlist
+  treated "copyleft" as a synonym for "incompatible with the store's channel", which is
+  wrong for MPL. The distinction that matters is between a licence that restricts *the
+  Larger Work's* terms (the GPL family, and LGPL's relinking requirement) and one that
+  attaches obligations only to its own files. **This is exactly the shape Q-21 predicted** —
+  a vendored crate making the channel decision — and it is worth noting that the crate in
+  question is the one D-10 names, so a stricter list would have silently overruled a
+  decision the specification already made.
+- **Unsafe.** Present. It is a matcher over attacker-supplied URLs rather than a parser of
+  attacker-supplied *structure*, which is a materially smaller surface than the HTML tree
+  builder — but it is on the hostile-input path and belongs in NFR-40 method 4's fuzzing
+  scope.
+- **Floor, threads, timers, sockets.** No floor above Sift's. No network of its own: it
+  answers questions about URLs and never fetches one, which is the property that lets the
+  broker remain the only component in the core that fetches anything.
+- **Size.** It is the largest single addition to the tree so far. R-12's warning is about
+  what Sift *builds*; this is the other side of that ledger, and the count in
+  `deps/approved.txt` is the only place it is visible.

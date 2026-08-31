@@ -12,3 +12,10 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+sift-foundation.workspace = true
+# D-10 names this: "an established Rust filter engine — the one powering a shipping
+# browser'''s native blocker" — as the authority, with rules compiled into the web engine'''s
+# own content-rule format as an independent backstop. The `content-blocking` feature is
+# that conversion, so both halves of D-10 come from one source and a disagreement between
+# them is a real signal rather than two parsers differing.
+adblock = { version = "0.13", default-features = false, features = ["content-blocking", "embedded-domain-resolver", "full-regex-handling"] }

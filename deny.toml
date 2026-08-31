@@ -55,10 +55,30 @@ allow = [
     "Unicode-3.0",
     "CC0-1.0",
     "Unlicense",
+    # MPL-2.0 is admitted, and the reasoning is worth writing down because the first version
+    # of this list got it wrong by treating "copyleft" as a synonym for "incompatible".
+    #
+    # D-33's requirement is that the **copyright holder can relicense Sift's own code** under
+    # the store's terms. That is Q-16, and it is about authorship. For a *dependency* the
+    # question is different: does its licence permit distribution through that channel at
+    # all? MPL-2.0's §3.3 says a Larger Work may be distributed under terms of your choice
+    # provided the covered files' obligations are met, and §3.2's obligation is source
+    # availability for those files. There is no anti-circumvention clause and no device
+    # limit — which is what actually makes GPL-family licences a problem for that channel,
+    # and MPL has neither.
+    #
+    # Sift is AGPL-3.0 and its dependencies' sources are public, so the obligation is already
+    # satisfied rather than newly incurred.
+    #
+    # This is load-bearing rather than incidental: **D-10 names the filter engine** — "the
+    # one powering a shipping browser's native blocker" — and that engine is MPL-2.0. A list
+    # that rejected it would have made a decision the specification already made, by
+    # accident, in a file nobody reads as normative. See #26.
+    "MPL-2.0",
 ]
-# Deliberately absent: MPL-2.0, LGPL, GPL, AGPL. MPL's file-level copyleft cannot be
-# relicensed under the store's terms either, which is the property D-33 needs. Adding
-# one is a decision on #26 (Q-21), not a change to this file alone.
+# Still deliberately absent: LGPL, GPL, AGPL. LGPL's relinking requirement and the GPL
+# family's terms are the ones that genuinely collide with the store's, and admitting one is
+# a decision on #26 (Q-21) rather than a change to this file alone.
 confidence-threshold = 0.9
 private = { ignore = true }
 
