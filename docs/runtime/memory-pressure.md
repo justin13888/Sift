@@ -50,6 +50,21 @@ If the operating system needs more than L3 can give, it will terminate the proce
 correct across that — the store and the mutation queue are crash-consistent under NFR-16 in
 [mutations](../mail/mutations.md), so termination costs a repaint and nothing else.
 
+**L1 is not a rare event on the reference rig, and what depends on it should be read that way.** The
+[reference environment](../product/reference-environment.md) specifies a deliberately unflattering
+machine — a 2020-era laptop with 8 GB of memory. Mild pressure there, with a browser and the rest of the
+user's work already resident, is nearer a steady state than an incident. L1 is the tier Sift will spend
+real time in, not a corner it occasionally visits.
+
+That matters because of what L1 releases. Dropping the filter engine puts
+[content blocking](../rendering/content-blocking.md) into its absent-authority state, in which every
+remote fetch is denied. That is the failure direction that document chooses deliberately and it is the
+right one — but the consequence on this rig is that a user who has allowed a sender's images may still see
+them withheld, repeatedly, for a reason that is neither the sender nor the network. The reason MUST be
+reported as the shed it is under [FR-33](observability.md), which that document already requires. What is
+recorded here is only that the state is ordinary rather than exceptional, so its cost to the user should
+be weighed at that frequency rather than at an incident's.
+
 ## D-20 — mimalloc, with purge driven by the governor
 
 **Chosen:** mimalloc as the global allocator, with a bounded purge delay, and an explicit collect issued
