@@ -1,6 +1,6 @@
 # Search
 
-**Owns:** D-5, D-79, FR-19, FR-20, FR-21, NFR-5.
+**Owns:** D-5, D-79, D-80, D-81, FR-19, FR-20, FR-21, NFR-5.
 
 ## D-5 — Local full-text search via the embedded database's FTS extension
 
@@ -36,6 +36,98 @@ Stating the default matters because the number means different things at differe
 per-folder default would let NFR-5 be met by a build that never does the hard thing. It also matters for
 the product: a user searching for a message rarely knows which account it arrived in, which is the same
 observation [D-4](../architecture/presentation-layer.md) makes about the unified inbox.
+
+## D-80 — The index stores its own copy of the text it indexes
+
+**Chosen:** the full-text index is **content-storing**: it holds its own copy of the text it indexes and
+does not reference a row or a blob for it.
+**Rejected:** an index over an external content table; a contentless index that stores only postings.
+
+**Why the alternatives are not merely cheaper.** [Cache and blobs](cache-and-blobs.md) states that *"a
+body evicted for space leaves its indexed text in place, which is what keeps a message findable after its
+body is gone"*. Taken with eviction, that means **after a body is evicted the index is the only copy of
+that text on the machine**. An external-content or contentless index would at that moment be pointing at
+content that no longer exists, and three things break at once:
+
+- **Reindexing becomes impossible.** [D-32](data-model.md) explicitly rejects *"dropping and rebuilding
+  derived state on schema change"* and NFR-18 forbids requiring a resynchronization, so a tokenizer
+  change, an index-format change, or the [D-44](data-model.md) normalization change that document calls
+  *"a reindex of one column"* would have no source to reindex from.
+- **Snippets and highlighting lose their source**, in a search feature whose result rows are the product.
+- **The index silently degrades**, because an entry whose content is gone is not an error anywhere — it
+  is a match that cannot be shown.
+
+Content-storing makes the index self-sufficient: it is both the search structure and the retained text,
+so anything that can be recomputed from text can be recomputed from it.
+
+**What it costs, and why the cost is smaller than it looks.** Body text is stored twice while the body is
+cached. But the two live under different budgets on purpose — bodies under
+[NFR-14](cache-and-blobs.md)'s cache budget, the index under
+[NFR-52](cache-and-blobs.md)'s envelope budget — and NFR-14's is the one that evicts first and hardest.
+The duplication therefore exists only while the body is hot, which is exactly when the extra copy is
+least likely to be the thing that pushes disk over.
+
+**Contestable because:** it is the most expensive of the three options in the dimension the design is
+most sensitive to, and NFR-52's budget has to absorb it. If that budget turns out to be dominated by
+stored text rather than by postings and envelopes, the retreat is not an external-content index — that
+one is foreclosed by the argument above — but indexing less body text per message, which is a smaller
+promise rather than a broken one.
+
+## D-81 — What enters the index, when, and how it is tokenized
+
+**Chosen:** envelope fields are indexed at ingest and body text at first fetch, from the **extracted
+text** of the selected part rather than from its markup. Tokenization is Unicode word segmentation with
+diacritic folding over a normalization form fixed to match [NFR-54](../architecture/presentation-layer.md),
+and a trigram index covers scripts that word segmentation cannot segment.
+**Rejected:** indexing raw markup; indexing at ingest only; leaving the trigram index conditional.
+
+**When each field enters, and why the split is forced.** [D-53](../mail/sync-engine.md)'s backfill
+deliberately does not fetch bodies — *"a backfill that fetches body text for half a million messages to
+fill one column is a different product"* — so at ingest there is no body text to index and there will not
+be one until the user opens the message. Subject, sender and recipients arrive with the envelope and are
+indexed then; body text is indexed when a body is first fetched, and re-indexed if the body is fetched
+again after eviction.
+
+**This is what [D-73](cache-and-blobs.md)'s best-effort offline model looks like in search**, and it
+should be read together with it: local search covers every message's envelope and only the bodies the
+user has read. FR-21's server-side fallback is therefore not a tail in the usual sense — it is how a
+query reaches the body text of mail nobody has opened — and the provenance labelling FR-21 requires is
+what makes that visible rather than mysterious.
+
+**Why extracted text rather than markup.** Indexing raw HTML indexes class names, inline styles, tracking
+URLs and base64 fragments, all of which are attacker-chosen and none of which any user searches for. It
+would let a sender inflate their own relevance, pad the index, and match queries about words they never
+displayed. The text is taken **after sanitization**, from the tree the pipeline already produced, so what
+is searchable is what was renderable — which is also the only definition a user can predict.
+
+Attachment filenames are indexed, because users look for mail by them. Folder and tag names are not:
+FR-20's operators address those directly, and indexing them as free text would make every message in a
+folder match its name.
+
+**The tokenizer, and the cliff D-5 left in it.** D-5 specifies *"diacritic-insensitive Unicode
+tokenization, plus a trigram index if substring matching proves necessary"*. Word segmentation is
+correct for space-delimited scripts and returns nothing usable for Chinese, Japanese or Thai, where words
+are not delimited — so for those scripts the conditional clause is not an enhancement, it is the
+difference between search working and search returning nothing. **The trigram index is therefore required
+rather than conditional**, and it is scoped to text in the scripts that need it so that its cost is not
+paid by every message.
+
+**The normalization form is fixed and MUST be the same one NFR-54 applies.** If the index normalizes
+differently from the layer that produces display text, a user can search for exactly the string they are
+looking at and not find it — the two forms are visually identical and compare unequal. This is one
+setting agreeing across two documents, and it fails invisibly if it does not.
+
+**The ranking function is stated where it is used, not here.** Within one account the index's own scoring
+orders results; across accounts D-79 above ranks on corpus-independent features, and that boundary is
+where the choice of scoring function stops mattering.
+
+**What it costs:** two index paths rather than one, a trigram index whose disk sits inside NFR-52's
+budget with everything else, and a coupling to NFR-54 that must be asserted by test rather than assumed.
+
+**Contestable because:** indexing body text only for read messages means local search quality varies with
+reading habits in a way users will not predict, and the honest alternative — index bodies during
+backfill — is the one D-53 refuses on cost. That refusal is the load-bearing one, and if it is ever
+revisited, this decision changes with it.
 
 ## FR-20 — Structured operators
 
