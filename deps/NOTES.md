@@ -124,3 +124,34 @@ decision".
 - **Floor.** None above Sift's.
 - **Threads, timers, sockets.** No sockets. SQLite's own threading is configured through
   pragmas rather than by spawning; nothing here arms a timer, which is what NFR-11 counts.
+
+---
+
+## `html5ever` and `markup5ever_rcdom`
+
+**Reached by:** `sift-sanitize`. **The most hostile-input-facing dependency in the tree** —
+every byte it parses was chosen by an unauthenticated sender with unlimited attempts.
+
+- **Why a dependency at all, given D-26.** D-26 rejects adopting an existing
+  general-purpose *sanitizer*, for a stated reason: they have no notion of rewriting every
+  fetching position to an internal scheme (I2), and no CSS pipeline at all. It does **not**
+  reject the tree builder — it requires one, and requires it be *spec-conformant*, because
+  I8 needs the parser to implement the same algorithm the rendering engine does and NFR-40's
+  dual-parser divergence test needs the same property. Writing a second conformant HTML5
+  tree builder would be building the thing whose correctness is hardest to establish and
+  whose bugs are exactly the mutation-XSS class I8 exists to close. The allowlist policy
+  over it is Sift's own and lives in this crate.
+- **Unsafe.** Present, in the string interning and tendril machinery. This is the one place
+  in the tree where that deserves ongoing attention rather than a one-time answer, and it is
+  the argument for NFR-40 method 4 — fuzzing seeded with the fidelity corpus — being a real
+  obligation rather than a nice-to-have.
+- **Licence.** `MIT OR Apache-2.0`. Clears the allowlist.
+- **Floor, threads, timers, sockets.** No floor above Sift's. No network, no filesystem, no
+  threads.
+
+**A defect found in it while wiring this up, recorded because it will recur.** `Node`'s
+`Drop` is iterative so that a deeply nested tree does not overflow the stack, and it
+achieves that by **emptying the children of every node it walks** — including nodes that are
+still alive and referenced elsewhere. Any code that reparents a subtree and then lets the old
+parent be released will silently lose that subtree's contents. `sanitize.rs` takes the
+children out of an unwrapped element rather than cloning them, and says why at the site.

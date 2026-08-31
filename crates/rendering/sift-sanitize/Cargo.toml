@@ -12,3 +12,11 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+sift-foundation.workspace = true
+# D-26 chooses "a spec-conformant HTML5 tree builder with Sift'''s own policy over it" and
+# rejects adopting an existing general-purpose *sanitizer*. This is the tree builder half:
+# I8 requires the parser implement the same algorithm the rendering engine does, and
+# NFR-40'''s dual-parser divergence test needs the same property. The allowlist policy over
+# it is Sift'''s and is in this crate.
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
