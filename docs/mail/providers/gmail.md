@@ -20,7 +20,7 @@ Capability notes for the Gmail adapter. The abstraction it implements is in
 | Push mechanism | **poll only** — see D-7 below |
 | ID stability | stable globally |
 | Server search | full query syntax, including operators Sift's own grammar does not expose |
-| Maximum batch size | **unknown — plans conservatively pending [Q-9](../../open-questions.md)** |
+| Maximum batch size | **50 — published.** See below |
 | Snippet source | provider-supplied |
 
 ## Delta
@@ -32,6 +32,26 @@ The history window is finite. When the stored cursor falls outside it, the accou
 invalidation and MUST recover per NFR-18 in [sync engine](../sync-engine.md).
 
 Envelope fetches MUST request metadata only rather than full messages, and MUST use the batch endpoint.
+
+## Batch size, and the row the capability model does not have
+
+[Q-9](../../open-questions.md) is answered for this provider, and answering it exposed
+something worth writing down.
+
+The provider publishes **two** limits. The batch endpoint's hard cap is a hundred calls per
+request, with its own guidance for this API being fifty to stay inside the rate limit; a
+maximum chosen to be throttled is not a maximum worth planning against, so **50** is declared.
+The label-change endpoint accepts a **thousand** identifiers in one call.
+
+[The capability model](../provider-model.md) has one row here, and it governs both envelope
+fetches and mutation batches. A single value must therefore be the minimum over the operations
+it covers, so mutations pay for the tighter of the two. That is a capability the model does not
+have rather than a compromise this adapter made.
+
+The **request budget** stays unknown, and deliberately. The provider publishes it in quota
+units per second rather than in requests, and the units differ per method — a history page and
+a label change do not cost the same. Converting one into the other would be Sift inventing a
+number and calling it published, which is exactly what rule 4 exists to prevent.
 
 ## D-7 — Push mechanism
 

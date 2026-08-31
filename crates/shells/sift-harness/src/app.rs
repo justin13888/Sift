@@ -224,7 +224,17 @@ impl App {
     fn root(&mut self) -> PathBuf {
         self.root
             .get_or_insert_with(|| {
-                let d = std::env::temp_dir().join(format!("sift-harness-{}", std::process::id()));
+                // Process identifier **and** the clock. A pid alone is not unique for long:
+                // the operating system reuses one within seconds, and a session that landed
+                // on a reused directory would open a previous session's account files and
+                // fail to insert its own account row — which is a flaky test that looks like
+                // a bug in the store.
+                let unique = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos());
+                let d = std::env::temp_dir()
+                    .join(format!("sift-harness-{}-{unique}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&d);
                 std::fs::create_dir_all(&d).expect("scratch root");
                 d
             })

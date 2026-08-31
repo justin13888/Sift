@@ -42,8 +42,8 @@ pub use adapter::{Gmail, GmailError};
 
 use sift_provider::capability::{
     ArchiveSemantics, Capabilities, DeltaMechanism, IdStability, JunkReporting,
-    LocationCardinality, Magnitude, PushMechanism, SnippetSource, TagSupport, ThreadOperations,
-    TrashSemantics,
+    LocationCardinality, Magnitude, MagnitudeSource, PushMechanism, SnippetSource, TagSupport,
+    ThreadOperations, TrashSemantics,
 };
 
 /// What a Gmail account declares.
@@ -67,12 +67,38 @@ pub fn capabilities() -> Capabilities {
         push: PushMechanism::PollOnly,
         id_stability: IdStability::StableGlobally,
         server_search: true,
-        max_batch_size: Magnitude::Unknown,
+        // Q-9, answered for this provider. See `BATCH_SIZE` for why it is the smaller of the
+        // two numbers the provider publishes.
+        max_batch_size: Magnitude::Known {
+            value: BATCH_SIZE,
+            source: MagnitudeSource::Published,
+        },
+        // **Still unknown, and deliberately.** The provider publishes a budget in quota
+        // units per second rather than in requests, and the units differ per method — a
+        // history page and a label change do not cost the same. Converting one into the
+        // other would be Sift inventing a number and calling it published, which is the
+        // failure D-12's rule 4 exists to prevent. It needs a measurement, which is #2.
         request_budget: Magnitude::Unknown,
         snippet_source: SnippetSource::ProviderSupplied,
         unrecognised: Vec::new(),
     }
 }
+
+/// The batch size this provider is planned against — Q-9, for one of the four.
+///
+/// **The smaller of two published numbers**, and the gap between them is a real observation
+/// about the capability model rather than a detail.
+///
+/// The batch endpoint's hard cap is a hundred calls per request, and the provider's own
+/// guidance for this API is fifty, to stay inside the rate limit. A maximum chosen to be
+/// throttled is not a maximum worth planning against, so fifty is what is declared.
+///
+/// The other number is larger: the label-change endpoint accepts a thousand identifiers in
+/// one call. The capability model has **one** row here, and it governs both envelope fetches
+/// and mutation batches — so a single value has to be the minimum over the operations it
+/// covers, and mutations pay for the tighter of the two. That is a capability the model does
+/// not have rather than a compromise this adapter made, and it is recorded on #2.
+pub const BATCH_SIZE: u32 = 50;
 
 /// Whether the history feed is the only path by which change is applied.
 ///
@@ -136,6 +162,32 @@ mod tests {
     #[test]
     fn idle_is_not_used_and_history_is_the_only_apply_path() {
         assert!(history_is_the_only_apply_path());
+    }
+
+    #[test]
+    fn the_batch_size_is_published_rather_than_conservative() {
+        // Q-9, answered for this provider. The conservative default is what an unknown
+        // magnitude plans against, and it costs five times the round trips on a backfill.
+        assert_eq!(capabilities().batch_size(), BATCH_SIZE);
+        assert_ne!(
+            capabilities().batch_size(),
+            Capabilities::CONSERVATIVE_BATCH
+        );
+        assert!(matches!(
+            capabilities().max_batch_size,
+            Magnitude::Known {
+                source: MagnitudeSource::Published,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_request_budget_is_still_unknown_and_says_so() {
+        // The provider publishes it in quota units per second, and the units differ per
+        // method. Converting one into the other would be Sift inventing a number and calling
+        // it published.
+        assert_eq!(capabilities().request_budget, Magnitude::Unknown);
     }
 
     #[test]

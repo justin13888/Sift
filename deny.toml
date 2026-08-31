@@ -108,9 +108,19 @@ deny = [
     { name = "axum" },
     { name = "actix-web" },
     { name = "warp" },
-    { name = "hyper", wrappers = ["reqwest"] },  # client use only
+    # `hyper` is both a client and a server. The wrapper carve-out this row used to carry
+    # named a client Sift does not use, so it matched nothing and warned about it — and the
+    # honest answer turned out to be that no carve-out is needed: `sift-http` is a
+    # hand-written HTTP/1.1 client over `rustls`, bounded by docs/limits.md rather than by
+    # somebody else's defaults, and there is no path by which a server framework is wanted.
+    { name = "hyper" },
     # D-30: Rust TLS verifying against the OS trust store. A bundled root store was
     # rejected because it breaks generic IMAP behind corporate inspection proxies.
+    #
+    # `webpki-root-certs` is the same store under a second name. Both are banned here, and
+    # `cargo xtask deps` additionally resolves each shipped target and fails if either
+    # reaches one — because the verifier Sift uses declares them for platforms Sift does not
+    # ship to, so a ban alone would either be wrong or would have to be waived.
     { name = "webpki-roots" },
     { name = "openssl" },
     { name = "openssl-sys" },
