@@ -20,7 +20,7 @@ This is the only way the abstraction survives contact with a fifth provider.
 | Capability | Values | Meaning and UI consequence |
 |---|---|---|
 | Location cardinality | exactly one; one or more | Whether a message can be in several locations at once. Drives move-versus-add affordances |
-| Tag support | none; read-only; read-write (with length and charset limits) | Whether tags exist and whether they can be edited |
+| Tag support | none; read-only; read-write (limits are L-15 in [limits](../limits.md)) | Whether tags exist and whether they can be edited |
 | Archive semantics | remove from inbox; move to special-use folder | How the archive intent is realised |
 | Trash semantics | move to trash; flag and expunge | How the delete intent is realised |
 | Permanent delete | supported or not | Whether the permanent-delete intent is offered at all — see [mutations](mutations.md), which owns its confirmation and no-undo rules |

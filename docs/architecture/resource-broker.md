@@ -68,7 +68,8 @@ resolving a click-tracking wrapper by following it is the same mistake in a diff
 
 **Bounded means bounded before the decode, not during it.** Dimensions and resource limits are checked
 before any decoder is handed bytes, because a decode bomb reaching Sift is a denial of service on the
-user's mail under NFR-19. The broker is where the hostile-input posture of the
+user's mail under NFR-19. The bounds are L-10 through L-12 in [limits](../limits.md), and a resource that
+exceeds one resolves to the same deterministic blocked answer a denied load does. The broker is where the hostile-input posture of the
 [pipeline](../rendering/pipeline.md) continues after sanitization, not where it relaxes.
 
 **Nothing here is a cache exemption.** The in-memory classification cache is declared, budgeted, and

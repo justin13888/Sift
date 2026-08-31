@@ -17,7 +17,7 @@ Notation: *S* is the sanitizer, *P* the parser, *W* the serializer.
 | **I4** | **No document control.** No base element, no equivalent-header meta, no link element, no title element |
 | **I5** | **Containment.** Structural, because the body renders in its own document; additionally, fixed positioning and viewport-unit escapes are rejected |
 | **I6** | **Idempotence.** *S(S(x))* is equivalent to *S(x)* |
-| **I7** | **Bounded.** *S* terminates within a time bound and produces bounded output for all inputs. Nesting depth, node count, and attribute count are capped |
+| **I7** | **Bounded.** *S* terminates within a time bound and produces bounded output for all inputs. Nesting depth, node count, and attribute count are capped — the caps are L-6 through L-8 in [limits](../limits.md), and exceeding one rejects the message to the raw view rather than truncating it |
 | **I8** | **Parse stability.** *P(W(S(x)))* is DOM-isomorphic to *S(x)* |
 | **I9** | **No content invention.** *S* introduces no visible text that was not present in *x*. Removal is permitted; addition is not |
 | **I10** | **Encoding determinism.** Output is well-formed UTF-8 for any input bytes and any declared charset, including malformed and mutually contradictory declarations |

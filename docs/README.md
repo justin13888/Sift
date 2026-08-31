@@ -26,6 +26,7 @@ them.
 | [Decisions](decisions.md) | Every D-identifier, what was rejected, and why it is contestable |
 | [Open questions](open-questions.md) | Unmade decisions (Q) and load-bearing assumptions that may not hold (R) |
 | [Glossary](glossary.md) | Terms with a specific meaning here |
+| [Limits](limits.md) | Every numeric bound Sift enforces, and what happens when one is exceeded |
 
 ## The graph
 
@@ -71,6 +72,10 @@ them.
 - [Threat model](security/threat-model.md) · [Credentials](security/credentials.md) ·
   [Privacy](security/privacy.md)
 
+**Cross-cutting** — normative pages that belong to no single area.
+
+- [Limits](limits.md) — the numeric bounds three separate consumers must assert identically
+
 ## Conventions
 
 **Normative language.** MUST, MUST NOT, SHOULD, and MAY carry their usual specification force. Prose that
@@ -80,7 +85,7 @@ avoids them is context, not requirement.
 signatures, no schemas as data-definition language, no pinned dependency versions. A named dependency
 appears only where the choice **is** the architectural decision, and then with its justification.
 
-**One owner per identifier.** Every FR, NFR, D, and I identifier is stated in exactly one document, next
+**One owner per identifier.** Every FR, NFR, D, I, and L identifier is stated in exactly one document, next
 to the design it constrains. Other documents link to it and never restate it. The indexes above are
 navigation, not source.
 

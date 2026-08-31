@@ -75,7 +75,7 @@ support an optional user-set hard cap that pauses sync.
 | ~~NFR-36~~ | ~~Data usage accounted per account per link class, user-visible, with an optional hard cap~~ — **struck: a verbatim duplicate of FR-36 above.** Two identifiers for one requirement means a test can satisfy one while the other silently lapses, and dropping either reads as dropping a distinct guarantee. FR-36 is the owner; the number is retired and MUST NOT be reused |
 | **NFR-37** | On cellular, at most 6 radio-waking events per hour per account at idle |
 | **NFR-38** | Airplane mode or system sleep produces **zero** connection attempts until the path returns. No retry storm on wake |
-| **NFR-39** | A single message fetch never exceeds a configurable byte ceiling without explicit confirmation |
+| **NFR-39** | A single message fetch never exceeds a configurable byte ceiling without explicit confirmation. The default is L-13 in [limits](../limits.md) |
 
 **NFR-31 previously read 50 KB per hour, and was restated for internal coherence — not adjusted to match a
 measurement.** NFR-15 in [scheduling](scheduling.md) caps *unrestricted* idle at 1 KB per minute per
