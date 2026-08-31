@@ -88,8 +88,8 @@ avoids them is context, not requirement.
 signatures, no schemas as data-definition language, no pinned dependency versions. A named dependency
 appears only where the choice **is** the architectural decision, and then with its justification.
 
-**One owner per identifier.** Every FR, NFR, D, I, and L identifier is stated in exactly one document, next
-to the design it constrains. Other documents link to it and never restate it. The indexes above are
+**One owner per identifier.** Every FR, NFR, D, I, and L identifier is stated in exactly one document,
+next to the design it constrains. Other documents link to it and never restate it. The indexes above are
 navigation, not source.
 
 **Identifiers are stable.** They appear in review comments, commits, and tests. Numbers are never reused,
