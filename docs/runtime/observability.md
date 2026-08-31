@@ -1,0 +1,151 @@
+# Observability
+
+**Owns:** D-16, D-24, D-34, FR-33, FR-34, NFR-44, NFR-45.
+
+Two pieces of this cannot be deferred, because they cannot be retrofitted: **allocation attribution** and
+**the soak harness**. Both are **P0** work — see [roadmap](../product/roadmap.md), where they are a
+gate rather than a phase item. The user-facing panels can come later.
+
+## D-16 — Measure footprint, not RSS
+
+**Chosen:** `phys_footprint` on macOS and PSS on Linux.
+**Rejected:** resident set size.
+
+**Why.** On macOS, `phys_footprint` is what the system's activity monitor displays and what the
+memory-pressure system acts on. On Linux, WebKit is multi-process with shared mappings, so RSS
+double-counts and PSS does not. The body view is a separate process on both platforms, so **the figure
+that matters is Sift's process plus whatever engine processes it currently owns**, and RSS would
+double-count exactly the allocation the shed tiers work hardest to release. **Writing the targets against
+RSS means arguing about a different number than the one users and the OS are looking at.** The targets in
+[memory pressure](memory-pressure.md) are stated against these metrics.
+
+## Allocation attribution
+
+**Explicit cache accounting is the primary mechanism, not the allocator hook.** Every cache MUST report
+its name, live bytes, entry count, capacity, hit rate, and eviction count. This is what the
+[pressure governor](memory-pressure.md) reads and what a maintainer acts on.
+
+**The allocator hook exists to catch memory that is not in a declared cache** — which is exactly where
+leaks live. The residual — total footprint minus the sum of declared caches — is the number a maintainer
+chases when NFR-45's slope gate fires, and D-24 is what turns that residual into a lead.
+
+## D-24 — The subsystem tag travels with the allocation
+
+**Chosen:** a tagging global allocator that records the owning subsystem **in the allocation itself**, so
+that freeing decrements the subsystem that allocated. The tag is task-scoped and re-established at every
+poll.
+**Rejected:** tagging on allocation only, reading a bare thread-local; per-subsystem heaps; deferring
+attribution to a development-only build.
+
+**Why.** Two things break the obvious implementation, and both are silent rather than loud.
+
+The first is **asymmetry**. Bytes in this application are allocated by one subsystem and freed by another
+by design — the [pipeline](../rendering/pipeline.md) hands a buffer from the MIME parser to the sanitizer
+to the blocker to the resource broker. If the tag is read only at allocation, every hand-off leaks a
+counter, and over the fourteen days NFR-12 measures, the per-subsystem numbers diverge without bound. A
+counter that lies about a leak is worse than no counter, because it sends a maintainer somewhere real
+looking for something that is not there.
+
+The second is **task migration**. [D-19](../architecture/overview.md) chose a work-stealing runtime, so a
+task may resume on a different worker thread than it started on. A thread-local set once per operation is
+therefore wrong at every await point. It must be task-scoped and re-established at each poll — which is
+sound under work stealing, because a task is not stolen mid-poll.
+
+**What it costs:** a header word on every allocation, alignment care, and per-CPU sharded counters rather
+than one contended atomic. This is what NFR-44's budget is spent on, and it is a real gate rather than a
+formality.
+
+**Contestable because:** per-subsystem heaps would give symmetry for free with no per-allocation overhead.
+They were rejected because a buffer must then be freed to the heap it came from, which constrains exactly
+the hand-off pattern above. If the pipeline ends up copying at stage boundaries anyway, heaps become the
+better answer.
+
+**NFR-44.** Attribution overhead MUST stay at or under 2% in release builds in counters-only mode, which
+is what makes it acceptable to leave **on in release**. Stack-capture mode is development-only behind a
+feature flag.
+
+**Wakeup accounting.** Timer fires and socket wakes MUST be counted per minute on **two axes: per
+subsystem and per account.** Per subsystem is what localises a coalescing regression to the component that
+caused it. Per account is what makes NFR-11 in [scheduling](scheduling.md) falsifiable at all, and it does
+not follow from the first: NFR-11 is stated *per account*, an account is not a subsystem, and a coalesced
+wheel deliberately merges every account's work into one fire — so a per-subsystem count of the scheduler
+reports a single number where the requirement needs five. Each armed timer therefore carries the account
+it was armed for, and a coalesced fire is attributed to every account whose work it served, not to the one
+that happened to set the deadline. Counting it once would let five accounts share a wakeup and report a
+fifth of one each, which is the arithmetic by which a budget is met on paper.
+
+## NFR-45 — Soak harness
+
+A long-running instance under synthetic load MUST sample footprint, per-subsystem counters, cache
+statistics, and wakeup rates on a fixed interval, and CI MUST gate on the **slope** over at least 72 hours.
+
+This is the only thing that will catch NFR-12 — no footprint ratchet over 14 days — and it catches it
+weeks earlier than manual testing would. It also produces the baseline against which
+[D-1](../architecture/ui-shell.md) and [D-2](../architecture/process-model.md) are validated in P0.
+
+## D-34 — Trace output in an established viewer's format
+
+**Chosen:** emit traces and counter series in the protobuf trace format of an established open-source
+trace viewer.
+**Rejected:** the JSON trace-event format; a sampling-profiler format; anything bespoke.
+
+**Why.** Emitting a format an existing viewer already reads turns "the app feels slow" into a flame graph
+without building a tool. That much was always the intent; what settles the choice between formats is
+**NFR-45's soak harness**, which samples footprint, per-subsystem counters, cache statistics, and wakeup
+rates on a fixed interval for at least 72 hours. That is a long, dense counter series, and it is the
+primary consumer.
+
+The JSON trace-event format is easier to emit and is read by the same viewer, but it is verbose text with
+no real representation for long counter series — a three-day recording becomes unmanageable. A
+sampling-profiler format inverts the problem: excellent for one slow operation, poor for correlating
+wakeups against footprint across days.
+
+**Contestable because:** protobuf emission is more machinery than appending JSON lines, and if the soak
+harness ends up consuming counters through a separate channel anyway, the argument that selected this
+format no longer applies to the traces themselves.
+
+## FR-34 — Runtime debug panel
+
+Per-subsystem live bytes and the unattributed residual; every cache's statistics; active tasks and
+queries; per-account sync cursor and connection state; the mutation queue's contents; wakeups per minute;
+current network conditions and active policy tier.
+
+## FR-33 — Per-message debug view
+
+Available in release builds behind a preference. For a single message:
+
+1. Raw source
+2. MIME structure with part sizes; which alternative was chosen and why
+3. Authentication results and the derived [synthetic origin](../rendering/sender-origin.md)
+4. Pre- versus post-sanitize diff, **with a rule identifier next to every removal**
+5. Content-blocker decisions: every candidate URL, its verdict, the matching rule, the first-party
+   determination
+6. Cosmetic filter hits, distinguishing stylesheet-injected from Rust-evaluated
+7. Dark transform: generated overrides, the colour mapping table, computed contrast, image classifications
+8. Link unwrapping: displayed, raw, and unwrapped
+9. **Live invariant check results for this specific message** — see
+   [sanitizer invariants](../rendering/sanitizer-invariants.md)
+10. Render timing breakdown and body-view footprint
+
+**Item 9, with items 4 and 5, is the same code path as the differential test harness.** Build it once, use
+it twice. That shared identity is the reason this view is worth its cost, and the reason it is designed now
+even though it is built later.
+
+**All ten items ship in release, behind a preference that is off by default.** The alternative — a reduced
+set in release, the full set in development — was rejected because it breaks precisely the build-once-use-
+twice economics above: items 4, 5 and 9 would then exist in two configurations, and the release one would
+be the untested one.
+
+Two arguments carry this. The view is not telemetry and never transmits, so shipping it costs the user
+nothing but a setting they will not find by accident — see [privacy](../security/privacy.md), which argues
+that these panels exist so a user can *verify* Sift's claims rather than take them on trust. And
+[content blocking](../rendering/content-blocking.md) makes the view load-bearing rather than optional: it
+is the required surface for a disagreement between the filter engine and the compiled backstop.
+
+The cost is honest and small. The view enumerates every blocked URL and every sanitizer removal, which is a
+convenient oracle for someone probing the sanitizer — but only locally, by a user who already has the
+message. Default-off keeps it away from users who have no use for it.
+
+## Privacy
+
+Neither panel is telemetry. Nothing here leaves the machine. See [privacy](../security/privacy.md).

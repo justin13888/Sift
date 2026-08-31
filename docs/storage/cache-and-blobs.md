@@ -1,0 +1,104 @@
+# Cache and blobs
+
+**Owns:** D-23, FR-10, FR-12, NFR-14, NFR-49.
+
+## The cache is not the source of truth
+
+The local cache is a **bounded, evictable tier**. The provider is the source of truth. Anything the cache
+holds may be discarded at any moment — under [memory pressure](../runtime/memory-pressure.md), under a
+disk budget, or on eviction — and the application MUST remain correct when it is.
+
+This framing is what permits aggressive shedding without a correctness argument each time.
+
+## Tiering
+
+**Envelopes are kept indefinitely.** They are small, and they are what makes list scrolling instant. An
+envelope-complete account is browsable and searchable offline even with no bodies cached at all.
+
+**Bodies and attachments are bounded.** Default budget: 90 days or 2 GB, whichever binds first, evicted
+least-recently-used. The budget is user-configurable.
+
+## Blob store
+
+Bodies and attachments live in a **content-addressed store on disk**, keyed by a **keyed** cryptographic
+hash of the plaintext content — see [D-43](encryption.md), which explains why a bare hash of the
+plaintext is not usable as the address — with small parts inlined into the account database instead.
+Blobs are reference-counted and collected when their count reaches zero; the count is held in the shared
+blob index and its ordering rules are in [data model](data-model.md).
+
+Content addressing gives deduplication for free, which matters more in mail than elsewhere: the same
+attachment arrives repeatedly, in multiple accounts, forwarded and re-forwarded. It also makes the
+[image classification cache](../rendering/dark-mode.md) keyable by content hash, so a given image is
+classified once ever.
+
+Reference counting is what makes [account removal](../mail/accounts.md) correct rather than approximate.
+
+## D-23 — BLAKE3 as the content address
+
+**Chosen:** BLAKE3, both as the store's key and as the input to the convergent blob keys in
+[D-22](encryption.md).
+**Rejected:** SHA-256, with or without a hardware-acceleration requirement.
+
+**Why — and the first thing to record is what this decision is *not* about.** Blob hashing is dominated by
+I/O in every realistic case. Hashing a typical body is a rounding error against NFR-3's 80 ms budget, and
+hashing a large attachment is under two per cent of the time spent transferring it. **Nothing hashes at
+idle**, so this choice has no bearing on NFR-12 or on battery. The primitive is not
+performance-load-bearing, and a future reader who "optimizes" it on speed grounds is solving a problem
+that does not exist.
+
+What decided it is the absence of a hardware requirement. SHA-256 is the more conservative primitive and
+is the one nobody argues about, but its competitive throughput depends on a CPU extension that arrived
+late on mainstream Intel mobile parts — later than the 2020-era laptop the
+[reference environment](../product/reference-environment.md) specifies as the rig. Making acceleration a
+hard startup requirement could therefore exclude the reference machine itself and narrow the Linux install
+base, to buy back a millisecond nobody perceives. BLAKE3 performs uniformly across the target CPUs with no
+mandate at all, and its keyed derivation feeds D-22 without a separate step.
+
+That last property turned out to be worth more than it looked. [D-43](encryption.md) keys the content
+address itself under a per-installation secret, which with BLAKE3 is a mode of the same primitive rather
+than a construction bolted around a different one.
+
+**Contestable because:** SHA-256 is the primitive a security reviewer expects to find, and choosing
+anything else costs a paragraph of explanation forever — this one. If that friction outweighs the
+uniformity argument, SHA-256 with acceleration treated as an optimization and never as a requirement is a
+perfectly good answer.
+
+## FR-10 — Attachments
+
+An attachment list MUST be shown with lazy download, save-to-disk, and open-with-system-handler. Opening
+an executable type MUST require an explicit warning first.
+
+Attachments MUST NOT be fetched as part of message fetch. See the fetch discipline in
+[sync engine](../mail/sync-engine.md). A single fetch is additionally capped by byte ceiling under
+constrained network conditions — see NFR-39 in [network conditions](../runtime/network-conditions.md).
+
+## NFR-49 — Saved attachments carry their provenance
+
+A file written by save-to-disk MUST carry the platform's own marking for content that arrived from an
+untrusted source — the quarantine attribute on macOS, so that Gatekeeper evaluates it on first open.
+
+The reason is that FR-10's warning protects only the path through Sift. A user who saves an attachment and
+opens it an hour later from their file manager gets no warning from Sift and never will, because Sift is
+not involved. The provenance marking is what carries the fact forward to the system component whose job it
+is — and every browser already does this, so an attachment that arrives by mail would otherwise be treated
+*more* trustingly than the same bytes downloaded from the web.
+
+Where a platform offers no equivalent mechanism, that MUST be stated in the interface rather than assumed
+away: the user is then relying on FR-10's warning alone, and deserves to know it.
+
+## FR-12 — Offline read, and honest state
+
+Any cached message MUST be readable offline. The UI MUST clearly distinguish **"not cached"** from **"not
+available"**.
+
+These are different facts and conflating them is a lie of omission. "Not cached" means Sift can fetch it
+when the network returns. "Not available" means the server no longer has it. A user deciding whether to
+find another way to reach a message needs to know which they are looking at.
+
+## NFR-14 — The disk budget is a hard cap
+
+Disk use MUST stay within the user-configured cache budget to within 5%, and the cap MUST be **enforced,
+never advisory**. A cache that grows forever is not a cache.
+
+Eviction MUST be driven by the budget rather than by a periodic sweep hoping to keep up, and blob
+collection MUST run as part of eviction rather than as a separate hoped-for pass.

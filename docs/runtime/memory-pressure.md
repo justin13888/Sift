@@ -1,0 +1,142 @@
+# Memory pressure
+
+**Owns:** D-20, NFR-8, NFR-9, NFR-12, NFR-13.
+
+## Subscribe to pressure; do not poll for it
+
+Sift MUST subscribe to the operating system's own memory-pressure signals rather than polling free memory.
+Polling is both a wakeup source and a worse signal — the OS knows about pressure before free memory
+reflects it.
+
+| Platform | Signal |
+|---|---|
+| macOS | the dispatch memory-pressure source, with its normal, warning, and critical levels |
+| Linux | cgroup v2 pressure-stall information, pollable with thresholds |
+
+## Shed tiers
+
+| Tier | Trigger | Action | Target |
+|---|---|---|---|
+| **L0** | normal | steady state | NFR-9 — at or under 150 MB, window open |
+| **L1** | mild | drop decoded-image caches, rendered-body caches, and prefetch queues; release the filter engine | L0 less the filter engine and those caches |
+| **L2** | warning | destroy the body view; drop parsed-MIME caches; release database memory; shrink the search index cache | L1 less the body view and those caches; **never below the NFR-8 floor, because a window is still live** |
+| **L3** | critical | destroy every window and the entire shell view hierarchy; drop every remaining cache to its floor; collect the allocator; repaint from cold on next activation | toolkit residue plus the resident floor — the NFR-8 state with every cache at its floor |
+
+**Tier targets are compositions, not percentages, and the change is a coherence fix rather than a
+measurement.** They previously read −30% at L1 and −50% at L2 against L0's 150 MB, which is arithmetically
+impossible against the other two numbers on this page. −50% is 75 MB, while NFR-8 puts the floor with **no
+window at all** at 90 MB — so L2, which keeps the window, was required to reach a figure below the
+window-less floor. It was also required to reach a figure below L3's, since L3's stated target *is* that
+floor: the deepest tier had the loosest number, which inverts the ordering the tiers exist to express.
+
+A percentage cannot be a shed target here, because what a tier can release is bounded by what it holds,
+and the residue underneath it is not compressible by asking. Each tier is therefore stated as the tier
+above it minus the things that tier releases, which is falsifiable in exactly the way the percentages were
+not: every term is a declared, reported cache size under [observability](observability.md), so the
+subtraction can be checked rather than believed.
+
+L2's largest single win is destroying the body view, which is genuinely out-of-process on both target
+engines — see NFR-46 in [webview isolation](../rendering/webview-isolation.md). That reclaim does not
+depend on Sift's own process count, which is the reasoning behind
+[D-2](../architecture/process-model.md).
+
+**L3 no longer terminates anything.** Under the earlier two-process design it killed the UI process
+outright. With one process it is instead the deepest in-process shed: every window and its view hierarchy
+goes, every cache drops to its floor, and the allocator is told to return what it can. What cannot be
+returned is **toolkit residue** — whatever AppKit or GTK4 keeps resident once initialized. That residue is
+the honest floor, and it is why L3's target is stated as a composition rather than a number.
+
+If the operating system needs more than L3 can give, it will terminate the process, and Sift MUST be
+correct across that — the store and the mutation queue are crash-consistent under NFR-16 in
+[mutations](../mail/mutations.md), so termination costs a repaint and nothing else.
+
+## D-20 — mimalloc, with purge driven by the governor
+
+**Chosen:** mimalloc as the global allocator, with a bounded purge delay, and an explicit collect issued
+by the pressure governor as part of L3.
+**Rejected:** jemalloc with background purging; the system allocator.
+
+**Why.** NFR-12 is an allocator problem before it is a cache problem. An allocator that does not return
+freed arenas to the operating system will ratchet footprint upward over a multi-week uptime no matter how
+disciplined the caches are, and the shed tiers need a way to *ask* for that return at a moment of their
+choosing rather than hoping decay reaches it eventually.
+
+jemalloc's long-uptime fragmentation behaviour is the best understood of the three, but its background
+purge thread is a periodic wakeup, and **NFR-11 counts wakeups**. Disabling that thread moves purging onto
+allocation paths, which is exactly the wrong place for it. The system allocator offers almost no purge
+control on macOS.
+
+**What it costs:** a non-default allocator in a process that also runs AppKit or GTK, both of which
+allocate through the same global. Interposition is total, so an allocator bug is an application bug.
+
+**Contestable because:** the ranking here rests on the claim that a background purge thread is a
+meaningful fraction of the NFR-11 budget, which is unmeasured. If it is not, jemalloc's fragmentation
+record is the stronger argument and this decision inverts.
+
+## Preconditions
+
+These make the tiers actually work. Without them the governor has nothing to release.
+
+- **Every cache has an explicit byte budget and an eviction policy. No unbounded map anywhere.** This is a
+  code-review rule, not an aspiration, and it is the single most load-bearing line in this document.
+- **Every cache reports its size**, so the governor acts on declared numbers rather than guesses. See
+  [observability](observability.md).
+- **MIME parsing streams.** A large attachment goes to the [blob store](../storage/cache-and-blobs.md);
+  only headers and structure occupy memory. See [pipeline](../rendering/pipeline.md).
+- **The shell owns no authoritative state**, so destroying it at L3 loses nothing that must be recovered
+  from the network. See [presentation layer](../architecture/presentation-layer.md).
+- **Lists are virtualized with a fixed window.** Rendering 200,000 rows defeats everything above. See
+  [UI shell](../architecture/ui-shell.md).
+
+## Targets
+
+Hypotheses, validated against the [reference environment](../product/reference-environment.md). Measured
+as `phys_footprint` on macOS and PSS on Linux, never RSS — see [observability](observability.md).
+
+| ID | Target |
+|---|---|
+| **NFR-8** | Resident idle footprint with no window open at or under 90 MB at the reference corpus, **excluding the filter engine**, which is not loaded in this state |
+| **NFR-9** | Full application idle — window open, body view warm, filter engine loaded — at or under 150 MB, **inclusive of NFR-42's 40 MB** |
+| **NFR-12** | Footprint growth at or under 5% over 14 days of continuous uptime: **no ratchet** |
+| **NFR-13** | L2 shedding is **issued** within 500 ms of the signal, L3 within 1 second — see the note on the two clocks below |
+
+**The filter engine is bound to window lifetime, and NFR-8 and NFR-9 were restated to say so — a
+coherence fix, not a measurement.** At 40 MB under NFR-42 it is the largest declared cache in this
+documentation set, and it previously appeared in no shed tier at all, which contradicted the first
+precondition above in the one case where that precondition mattered most. It is now **loaded when a
+window opens and released when the last window closes**, and dropped at L1 under pressure.
+
+The lifetime follows from what the engine is for. Nothing renders a message body while no window exists,
+so at the NFR-8 state the engine has no possible caller — it was 44% of a budget spent on a component
+that could not be used. Reloading at window open costs a list parse well before any message is selected,
+so NFR-3's 80 ms first paint is untouched; the reload is on NFR-1's cold-start path rather than on the
+reading path, which is the right place for it.
+
+**NFR-8's number is the least trustworthy figure in this documentation set.** It was 60 MB when a
+window-less daemon could avoid linking a toolkit at all. Under [D-2](../architecture/process-model.md) it
+must instead absorb toolkit residue, and the Linux figure is expected to be the worse of the two because
+GTK4's renderer loads a graphics driver stack it cannot unload. P0 MUST measure both platforms and replace
+this number; it is a placeholder standing in for a measurement, not an estimate anyone should defend.
+
+**NFR-9's number inherits that placeholder and adds a second doubt of its own.** Decomposed against the
+figures on this page it reads: 90 MB of window-less floor, plus NFR-42's 40 MB of filter engine, leaving
+**20 MB for the live window and a warm body view together** — and the body view is a WebKit content
+process, the largest single allocation in the running application and the one L2 exists to reclaim. Twenty
+megabytes for both is not a target anyone should expect to meet. The pair MUST be re-derived together once
+P0 has measured toolkit residue and a warm body view, rather than NFR-8 being replaced in isolation: they
+are one budget stated at two lifecycle points, and moving either without the other reintroduces exactly
+the incoherence the tier targets above were just corrected for. Tracked with NFR-8's placeholder in
+[open questions](../open-questions.md).
+
+**NFR-13 and NFR-46 measure different clocks, and the distinction is normative.** NFR-13 bounds the time
+from the pressure signal to the governor having *issued* every release the tier calls for — caches
+dropped, the body view told to tear down, the allocator asked to collect. NFR-46 bounds the separate,
+slower step of the operating system actually returning the body view's pages, at up to 1 second from
+teardown. Stated as one clock the pair would contradict each other, because L2's largest action is
+precisely the teardown NFR-46 times: a 500 ms budget cannot contain a 1 second reclaim. Stated as two,
+they compose — the governor is prompt, the kernel is not instantaneous, and each is separately testable.
+
+**NFR-12 is the hardest requirement in this documentation set.** It is an allocator, fragmentation, and
+cache-discipline problem that only appears in long-running soak tests. The soak harness that detects it
+MUST exist in **P0**, not P4 — see [observability](observability.md) and
+[roadmap](../product/roadmap.md), which state the same phase.
