@@ -1,0 +1,23 @@
+[package]
+name = "sift-store"
+description = "D-6/D-21/D-74: the per-account store and journal, beneath D-42's page encryption."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+# One of the four places overview.md permits unsafe code. It does not take the
+# workspace lint set, and `cargo xtask arch` asserts that the set of crates doing so
+# is exactly those four.
+[lints.rust]
+unsafe_code = "allow"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+todo = "warn"
+dbg_macro = "deny"
+
+[dependencies]

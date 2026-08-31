@@ -1,0 +1,9 @@
+# The toolchain contributors and CI use. The *floor* — the minimum Sift supports — is
+# `rust-version` in the workspace manifest, and the two are deliberately different
+# things: a build failing on the floor is a defect rather than an invitation to raise it.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+# D-46 requires a universal macOS binary, so both architectures are built rather than
+# one being inferred from the other.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]

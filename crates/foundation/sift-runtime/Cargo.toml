@@ -1,0 +1,14 @@
+[package]
+name = "sift-runtime"
+description = "D-19: one work-stealing runtime plus a blocking pool, and D-47's catch boundary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

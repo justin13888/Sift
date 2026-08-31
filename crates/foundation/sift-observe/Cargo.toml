@@ -1,0 +1,14 @@
+[package]
+name = "sift-observe"
+description = "Counters, cache statistics, wakeup accounting, and D-34 trace output."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

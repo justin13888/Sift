@@ -1,0 +1,123 @@
+# Sift workspace.
+#
+# The crate graph is D-59: layered crates whose dependency edges all point one way,
+# from the shell boundary down toward the store. The C ABI is a leaf that nothing in
+# the core depends on. Each provider adapter is isolated and may not see the others.
+#
+# The layer of a crate is its directory under crates/. `cargo xtask arch` enforces the
+# direction of every edge; it is a build failure, not a review convention.
+#
+# See docs/build/workspace.md.
+
+[workspace]
+resolver = "3"
+members = [
+    # Foundation — limits, identifiers, the state register, the error states.
+    "crates/foundation/sift-foundation",
+    "crates/foundation/sift-subsystem",
+    "crates/foundation/sift-alloc",
+    "crates/foundation/sift-observe",
+    "crates/foundation/sift-runtime",
+
+    # Storage — the store, blobs, the index, the encryption layer.
+    "crates/storage/sift-crypto",
+    "crates/storage/sift-store",
+    "crates/storage/sift-blobs",
+    "crates/storage/sift-index",
+
+    # Rendering — MIME parse, sanitizer, blocker, dark transform, resource broker.
+    "crates/rendering/sift-mime",
+    "crates/rendering/sift-sanitize",
+    "crates/rendering/sift-css",
+    "crates/rendering/sift-block",
+    "crates/rendering/sift-broker",
+
+    # Providers — the capability abstraction, and one crate per adapter.
+    "crates/providers/sift-provider",
+    "crates/providers/sift-jmap",
+    "crates/providers/sift-graph",
+    "crates/providers/sift-gmail",
+    "crates/providers/sift-imap",
+
+    # Application — sync, the mutation queue, scheduling, the pressure governor,
+    # network conditions, the credential broker.
+    "crates/application/sift-scheduler",
+    "crates/application/sift-net",
+    "crates/application/sift-credentials",
+    "crates/application/sift-sync",
+    "crates/application/sift-mutations",
+    "crates/application/sift-governor",
+
+    # Presentation — windowing, selection, formatting, merge and diff.
+    "crates/presentation/sift-presentation",
+
+    # ABI — the C entry points of D-17, and nothing else. A leaf.
+    "crates/abi/sift-abi",
+
+    # Tooling. Not a layer; excluded from the architecture rules it enforces.
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/justin13888/Sift"
+publish = false
+
+# The minimum supported toolchain, recorded once, here. Raising it is a deliberate
+# change rather than a consequence of a dependency update: a build failing on this
+# floor is a defect rather than an invitation to raise it. A vendored dependency's
+# own floor becomes Sift's on the day it is vendored.
+rust-version = "1.85"
+
+[workspace.lints.rust]
+# Overview confines unsafe to exactly four places, from the first commit. This is the
+# crate-level prohibition that expresses it; anything later needing unsafe elsewhere is
+# asking for a fifth exception, and has to ask. The four exceptions opt out explicitly
+# and `cargo xtask arch` asserts that the set of opt-outs is exactly those four.
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+todo = "warn"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+[workspace.dependencies]
+sift-foundation = { path = "crates/foundation/sift-foundation" }
+sift-subsystem  = { path = "crates/foundation/sift-subsystem" }
+sift-alloc      = { path = "crates/foundation/sift-alloc" }
+sift-observe    = { path = "crates/foundation/sift-observe" }
+sift-runtime    = { path = "crates/foundation/sift-runtime" }
+sift-crypto     = { path = "crates/storage/sift-crypto" }
+sift-store      = { path = "crates/storage/sift-store" }
+sift-blobs      = { path = "crates/storage/sift-blobs" }
+sift-index      = { path = "crates/storage/sift-index" }
+sift-mime       = { path = "crates/rendering/sift-mime" }
+sift-sanitize   = { path = "crates/rendering/sift-sanitize" }
+sift-css        = { path = "crates/rendering/sift-css" }
+sift-block      = { path = "crates/rendering/sift-block" }
+sift-broker     = { path = "crates/rendering/sift-broker" }
+sift-provider   = { path = "crates/providers/sift-provider" }
+sift-jmap       = { path = "crates/providers/sift-jmap" }
+sift-graph      = { path = "crates/providers/sift-graph" }
+sift-gmail      = { path = "crates/providers/sift-gmail" }
+sift-imap       = { path = "crates/providers/sift-imap" }
+sift-scheduler  = { path = "crates/application/sift-scheduler" }
+sift-net        = { path = "crates/application/sift-net" }
+sift-credentials = { path = "crates/application/sift-credentials" }
+sift-sync       = { path = "crates/application/sift-sync" }
+sift-mutations  = { path = "crates/application/sift-mutations" }
+sift-governor   = { path = "crates/application/sift-governor" }
+sift-presentation = { path = "crates/presentation/sift-presentation" }
+
+[profile.release]
+# D-47: the release binary unwinds. The pipeline establishes a catch boundary at each
+# stage and degrades that message to FR-9's raw view; abort-on-panic was rejected.
+panic = "unwind"
+lto = "thin"
+codegen-units = 1
+debug = 1

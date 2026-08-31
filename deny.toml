@@ -1,0 +1,97 @@
+# Dependency policy. docs/build/workspace.md states three gates and requires that each
+# "fail the build rather than warn". Gates 1 and 2 are here; gate 3 — new edges reviewed
+# rather than absorbed — is `cargo xtask deps`, because it is a question about change
+# rather than about a property of the tree.
+
+[graph]
+# Both platforms are first-class. A crate that is only ever pulled in on a target Sift
+# does not ship to is not a dependency of Sift.
+targets = [
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },   # D-46: universal, so both architectures
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+]
+all-features = true
+
+# ---------------------------------------------------------------------------
+# Gate 1 — Advisories.
+#
+# "A firing advisory blocks the build. It is not muted; it is upgraded, replaced, or
+# recorded as an accepted exception with an expiry date, in this repository."
+#
+# R-11 is why this matters more here than in most projects: D-33 gives delivery to
+# platform channels, so a security fix reaches users on App Review's and the
+# distribution system's schedule. There is no urgent-fix path to fall back on.
+# ---------------------------------------------------------------------------
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# Accepted exceptions go here, each with an expiry date in a comment. An entry with no
+# expiry is the muting this gate exists to prevent.
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Gate 2 — Licences.
+#
+# "Every vendored crate's licence is checked against an allowlist." Q-17 records why the
+# bar is where it is: a single copyleft crate defeats the App Store channel exactly as a
+# copyleft filter list would, and with Q-16's contributor agreement fully in place — no
+# agreement can relicense somebody else's work.
+#
+# Sift's own crates are AGPL-3.0-only and are excluded by `private`, since they are
+# `publish = false` and are the copyright the relicensing question is about.
+# ---------------------------------------------------------------------------
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Unlicense",
+]
+# Deliberately absent: MPL-2.0, LGPL, GPL, AGPL. MPL's file-level copyleft cannot be
+# relicensed under the store's terms either, which is the property D-33 needs. Adding
+# one is a decision on #26 (Q-21), not a change to this file alone.
+confidence-threshold = 0.9
+private = { ignore = true }
+
+# ---------------------------------------------------------------------------
+# Bans. The workspace-level half of gate 3: things that must not appear at all.
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+deny = [
+    # D-8: no garbage-collected runtime and no language shim to reach a provider SDK.
+    # D-1 and ui-shell.md abandon the Tauri/React/Vite scaffold outright rather than
+    # migrating from it: it breaks D-1, breaks NFR-24 (the dev server binds a listening
+    # socket), and breaks NFR-20 in spirit. Only the bundle identifier survives.
+    { name = "tauri" },
+    { name = "tauri-build" },
+    { name = "wry" },
+    { name = "tao" },
+    # NFR-24 has no carve-out. A server framework in the tree is a listening socket
+    # waiting for a reason.
+    { name = "axum" },
+    { name = "actix-web" },
+    { name = "warp" },
+    { name = "hyper", wrappers = ["reqwest"] },  # client use only
+    # D-30: Rust TLS verifying against the OS trust store. A bundled root store was
+    # rejected because it breaks generic IMAP behind corporate inspection proxies.
+    { name = "webpki-roots" },
+    { name = "openssl" },
+    { name = "openssl-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

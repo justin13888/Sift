@@ -1,0 +1,20 @@
+# Every crate vendored into Sift, with its version.
+#
+# This file is the third dependency gate of docs/build/workspace.md: a dependency
+# added to the workspace, or a transitive one appearing with an upgrade, is reviewed
+# rather than absorbed. A diff to this file is that review, and it is deliberately
+# noisy — the threshold is low on purpose.
+#
+# Regenerate with `cargo xtask deps --bless`.
+
+itoa 1.0.18
+memchr 2.8.3
+proc-macro2 1.0.107
+quote 1.0.47
+serde 1.0.229
+serde_core 1.0.229
+serde_derive 1.0.229
+serde_json 1.0.151
+syn 3.0.4
+unicode-ident 1.0.24
+zmij 1.0.23

@@ -1,0 +1,107 @@
+# D-63, tier 1 of 3: per-change gates.
+#
+# "Per-change gates run on ordinary hosted runners and block a merge."
+#
+# The other two tiers are deliberately not here. Per-integration gates need dedicated
+# macOS and Linux machines and block a release; continuous gates — the NFR-45 soak above
+# all — run indefinitely on the reference rig, report a series rather than a verdict, and
+# block a phase. Both are waiting on hardware: see issue #21.
+#
+# Three per-change gates that belong in this tier are also absent, because each one
+# "fails silently on the wrong host" and needs a real macOS session rather than a runner
+# image: Keychain behaviour, entitlements and sandbox behaviour on both channels
+# including NFR-49's provenance marking, and login-item residency. They are tracked in
+# #21 and #35 rather than being run here and believed.
+
+name: per-change
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The rules docs/build/workspace.md states as normative, and the ones docs/ states as
+  # code-review rules. These run first and are cheap: a wrong crate edge should not wait
+  # behind a compile.
+  architecture:
+    name: crate graph and invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: D-59 — one-way edges, the ABI a leaf, unsafe in four places
+        run: cargo xtask arch
+      - name: NFR-24, D-12, D-25 — the prohibitions, asserted
+        run: cargo xtask invariants
+      - name: Gate 3 — new dependency edges reviewed rather than absorbed
+        run: cargo xtask deps
+
+  # Gates 1 and 2 of the dependency policy. Each fails the build rather than warning.
+  dependencies:
+    name: advisories and licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+
+  format:
+    name: formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # Both platforms are first-class, and D-46 makes the two macOS architectures produce
+  # different numbers rather than the same number twice — so both are built rather than
+  # one being inferred from the other.
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "linux",              os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { name: "macos apple silicon", os: macos-latest, target: aarch64-apple-darwin }
+          - { name: "macos intel",        os: macos-latest,  target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
+      - run: cargo test --workspace --target ${{ matrix.target }}
+
+  # The floor is a promise, not a preference: "a build failing on the stated floor is a
+  # defect rather than an invitation to raise it." Nothing else checks it, so a
+  # dependency bump that raises it would otherwise be invisible until a user reported it.
+  toolchain-floor:
+    name: builds on the stated minimum toolchain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: floor
+        run: echo "v=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.floor.outputs.v }}
+      - run: cargo check --workspace

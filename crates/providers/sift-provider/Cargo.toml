@@ -1,0 +1,14 @@
+[package]
+name = "sift-provider"
+description = "D-12: the capability model and the adapter contract. Adapters see only this."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

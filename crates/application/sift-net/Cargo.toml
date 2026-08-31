@@ -1,0 +1,14 @@
+[package]
+name = "sift-net"
+description = "D-14: network conditions, and D-58's policy tiers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

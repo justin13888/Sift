@@ -1,0 +1,23 @@
+[package]
+name = "sift-crypto"
+description = "D-75/D-76: platform primitives behind one interface, and the page format."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+# One of the four places overview.md permits unsafe code. It does not take the
+# workspace lint set, and `cargo xtask arch` asserts that the set of crates doing so
+# is exactly those four.
+[lints.rust]
+unsafe_code = "allow"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+todo = "warn"
+dbg_macro = "deny"
+
+[dependencies]
