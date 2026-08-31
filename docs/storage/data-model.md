@@ -125,8 +125,8 @@ Per-account, unless noted.
 | Entity | Holds | Notes |
 |---|---|---|
 | Account | provider, display name, declared capabilities | one row; the file *is* the account |
-| Folder | remote identifier, semantic kind | kind is semantic, never a display name — see FR-5 |
-| Folder sync state | per folder: cursor, validity identifier, last successful sync, degradation reason | one row per folder; see below |
+| Folder | local identity, remote identifier, semantic kind, display name, retired flag | kind is semantic, never a display name — see FR-5. Local identity is what FR-43's watched set and the per-folder notification rules key on, per [D-83](../mail/sync-engine.md); the remote identifier is an attribute, for the reason it is one on Message |
+| Folder sync state | per folder: state, cursor, validity identifier, last successful sync, degradation reason | one row per folder; the state is one of the six [D-82](../mail/sync-engine.md) enumerates, and the other columns are only meaningful in some of them |
 | Message | remote identifier, internet message identifier, fallback identity digest, thread identifier, location, sender, recipients, subject, received time, origination date, flags, attachment presence, size, MIME structure, body reference, snippet | body reference is null when not cached; received time is the server's and is what [D-55](../architecture/presentation-layer.md) orders on, while the origination date is the sender's `Date` header and is only displayed; the snippet is present only where the account declares a snippet source, and is bounded by L-16; the digest is computed at ingest under D-44. Location and flags are the **base** state [D-51](../mail/mutations.md) defines; the pending overlay is held with the queue, not here |
 | Thread | remote thread identifier, normalized subject, last activity, message count | scoped to the account — see [threading](../mail/threading.md) |
 | Tag | tag identity and display name, and its membership | present only where the account declares tag support |
