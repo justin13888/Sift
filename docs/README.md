@@ -97,7 +97,7 @@ contestable. A decision without its counter-argument is an assertion.
 **Open questions are not resolved by deletion.** Answering one means writing the answer into its owning
 document and striking the entry in [open questions](open-questions.md) with a pointer.
 
-**The design is settled *pending* six open questions, four of which are load-bearing. That is a weaker
+**The design is settled *pending* seven open questions, five of which are load-bearing. That is a weaker
 claim than settled, and the distinction between the two groups is the useful part.**
 
 The three that can still move the design: Q-10 leaves every number in this set unfalsifiable until the
@@ -110,7 +110,9 @@ question that can reverse a settled structural decision is not bounded, whatever
 
 Q-14 joins them for the same reason. It asks where hostile image bytes are decoded, and one of its three
 answers is "in a separate process" — which is D-2 again, arrived at from the rendering side rather than
-the memory one.
+the memory one. Q-15 is the third of this kind: it observes that D-27's resolved cascade depends on
+viewport width while the transform built from it does not, and one of its answers is to drop media queries
+from the cascade — which is D-27 being narrowed by a case D-27 did not consider.
 
 The remaining two are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
 legal in the meantime. Q-13 asks whether one feature works on one platform. Neither reaches a decision.

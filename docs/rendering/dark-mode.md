@@ -59,6 +59,20 @@ such rather than as a step in this pass.
 What makes it tractable at all is what makes this whole transform tractable: email CSS is static, there is
 no script, and nothing recomputes. It is one resolution pass, not a live style model.
 
+**"Nothing recomputes" holds for every input except the viewport, and that exception is not a small one.**
+D-27 resolves media queries, and a media query keys on viewport width. So the declarations that apply, the
+colour graph built from them, and every override this pass generates are correct at the width they were
+computed at and at no other. Resizing the reader pane moves the sender's own colours underneath overrides
+that did not move with them, and step 5's contrast repair was checked against the pair that no longer
+holds. NFR-47's 95% gate is measured at a single width and cannot see this.
+
+Media queries are ubiquitous in HTML email, so this is the ordinary case rather than a corner. Three
+answers are open and none is free: pin the body view to a fixed layout width and accept that a resized
+reader does not reflow; recompute stages 3 through 6 on a debounced resize, which puts NFR-41's 30 ms
+budget onto an interactive drag that no requirement currently bounds; or drop media-query evaluation from
+the cascade, which weakens D-27's own argument that a colour-only subset fails because specificity is a
+property of the cascade as a whole. It is [an open question](../open-questions.md).
+
 **Contestable because:** if NFR-41 is missed, this is the first thing to cut, and the retreat is real —
 declarations-only with inheritance approximated for a fixed property list would serve the transform
 poorly, procedural filters not at all, and would be a visibly worse product rather than a slower one. A
