@@ -23,7 +23,7 @@ The complete set of permitted outbound connections is:
 | Destination | Purpose | Discloses |
 |---|---|---|
 | Configured mail providers | sync, fetch, mutation, server-side search | everything they already hold |
-| Filter-list sources | list updates, subject to the network policy tier | that Sift is installed, and which lists are subscribed |
+| Filter-list sources | list updates, subject to the network policy tier | that Sift is installed, which lists are subscribed, and the address and time of every fetch — see below |
 | The bundled-list update source | updates to the [sender-infrastructure list](../rendering/sender-origin.md) and the bundled email filter list | the same |
 | Autoconfiguration discovery | **only** during interactive account setup — see below | **the domain of an address the user is adding**, to a host that is not yet their provider |
 | Remote content hosts | **only** for resources the user has explicitly allowed, and only through the [resource broker](../architecture/resource-broker.md) | that the message was opened, to the host the user allowed |
@@ -40,6 +40,22 @@ names domains explicitly — so it cannot be waved through as configuration traf
 [accounts](../mail/accounts.md) is therefore that this step is **disclosed and skippable**, not that it is
 silent and helpful. It is bounded in a way no other row is: it happens during setup, at the user's
 instigation, once per account.
+
+**The two list rows disclose more than a subscription, and a posture stated this plainly should say so.**
+A list fetch carries the network address it is made from and the time it was made, to a host the user did
+not choose. Because Sift is resident by design, those fetches recur on a schedule for as long as it stays
+installed. What accumulates at the other end is a coarse record of when this machine is awake and roughly
+where it is — held by a third party, in a product whose stated posture is that nothing about the mail
+leaves the machine. Sender domains are excluded from telemetry under NFR-22 as correspondence metadata;
+this is a weaker signal than that, but it is not nothing, and it is continuous where the
+autoconfiguration row is once per account.
+
+It is disclosed rather than mitigated here because each alternative is a decision rather than an
+adjustment. Fetching only while a window is open removes the always-on signal and costs staleness, which
+NFR-43 tolerates and this document does not get to trade away alone. Proxying every list through the
+bundled-list source concentrates the same disclosure in the one host Sift does operate, which is a
+different trade rather than a smaller one. The integrity of what arrives over this same channel is a
+separate question and is [tracked as one](../open-questions.md).
 
 **There is no update endpoint.** [D-33](../product/platforms-and-distribution.md) removed self-update
 entirely, so update traffic belongs to the platform's own channel and never to a Sift-initiated
