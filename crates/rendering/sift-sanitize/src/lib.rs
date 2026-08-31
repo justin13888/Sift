@@ -33,6 +33,25 @@
 
 pub mod allowlist;
 pub mod audit;
+pub mod document;
 pub mod sanitize;
 
 pub use sanitize::{SanitizeError, Sanitized, sanitize};
+
+/// Whether a document's own stylesheets declare a dark mode — FR-32's input.
+///
+/// Here rather than beside the transform because it must be read off the **sanitized**
+/// document: what the sender wrote is not necessarily what survives, and honouring a
+/// declaration the reader will never see would leave the message untransformed for a reason
+/// nothing in it explains.
+#[must_use]
+pub fn transform_input_declares_dark_mode(sanitized_html: &str) -> bool {
+    transform_input_declares_dark_mode_in(&document::read(sanitized_html).stylesheet)
+}
+
+/// The same question, asked of a stylesheet already read back.
+#[must_use]
+pub fn transform_input_declares_dark_mode_in(stylesheet: &str) -> bool {
+    let compact = stylesheet.to_ascii_lowercase().replace(' ', "");
+    compact.contains("prefers-color-scheme:dark") || compact.contains("color-scheme:dark")
+}

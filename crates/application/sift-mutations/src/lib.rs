@@ -3,5 +3,6 @@
 //! Budgeted as a first-class subsystem rather than an adapter method, because it is the
 //! only place in Sift where a bug can lose a user's mail.
 
+pub mod flush;
 pub mod intent;
 pub mod queue;

@@ -88,6 +88,7 @@ pub fn sanitize(html: &str) -> Result<Sanitized, SanitizeError> {
         links: Vec::new(),
         removals: Vec::new(),
         nodes: 0,
+        elements: 0,
     });
 
     walk(&dom.document, 0, &state)?;
@@ -118,6 +119,8 @@ struct State {
     links: Vec<String>,
     removals: Vec<Removal>,
     nodes: u64,
+    /// How many elements have been kept, which is the next one's handle.
+    elements: usize,
 }
 
 fn walk(node: &Handle, depth: u64, state: &RefCell<State>) -> Result<(), SanitizeError> {
@@ -230,6 +233,10 @@ fn classify(node: &Handle, state: &RefCell<State>) -> Result<Verdict, SanitizeEr
             }
 
             filter_attributes(&tag, attrs, state)?;
+            stamp(&tag, attrs, state);
+            if tag == "style" {
+                return Ok(filter_style_element(node, state));
+            }
             Ok(Verdict::Keep)
         }
     }
@@ -252,7 +259,14 @@ fn forbidden_outright(tag: &str) -> Option<&'static str> {
         // I4: no document control. A `base` rewrites every relative URL in the document, a
         // `meta http-equiv` can navigate, a `link` fetches, and a `title` is chrome the
         // sender does not own.
-        "base" | "meta" | "link" | "title" | "style" => "I4 no document control",
+        //
+        // **`style` is deliberately not in this list**, and its absence is the fix for a
+        // defect rather than a relaxation. I4 names four elements and a stylesheet is not
+        // one of them; dropping `<style>` outright left D-27's cascade — selector matching,
+        // specificity, media queries, inheritance — with nothing to resolve, and made L-9's
+        // "across all stylesheets" a bound on a set that was always empty. It is kept, and
+        // then rebuilt declaration by declaration in `filter_stylesheet`.
+        "base" | "meta" | "link" | "title" => "I4 no document control",
         // Media elements carry fetching positions and playback surfaces neither the
         // allowlist nor the broker is built for.
         "audio" | "video" | "track" | "canvas" | "map" | "area" | "portal" => {
@@ -344,6 +358,46 @@ fn filter_attributes(
     Ok(())
 }
 
+/// Give every kept element the handle the rest of the pipeline addresses it by.
+///
+/// Stage 6's transform produces per-element overrides and stage 7 has to attach them to
+/// something. A selector guessed from the element's tag and classes would apply to elements
+/// the transform never examined, which is how a dark mode ends up inverting half a document
+/// — so the handle is assigned here, once, in the pass that decides which elements exist at
+/// all.
+///
+/// FR-33 item 4 wants the same handle for a different reason: "a rule identifier next to
+/// every removal" is only useful if a reader can find the element it happened to.
+///
+/// It is an attribute rather than visible text, so I9 is untouched — that invariant forbids
+/// *introducing visible text*, and an attribute is neither. I6 is untouched because a second
+/// pass over the same tree assigns the same indices; a value the sender wrote is overwritten
+/// rather than kept, which is what makes that true.
+fn stamp(tag: &str, attrs: &RefCell<Vec<html5ever::Attribute>>, state: &RefCell<State>) {
+    // A stylesheet is not addressable and carries no appearance of its own.
+    if tag == "style" {
+        return;
+    }
+    let index = {
+        let mut s = state.borrow_mut();
+        s.elements += 1;
+        s.elements - 1
+    };
+    let mut attrs = attrs.borrow_mut();
+    attrs.retain(|a| a.name.local.to_string() != ELEMENT_HANDLE);
+    attrs.push(html5ever::Attribute {
+        name: html5ever::QualName::new(
+            None,
+            html5ever::ns!(),
+            html5ever::LocalName::from(ELEMENT_HANDLE),
+        ),
+        value: index.to_string().into(),
+    });
+}
+
+/// The attribute every kept element carries, naming its index in document order.
+pub const ELEMENT_HANDLE: &str = "data-sift-element";
+
 /// The scheme of a navigation target, if it is one Sift will show.
 fn navigation_scheme(value: &str) -> Option<&'static str> {
     let lowered = value.trim().to_ascii_lowercase();
@@ -357,6 +411,141 @@ fn navigation_scheme(value: &str) -> Option<&'static str> {
         .iter()
         .find(|s| lowered.starts_with(&format!("{s}:")))
         .copied()
+}
+
+/// Rebuild a `<style>` element's contents, or drop the element.
+///
+/// # The serialization hazard, and why the text is regenerated rather than filtered
+///
+/// A `<style>` element's contents are **raw text**: the serializer writes them out
+/// unescaped, because that is what the HTML specification requires. So a stylesheet
+/// containing `</style>` closes the element on the way back in, and everything after it is
+/// markup the sanitizer never examined. That is not a corner case — it is the shape of half
+/// the published mutation-XSS corpus, and I8 exists for it.
+///
+/// The answer is not to escape, because there is nothing to escape *into*: raw text has no
+/// entity syntax. It is to **regenerate**. The stylesheet that comes out is built from
+/// property-value pairs that each passed the same allowlist a `style` attribute passes, and
+/// from selector text that has been refused if it contains a `<` at all. Nothing the sender
+/// wrote is copied through verbatim, so there is no path by which `</style>` reaches the
+/// serializer.
+///
+/// A stylesheet containing `<` anywhere drops the whole element. Legitimate CSS does not
+/// contain one, and the alternative is deciding character by character which `<` is safe.
+fn filter_style_element(node: &Handle, state: &RefCell<State>) -> Verdict {
+    let mut source = String::new();
+    for child in node.children.borrow().iter() {
+        if let NodeData::Text { contents } = &child.data {
+            source.push_str(&contents.borrow());
+        }
+    }
+
+    if source.contains('<') {
+        state.borrow_mut().removals.push(Removal {
+            rule: "I8 parse stability — a stylesheet containing `<` cannot be raw text",
+            what: "<style>".to_owned(),
+        });
+        return Verdict::Drop;
+    }
+
+    let (rebuilt, dropped) = filter_stylesheet(&source);
+    for d in dropped {
+        state.borrow_mut().removals.push(d);
+    }
+    if rebuilt.trim().is_empty() {
+        return Verdict::Drop;
+    }
+    // Replace the children with the regenerated text. Nothing of the sender's survives.
+    let text = markup5ever_rcdom::Node::new(NodeData::Text {
+        contents: RefCell::new(rebuilt.into()),
+    });
+    *node.children.borrow_mut() = vec![text];
+    Verdict::Keep
+}
+
+/// Rebuild a stylesheet, rule by rule.
+///
+/// The structure a sender can write is: at-rules with a block, at-rules without, and
+/// ordinary rules. Only two at-rules survive, and both are conditions D-27's cascade
+/// evaluates rather than things that fetch: `@media` and `@supports`. `@import` and
+/// `@font-face` are fetching positions and go, by name, so the reason is specific.
+fn filter_stylesheet(css: &str) -> (String, Vec<Removal>) {
+    let mut out = String::new();
+    let mut dropped = Vec::new();
+    let mut rest = css;
+
+    while let Some(open) = rest.find('{') {
+        let prelude = rest[..open].trim().to_owned();
+        let (block, after) = take_block(&rest[open..]);
+        rest = after;
+
+        if let Some(at) = prelude.strip_prefix('@') {
+            let name = at
+                .split(|c: char| c.is_whitespace() || c == '(')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            // A conditional group. Its contents are ordinary rules, so recurse; the
+            // condition itself is what D-27 evaluates and FR-32 reads.
+            if matches!(name.as_str(), "media" | "supports") {
+                let (inner, mut inner_dropped) = filter_stylesheet(&block);
+                dropped.append(&mut inner_dropped);
+                if !inner.trim().is_empty() {
+                    out.push_str(&prelude);
+                    out.push('{');
+                    out.push_str(&inner);
+                    out.push('}');
+                }
+                continue;
+            }
+            dropped.push(Removal {
+                rule: if matches!(name.as_str(), "import" | "font-face") {
+                    "I2 no implicit egress — CSS fetching position"
+                } else {
+                    "not on the CSS at-rule allowlist"
+                },
+                what: format!("@{name}"),
+            });
+            continue;
+        }
+
+        if prelude.is_empty() {
+            continue;
+        }
+        let (declarations, mut d) = filter_style(&block);
+        dropped.append(&mut d);
+        if declarations.is_empty() {
+            continue;
+        }
+        out.push_str(&prelude);
+        out.push('{');
+        out.push_str(&declarations);
+        out.push('}');
+    }
+
+    // Anything after the last block is a rule with no block. It declares nothing, so there
+    // is nothing to keep.
+    (out, dropped)
+}
+
+/// Split `{...}` from what follows, honouring nesting.
+fn take_block(text: &str) -> (String, &str) {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    for (index, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (text[1..index].to_owned(), &text[index + 1..]);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Unterminated. Everything left is the block, and there is nothing after it.
+    (text[1..].to_owned(), "")
 }
 
 /// Filter a `style` attribute's declarations.
@@ -902,5 +1091,101 @@ mod invariants {
         ] {
             let _ = sanitize(html);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Stylesheets. The element I4 never named, and the serialization hazard
+    // that is the reason its contents are rebuilt rather than filtered.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_stylesheet_survives_because_the_cascade_needs_something_to_resolve() {
+        // D-27's cascade is selector matching, specificity, media queries and inheritance.
+        // None of those has meaning over inline attributes alone, and L-9 bounds
+        // declarations "across all stylesheets and style attributes".
+        let out = clean("<style>p { color: red }</style><p>x</p>");
+        assert!(out.html.contains("<style>"), "{}", out.html);
+        assert!(out.html.contains("color:red"), "{}", out.html);
+    }
+
+    #[test]
+    fn a_stylesheet_cannot_close_its_own_element() {
+        // The shape of half the published mutation-XSS corpus. A `<style>` element is raw
+        // text, so there is nothing to escape into — the answer is to regenerate.
+        let out = clean("<style>p{color:red}</style ><img src=x onerror=alert(1)>");
+        assert!(!out.html.contains("onerror"), "{}", out.html);
+        let out = clean(r"<style>a{content:'</style><img src=x onerror=alert(1)>'}</style>");
+        assert!(!out.html.contains("onerror"), "{}", out.html);
+    }
+
+    #[test]
+    fn a_stylesheet_containing_a_less_than_sign_is_dropped_whole() {
+        // Legitimate CSS does not contain one, and the alternative is deciding character by
+        // character which `<` is safe.
+        let out = clean("<style>p{color:red}\n/* < */</style><p>x</p>");
+        assert!(!out.html.contains("<style>"), "{}", out.html);
+        assert!(out.html.contains("x"), "{}", out.html);
+    }
+
+    #[test]
+    fn nothing_the_sender_wrote_in_a_stylesheet_is_copied_through() {
+        // The property that makes the breakout impossible rather than merely unlikely.
+        let out = clean("<style>p{color:red;-sift-unknown:whatever the sender likes}</style>");
+        assert!(!out.html.contains("whatever"), "{}", out.html);
+    }
+
+    #[test]
+    fn a_stylesheet_is_held_to_the_same_property_allowlist_as_an_attribute() {
+        let out = clean("<style>p{color:red;position:fixed;behavior:url(x.htc)}</style>");
+        assert!(out.html.contains("color:red"), "{}", out.html);
+        assert!(!out.html.contains("position"), "{}", out.html);
+        assert!(!out.html.contains("behavior"), "{}", out.html);
+    }
+
+    #[test]
+    fn a_stylesheet_cannot_carry_a_fetching_position() {
+        // I2. The element allowlist does not see these, which is why they are enumerated by
+        // name rather than left to fall off the end of a list.
+        for css in [
+            "@import url(https://evil.test/x.css);",
+            "@font-face { src: url(https://evil.test/f.woff) }",
+            "p { background-image: url(https://evil.test/p.gif) }",
+        ] {
+            let out = clean(&format!("<style>{css}</style><p>x</p>"));
+            assert!(!out.html.contains("evil.test"), "{css} -> {}", out.html);
+        }
+    }
+
+    #[test]
+    fn a_media_query_survives_because_the_cascade_evaluates_it() {
+        let out = clean("<style>@media (max-width: 600px) { p { color: red } }</style>");
+        assert!(out.html.contains("@media"), "{}", out.html);
+        assert!(out.html.contains("color:red"), "{}", out.html);
+    }
+
+    #[test]
+    fn a_senders_own_dark_mode_declaration_reaches_the_transform() {
+        // FR-32 is read off the stylesheet. Dropping `<style>` made it unreachable, which is
+        // the second thing the defect cost.
+        let out = clean(
+            "<style>@media (prefers-color-scheme: dark) { body { color: #ffffff } }</style><p>x</p>",
+        );
+        assert!(
+            crate::transform_input_declares_dark_mode(&out.html),
+            "{}",
+            out.html
+        );
+    }
+
+    #[test]
+    fn an_empty_stylesheet_leaves_no_empty_element_behind() {
+        let out = clean("<style>@import url(x);</style><p>y</p>");
+        assert!(!out.html.contains("<style>"), "{}", out.html);
+    }
+
+    #[test]
+    fn an_unterminated_stylesheet_does_not_hang_or_leak() {
+        let out = clean("<style>p{color:red");
+        assert!(!out.html.contains("<script"), "{}", out.html);
     }
 }

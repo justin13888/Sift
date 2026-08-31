@@ -1,0 +1,20 @@
+[package]
+name = "sift-pipeline"
+description = "The seven stages of docs/rendering/pipeline.md, in the order that makes them safe."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sift-foundation.workspace = true
+sift-mime.workspace = true
+sift-sanitize.workspace = true
+sift-css.workspace = true
+sift-block.workspace = true
+sift-broker.workspace = true

@@ -1863,6 +1863,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sift-pipeline"
+version = "0.1.0"
+dependencies = [
+ "sift-block",
+ "sift-broker",
+ "sift-css",
+ "sift-foundation",
+ "sift-mime",
+ "sift-sanitize",
+]
+
+[[package]]
 name = "sift-presentation"
 version = "0.1.0"
 dependencies = [

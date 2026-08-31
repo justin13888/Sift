@@ -31,6 +31,7 @@ members = [
     "crates/rendering/sift-css",
     "crates/rendering/sift-block",
     "crates/rendering/sift-broker",
+    "crates/rendering/sift-pipeline",
 
     # Providers — the capability abstraction, the transport, and one crate per adapter.
     "crates/providers/sift-provider",
@@ -116,6 +117,7 @@ sift-sanitize   = { path = "crates/rendering/sift-sanitize" }
 sift-css        = { path = "crates/rendering/sift-css" }
 sift-block      = { path = "crates/rendering/sift-block" }
 sift-broker     = { path = "crates/rendering/sift-broker" }
+sift-pipeline   = { path = "crates/rendering/sift-pipeline" }
 sift-provider   = { path = "crates/providers/sift-provider" }
 sift-http       = { path = "crates/providers/sift-http" }
 sift-jmap       = { path = "crates/providers/sift-jmap" }

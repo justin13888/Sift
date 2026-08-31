@@ -115,16 +115,31 @@ pub const ELEMENTS: &[&str] = &[
     "font",
     "big",
     "tt",
+    // A stylesheet. **Its contents never survive**: the sanitizer rebuilds them declaration
+    // by declaration, because a `<style>` element serializes as raw text and a stylesheet
+    // containing `</style>` would close it on the way back in. Kept at all because D-27's
+    // cascade needs something to resolve — selector matching, specificity, media queries and
+    // inheritance have no meaning over inline attributes alone, and L-9 bounds declarations
+    // "across all stylesheets and style attributes".
+    "style",
 ];
 
 /// Attributes allowed on any element.
 pub const GLOBAL_ATTRIBUTES: &[&str] = &[
     // `dir` and `lang` are NFR-50 and NFR-28 territory: direction and language are
     // announced, and stripping them mangles right-to-left and mixed-script mail.
-    "dir", "lang", "title", "align", "valign",
+    "dir",
+    "lang",
+    "title",
+    "align",
+    "valign",
     // Style is allowed and then filtered property-by-property. Removing it outright would
     // make most marketing mail unreadable; keeping it unfiltered would be an I1 and I2 hole.
     "style",
+    // The handle the sanitizer stamps on every kept element, so that stage 6's overrides and
+    // FR-33's removals have something to point at. Allowed so that I6 holds: a second pass
+    // must not remove what the first added, or `S(S(x))` would differ from `S(x)`.
+    crate::sanitize::ELEMENT_HANDLE,
 ];
 
 /// Attributes allowed on specific elements.
