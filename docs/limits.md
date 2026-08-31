@@ -78,6 +78,16 @@ Asserted by the [resource broker](architecture/resource-broker.md), before a dec
 | **L-15** | Characters in a tag name | 256 | The "length and charset limits" the tag capability row in [provider model](mail/provider-model.md) refers to and does not state. The charset is Unicode scalar values excluding control characters, normalized under NFR-54 like every other attacker-controlled string |
 | **L-16** | Characters in a snippet | 280 | Truncated rather than rejected, per the exception above. Bounds the envelope, which NFR-52 in [cache and blobs](storage/cache-and-blobs.md) budgets and which is retained far longer than any body |
 
+## Time limits
+
+Durations Sift enforces. They are bounds on behaviour, not performance targets — a target belongs to its
+requirement in [requirements](requirements.md), and appears here only if exceeding it changes what Sift
+does rather than how fast it does it.
+
+| ID | Bounds | Value | Notes |
+|---|---|---|---|
+| **L-17** | Age at which a queued intent stops being retried | 7 days | [D-85](mail/mutations.md) expires on elapsed time rather than attempts, because an intent that failed twice in a week offline and one that failed two hundred times in a minute are not the same situation. Long enough to cover an ordinary offline stretch; short enough that the conflict pile-up FR-16 must adjudicate stays adjudicable |
+
 ## Changing a limit
 
 **A limit MUST NOT be raised to accommodate a single message.** The corpus decides: if the

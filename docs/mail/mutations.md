@@ -2,7 +2,8 @@
 
 The only writes Sift performs, and the subsystem that performs them.
 
-**Owns:** D-38, D-40, D-51, D-52, FR-13, FR-14, FR-15, FR-16, FR-17, FR-18, FR-38, FR-39, NFR-16, NFR-17.
+**Owns:** D-38, D-40, D-51, D-52, D-85, FR-13, FR-14, FR-15, FR-16, FR-17, FR-18, FR-38, FR-39,
+NFR-16, NFR-17.
 
 Budget for this as a first-class subsystem, not a thin adapter method. It is where "read-only plus triage"
 quietly becomes expensive, and it is the only place in Sift where a bug can lose a user's mail.
@@ -253,7 +254,8 @@ reports have durable remote effects that the pair of local states does not descr
 coalescing reasons about final state, and an intent whose point is a side effect has no final state to
 reason about.
 
-**An intent expires.** An intent that has not succeeded within a stated period stops being retried, and
+**An intent expires.** An intent that has not succeeded within L-17 in [limits](../limits.md) stops
+being retried, and
 the account enters the *attention* condition in [failure model](../runtime/failure-model.md) with the
 intent still in the queue and still visible under FR-34. It is neither dropped nor retried forever.
 
@@ -263,6 +265,83 @@ to adjudicate at once, on a schedule the user did not choose. Dropping silently 
 watched succeed, which is the single failure [data model](../storage/data-model.md) says the queue exists
 to prevent. Surfacing is the only option that loses nothing, and it is the same answer NFR-48 already
 gives for an intent that cannot be executed for a different reason.
+
+## D-85 — The queue's states, and what a crash mid-flight means
+
+**Chosen:** an intent occupies one of six states; retry is exponential with a cap and jitter under the
+scheduler's own rule; an intent whose request was issued is durably marked **before** it is sent, so a
+crash resolves to *reconciling* rather than to a blind replay; and every intent carries a client-assigned
+identifier and an optional undo-group identifier.
+**Rejected:** a state column with no enumeration; retry counted but unscheduled; distinguishing sent from
+unsent by inference at startup.
+
+**Why.** [Data model](../storage/data-model.md) gives the queue row *"state, attempt count, creation
+time, per-message sequence, expiry"* and the set of states was written nowhere. Four separate rules in
+this document — ordering, coalescing, expiry, and D-38's reconciliation — are all statements about
+transitions in a machine nobody had drawn.
+
+| State | Meaning | Leaves to |
+|---|---|---|
+| **Pending** | durably enqueued, overlay applied, not yet issued | Issued, Coalesced, Quarantined, Expired |
+| **Issued** | a request carrying this intent has been sent | Settled on success; Pending on a retryable failure; Reconciling on an unknown outcome |
+| **Reconciling** | the outcome is unknown and the adapter is establishing server state | Settled or Pending |
+| **Quarantined** | unrecognised, or its gating capability is gone | Settled, when a later build or a restored capability executes it |
+| **Expired** | retried past L-17 without success | terminal until the user acts |
+| **Settled** | applied, compensated, or reconciled away | terminal; the row is removed |
+
+**A crash while Issued is the case that had no answer.** NFR-17 requires the adapter to *"reconcile
+against server state before retrying rather than blindly replaying"*, which is only possible if something
+distinguishes "never sent" from "sent, outcome unknown" — and nothing in the row did. **The transition
+into Issued is durable and happens before the request leaves**, so a restart finds Issued intents and
+moves them to Reconciling. The cost is one durable write per issue, on the journal
+[D-74](../storage/data-model.md) separates for exactly this kind of traffic.
+
+Getting this wrong is not symmetric. Assuming unsent replays an archive onto a message the server already
+moved, which FR-18 forbids; assuming sent drops a mutation the user watched succeed, which is the failure
+[data model](../storage/data-model.md) says the queue exists to prevent. Reconciling is the only state
+that assumes neither.
+
+**Every intent carries an identifier the client assigned**, which is what makes D-38 implementable: that
+decision's own cost line is *"correlating a server-side state to the intent that failed is the work"*,
+and a queue with no correlation key leaves it to be inferred from message and operation, which is
+ambiguous exactly when several intents against one message are in flight. Where a provider accepts a
+client-supplied idempotency key, this is the value to send, which converts Reconciling from an
+enumeration into a question the server can answer.
+
+**Retry is the scheduler's, not the queue's.** [Scheduling](../runtime/scheduling.md) already requires
+exponential backoff with a cap and jitter for reconnection and prohibits per-account sleep loops; a
+retrying intent is periodic work and goes through the same timing wheel, with the same curve. Attempt
+count drives the backoff and does not itself terminate anything — **L-17 does**, on elapsed time rather
+than on attempts, because an intent that failed twice in a week offline and one that failed two hundred
+times in a minute are not the same situation and attempt counting cannot tell them apart.
+
+**An expired or quarantined intent retires its overlay.** D-51 retires an overlay when its intent
+*"succeeds, is compensated, or is reconciled"*, and neither of these matches — so on a literal reading
+the user sees an archive that will never happen, permanently, with no rule saying whether that was
+intended. **It was not.** The overlay is retired when the intent leaves the
+executable set, the base state shows through, and the user is told through the *intent expired* or
+*intent quarantined* state in the [state register](../architecture/state-register.md). Showing the truth
+plus a notice is strictly better than showing a comfortable lie, and it is the same choice FR-16 makes
+for conflicts.
+
+**Flush concurrency, bounded by the ordering rule already stated.** Intents against different messages may
+be issued concurrently and batched; intents against one message are issued **strictly in sequence**, and
+a batch MUST NOT contain two intents for the same message. That is the rule above about order, expressed
+as a constraint on the batcher rather than left for it to discover — which is what that section asks for
+when it says batching must be built around the ordering rule rather than meet it by accident.
+
+**An undo-group identifier makes FR-17's promise expressible.** *"A bulk operation is one undoable
+unit"* is unimplementable if five hundred intents carry nothing linking them; the group identifier is
+assigned at the gesture and is what a compensation acts over.
+
+**What it costs:** two identifiers and a durable write per issue, on the highest-frequency mutation path
+in the product, which is the write rate D-52 already warns sets the flush wakeup rate against NFR-11 and
+NFR-15.
+
+**Contestable because:** the durable Issued marker buys correctness for a crash window that is
+milliseconds wide, at a cost paid on every single intent forever. A design that accepted blind replay and
+leaned entirely on server-side idempotency would be simpler and would be right on the providers that
+supply it — and wrong, silently, on the ones that do not.
 
 ## Undo is a compensation, which is why FR-15 and FR-38 do not conflict
 
