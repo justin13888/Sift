@@ -70,10 +70,25 @@ user's system decides, so a security fix lands on the platform's schedule rather
 product whose primary adversary sends attacker-controlled input by design. If a serious vulnerability ever
 needs to reach users faster than the slowest channel allows, this is the decision that prevented it.
 
-Distribution through the App Store additionally requires that Sift's copyright holder be able to license
-it under terms the store imposes, which a copyleft licence does not permit a mere licensee to do.
-Contributions MUST therefore be accepted under an agreement that preserves that ability, and this is
-effectively irreversible once contributions land without one.
+## Licensing is a distribution constraint, and the only one that cannot be undone
+
+Distribution through the App Store requires that Sift's copyright holder be able to license it under the
+terms the store imposes, which a copyleft licence does not permit a mere licensee to do. The repository is
+licensed AGPL-3.0, so this is live rather than hypothetical: the copyright holder can dual-license today
+because they hold all of the copyright, and that stays true only for as long as every contribution arrives
+under an agreement preserving it.
+
+**Contributions MUST therefore be accepted under such an agreement.** This sits in a distribution document
+because the App Store channel is what requires it — remove that channel and the requirement goes with it.
+
+**It is the only irreversible item in this documentation set.** Every other decision here can be revisited
+by amending a document. This one cannot: a contribution that lands uncovered cannot be covered afterwards
+once its author is unreachable or unwilling. Everything else the set calls contestable stays contestable.
+This is contestable exactly once, and its deadline is the first external contribution rather than any
+date.
+
+The alternatives are real and none of them has been argued here, so it is
+[an open question](../open-questions.md) rather than a settled decision.
 
 ## Per-platform surface
 

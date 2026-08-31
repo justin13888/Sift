@@ -97,7 +97,7 @@ contestable. A decision without its counter-argument is an assertion.
 **Open questions are not resolved by deletion.** Answering one means writing the answer into its owning
 document and striking the entry in [open questions](open-questions.md) with a pointer.
 
-**The design is settled *pending* seven open questions, five of which are load-bearing. That is a weaker
+**The design is settled *pending* eight open questions, five of which are load-bearing. That is a weaker
 claim than settled, and the distinction between the two groups is the useful part.**
 
 The three that can still move the design: Q-10 leaves every number in this set unfalsifiable until the
@@ -114,8 +114,11 @@ the memory one. Q-15 is the third of this kind: it observes that D-27's resolved
 viewport width while the transform built from it does not, and one of its answers is to drop media queries
 from the cascade — which is D-27 being narrowed by a case D-27 did not consider.
 
-The remaining two are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
-legal in the meantime. Q-13 asks whether one feature works on one platform. Neither reaches a decision.
+The remaining three are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
+legal in the meantime. Q-13 asks whether one feature works on one platform. Q-16 asks what licence the App
+Store channel requires — bounded because no architecture moves on the answer, and the most urgent item on
+this page regardless, because it is the only one that cannot be revisited: its deadline is the first
+external contribution. None of the three reaches a decision.
 
 Q-8 — the fallback join when the internet message identifier is absent or duplicated — was the fourth, and
 is now [D-44](storage/data-model.md). What it leaves behind is a risk rather than a question: R-5, that
