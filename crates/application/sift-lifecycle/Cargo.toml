@@ -1,6 +1,6 @@
 [package]
-name = "sift-credentials"
-description = "D-88/D-36: the credential broker. NFR-23's single reviewable answer."
+name = "sift-lifecycle"
+description = "D-69, D-70, D-71, D-72 — startup, shutdown, process conditions, and view state."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

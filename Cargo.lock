@@ -864,6 +864,9 @@ dependencies = [
 [[package]]
 name = "sift-credentials"
 version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+]
 
 [[package]]
 name = "sift-crypto"
@@ -939,6 +942,13 @@ dependencies = [
 [[package]]
 name = "sift-jmap"
 version = "0.1.0"
+
+[[package]]
+name = "sift-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+]
 
 [[package]]
 name = "sift-mime"

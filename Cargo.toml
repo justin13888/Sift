@@ -47,6 +47,7 @@ members = [
     "crates/application/sift-sync",
     "crates/application/sift-mutations",
     "crates/application/sift-governor",
+    "crates/application/sift-lifecycle",
 
     # Presentation — windowing, selection, formatting, merge and diff.
     "crates/presentation/sift-presentation",
@@ -116,6 +117,7 @@ sift-credentials = { path = "crates/application/sift-credentials" }
 sift-sync       = { path = "crates/application/sift-sync" }
 sift-mutations  = { path = "crates/application/sift-mutations" }
 sift-governor   = { path = "crates/application/sift-governor" }
+sift-lifecycle  = { path = "crates/application/sift-lifecycle" }
 sift-presentation = { path = "crates/presentation/sift-presentation" }
 sift-abi        = { path = "crates/abi/sift-abi" }
 
