@@ -2,7 +2,7 @@
 
 The containment boundary around message rendering.
 
-**Owns:** D-3, D-28, D-50, D-54, N-1, NFR-20, NFR-21, NFR-25, NFR-46, NFR-50.
+**Owns:** D-3, D-28, D-50, D-54, D-90, N-1, NFR-20, NFR-21, NFR-25, NFR-46, NFR-50.
 
 ## D-3 — Bodies render in a separate, hardened document
 
@@ -54,6 +54,10 @@ A per-view token gives both properties at once. It is unguessable, so a fabricat
 nothing; it is scoped to one view, so two messages share no address space; and revocation is wholesale
 rather than per-resource, which matters because NFR-46 tears views down routinely and a stale token MUST
 NOT outlive the view that minted it.
+
+**The token is per *document*, not per view**, which D-90 below explains: a view outlives the messages it
+renders, so binding the token to the view would let one token serve two messages and falsify the
+share-no-address-space property this decision rests on.
 
 **What it costs:** nothing caches across views, since addresses do not repeat. Deduplication still happens
 underneath, in the [content-addressed store](../storage/cache-and-blobs.md), but the engine's own cache
@@ -140,12 +144,68 @@ hole in N-1: N-1 governs what the *message* can cause to be loaded, and a family
 stylesheet is not attacker-influenced. A font the **sender** declares remains a fetching position under
 I2, is rewritten like every other, and is decided by the broker like every other.
 
-**NFR-46.** The body view MUST be torn down after a configured period with no reader visible, and its
-footprint MUST return to approximately zero within 1 second of teardown.
+**NFR-46.** The body view MUST be torn down after L-18 in [limits](../limits.md) with no reader visible,
+and its footprint MUST return to approximately zero within 1 second of teardown. D-90 below defines what
+"no reader visible" means, which is not obvious and is not occlusion.
 
 Teardown is real on both target engines: destroying the view releases the engine's out-of-process content
 process. This is the mechanism by which the L2 shed tier in [memory pressure](../runtime/memory-pressure.md)
 reclaims the largest single allocation in the running app.
+
+## D-90 — The view is reused, the token is not, and "at most one" is per window
+
+**Chosen:** a body view persists across messages within a reading session and is **not** destroyed and
+respawned per message; the D-28 capability token is minted per **document** and revoked when
+navigation away from that document begins. D-54's "at most one body view" is **per window**. NFR-46's
+period is L-18, and "no reader visible" means no on-screen, non-minimized window is showing a message
+body.
+**Rejected:** destroying and respawning the view per message; reusing the token across messages; one body
+view for the whole application.
+
+**Why reuse rather than respawn.** D-54 fixes the number of live views and says nothing about what happens
+between message A and message B — and the two available answers cost different things. Respawning puts a
+WebKit content-process launch inside [NFR-3](../rendering/pipeline.md)'s 80 ms budget on **every arrow-key
+press** through a thread, and collides with NFR-46's one-second reclaim: either successive opens serialize
+behind a teardown or two content processes exist at once, which falsifies D-54 and disturbs the
+determinate reading peak [Q-12](../open-questions.md) needs. Reuse costs neither.
+
+**Why reuse is only safe because the token moves.** The obvious objection is D-28's own property — that
+*"two messages share no address space"* — which a reused view with a reused token would break outright.
+Minting per document restores it and, read carefully, **strengthens** D-28 rather than compromising it:
+revocation now happens at navigation, which is earlier and more often than teardown. Message A's
+addresses are dead before message B's document exists, whether or not the view survives.
+
+The rest of what a respawn would have cleared is already absent by construction. There is no script state
+to leak, because D-50 disables script engine-wide. There is no persistent storage, because NFR-25
+gives the view a non-persistent isolated store. There is no connection state, because N-1 leaves the view
+no network capability at all. **The residue a respawn protects against is a residue this design has
+already spent three decisions removing**, which is what makes reuse a saving rather than a compromise.
+
+**Why per window rather than globally.** [UI shell](../architecture/ui-shell.md) requires that anything
+scoped to "a window" which is really scoped to "any window open" MUST say the latter — and this is
+genuinely per window. A second window whose reader could not render would be a window that is not a
+window. The consequence is stated plainly rather than hidden: **the reading peak scales with the number
+of windows showing a body**, so Q-12's figure is a per-window quantity and a two-window reading state
+costs roughly twice the body-view component. That is a real cost of *"windows are plural"* and it is one
+NFR-9 does not budget, because NFR-9's own text excludes a visible reader.
+
+**What "no reader visible" means, and why it is not occlusion.** A reader is visible when a window that is
+on screen and not minimized is showing a message body. **Occlusion by other windows does not count as
+hidden.** Occlusion changes on every window drag, so treating it as the trigger would tear down and
+respawn a body view during ordinary window management — spending NFR-3's budget repeatedly to save memory
+for seconds at a time. Minimization is a deliberate act with a stable state, which is what a teardown
+trigger needs.
+
+**What it costs:** a view whose lifetime is longer than any document it holds, so every per-document
+resource — the token, the broker's request table, the accessibility tree — must be reset at navigation
+rather than reclaimed at teardown. That is a discipline with more places to forget something than
+teardown had.
+
+**Contestable because:** respawning per message is the stronger isolation posture and it is the one a
+security reviewer would ask for first, on the general principle that a fresh process beats a cleaned one.
+The argument against is specific rather than general — script is off, storage is non-persistent, the
+network is absent, and the token rotates — so the residue a fresh process would eliminate is enumerable
+and empty. If any one of those three decisions is ever relaxed, this one loses its footing.
 
 **NFR-50.** Isolation MUST NOT sever the accessibility tree. Message body content is announced by the
 screen reader as part of the reader, and this is verified on both platforms.

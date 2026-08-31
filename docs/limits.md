@@ -88,6 +88,8 @@ does rather than how fast it does it.
 |---|---|---|---|
 | **L-17** | Age at which a queued intent stops being retried | 7 days | [D-85](mail/mutations.md) expires on elapsed time rather than attempts, because an intent that failed twice in a week offline and one that failed two hundred times in a minute are not the same situation. Long enough to cover an ordinary offline stretch; short enough that the conflict pile-up FR-16 must adjudicate stays adjudicable |
 
+| **L-18** | Time with no reader visible before the body view is torn down | 30 seconds | The period NFR-46 in [webview isolation](rendering/webview-isolation.md) calls configured and does not supply. Long enough to survive switching folders and returning; short enough that the largest single allocation in the running application does not persist through an interruption. [D-90](rendering/webview-isolation.md) defines what counts as visible |
+
 ## Changing a limit
 
 **A limit MUST NOT be raised to accommodate a single message.** The corpus decides: if the
