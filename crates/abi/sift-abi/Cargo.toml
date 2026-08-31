@@ -21,3 +21,4 @@ todo = "warn"
 dbg_macro = "deny"
 
 [dependencies]
+sift-foundation.workspace = true
