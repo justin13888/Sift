@@ -2,7 +2,7 @@
 
 The only writes Sift performs, and the subsystem that performs them.
 
-**Owns:** D-38, D-40, D-51, D-52, D-85, FR-13, FR-14, FR-15, FR-16, FR-17, FR-18, FR-38, FR-39,
+**Owns:** D-38, D-40, D-51, D-52, D-85, D-86, FR-13, FR-14, FR-15, FR-16, FR-17, FR-18, FR-38, FR-39,
 NFR-16, NFR-17.
 
 Budget for this as a first-class subsystem, not a thin adapter method. It is where "read-only plus triage"
@@ -232,6 +232,53 @@ compensates has one.
 **What a compensation restores is local state, never a remote side effect.** Reporting not-junk returns
 the message and tells the provider it was wrong; it cannot un-train the classifier. Undo promises the
 first and MUST NOT be described as promising the second.
+
+## D-86 — The undo window withholds nothing, and it belongs to the layer
+
+**Chosen:** an intent under FR-15's timed window is enqueued and flushed on the queue's ordinary
+schedule, with **no special withholding**; undo within the window is a compensation like any other, and
+the existing coalescing rule collapses the pair where it can. The undo record lives in the presentation
+layer, keyed by D-85's undo-group identifier, and survives a window closing but not a quit.
+**Rejected:** holding the intent back from the network for the duration of the window; giving the undo
+stack to the shell.
+
+**Why nothing is withheld.** Withholding is the obvious optimization — wait ten seconds, and an undone
+archive costs no traffic at all. It reintroduces exactly what FR-15 above rejects: *"a design that tries
+to cancel in flight has two outcomes to reason about; a design that always compensates has one."* A
+withheld intent has a race at the end of every window, against a flush that may already have started, on
+the single most frequent destructive action in the product.
+
+**The saving arrives anyway, through a rule that already exists.** Intents flush on the scheduler's tick,
+not instantly, and coalescing is permitted *"where the collapsed sequence has the same effect at the
+server as the sequence it replaces"*. An archive and its compensation within one flush interval have no
+net effect at the server and therefore collapse to nothing — so an undo that happens before the next
+flush costs no traffic, without any mechanism that knows what an undo window is. Where the flush already
+went out, the compensation is a second round trip, which is the honest cost of having actually done the
+thing the user asked for.
+
+**Why the record cannot live in the shell.** [View protocol](../architecture/view-protocol.md) lets a
+shell use local identity *"for the undo stack"*, which reads as the shell owning it — and a window shell
+is destroyed when its window closes, in a product that runs with no window at all. A user who archives a
+message and closes the window has a countdown that dies with the view, which is not a decision anyone
+made. The layer holds the record; a shell renders it, and the always-on surface can present it when no
+window exists, through the [D-67](../architecture/view-protocol.md) host callback that already carries
+core-initiated events.
+
+**The window is session-scoped and general reversibility is not.** The timed window expires, and after it
+the message is still reversible — FR-15 gives every intent but permanent delete a compensation, reachable
+through the ordinary interface for as long as the message exists. Only the *countdown* is transient.
+**It does not survive a quit**, because a compensation offered at the next launch would act on a gesture
+the user has lost the context for, and an undo affordance whose subject the user cannot see is a worse
+promise than no affordance.
+
+**What it costs:** an undo that misses the flush interval costs two provider round trips and doubles that
+action's contribution to [FR-36](../runtime/network-conditions.md)'s accounting. That is a real cost on a
+metered connection, and it is bounded by how often users undo rather than by how often they archive.
+
+**Contestable because:** withholding is genuinely cheaper for the common case and the race it introduces
+is small and well understood. The argument against is not that the race is unmanageable but that the
+design already chose compensation over cancellation once, deliberately, and having two answers to "did it
+reach the server" in one subsystem is worse than paying for one of them.
 
 ## What the queue guarantees about order
 

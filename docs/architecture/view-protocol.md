@@ -280,7 +280,9 @@ of owned and borrowed returns is checkable only by reading every call site in tw
 ## Identifiers a shell holds
 
 **A message's local identity is stable for as long as that message exists in that account**, and a shell
-may use it as a key for selection, for the undo stack, and for notification click-through.
+may use it as a key for selection, for rendering the undo affordance, and for notification click-through.
+**The undo record itself is the layer's**, under [D-86](../mail/mutations.md), because a window shell is
+destroyed when its window closes and a countdown that dies with the view is not a decision anyone made.
 
 The exception is stated because it exists and would otherwise be discovered: under
 [D-44](../storage/data-model.md), a move on a provider with unstable identifiers that does not corroborate
