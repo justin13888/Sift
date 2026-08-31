@@ -41,8 +41,10 @@ join key.
 
 The adapter MUST treat the internet message identifier together with the conversation identifier as the
 join key across a move, and MUST NOT assume the remote identifier survives one. Note that internet message
-identifiers are not reliably unique in the wild — see [data model](../../storage/data-model.md) — so this
-join needs a defined fallback rather than an assumption of success.
+identifiers are not reliably unique in the wild, so this join cannot assume success. Its fallback is
+[D-44](../../storage/data-model.md): the conversation identifier is the scope, the fallback digest
+corroborates the candidate, and a move that does not resolve to exactly one candidate is presented as a
+delete plus an arrival rather than joined on a guess.
 
 ## Special-use folders
 

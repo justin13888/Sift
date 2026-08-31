@@ -97,12 +97,10 @@ contestable. A decision without its counter-argument is an assertion.
 **Open questions are not resolved by deletion.** Answering one means writing the answer into its owning
 document and striking the entry in [open questions](open-questions.md) with a pointer.
 
-**The design is settled *pending* six open questions, four of which are load-bearing. That is a weaker
+**The design is settled *pending* five open questions, three of which are load-bearing. That is a weaker
 claim than settled, and the distinction between the two groups is the useful part.**
 
-The four that can still move the design: Q-8 — the fallback join when the internet message identifier is
-absent or duplicated — is required by three documents and defined by none, and threading, cross-folder
-dedup and the Graph move join all rest on it. Q-10 leaves every number in this set unfalsifiable until the
+The three that can still move the design: Q-10 leaves every number in this set unfalsifiable until the
 reference rig is recorded. Q-11 is an unclosed injection path into every message body, in a product whose
 central claim is about hostile input. And **Q-12 belongs in this group rather than the next one**: it is
 usually described as two numbers needing measurement, but [its own entry](open-questions.md) and
@@ -112,5 +110,9 @@ question that can reverse a settled structural decision is not bounded, whatever
 
 The other two are bounded. Q-9 needs a number per provider and now has a rule that makes its absence legal
 in the meantime. Q-13 asks whether one feature works on one platform. Neither reaches a decision.
+
+Q-8 — the fallback join when the internet message identifier is absent or duplicated — was the fourth, and
+is now [D-44](storage/data-model.md). What it leaves behind is a risk rather than a question: R-5, that the
+headers D-44 corroborates against are assumed rather than measured to survive transit.
 
 Everything not on that list is decided.

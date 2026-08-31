@@ -2,7 +2,7 @@
 
 What Sift stores, and how it is partitioned.
 
-**Owns:** D-6, D-21, D-32, NFR-48.
+**Owns:** D-6, D-21, D-32, D-44, NFR-48.
 
 ## D-6 — One database per account
 
@@ -55,7 +55,7 @@ Per-account, unless noted.
 | Account | provider, display name, declared capabilities | one row; the file *is* the account |
 | Folder | remote identifier, semantic kind | kind is semantic, never a display name — see FR-5 |
 | Folder sync state | per folder: cursor, validity identifier, last successful sync, degradation reason | one row per folder; see below |
-| Message | remote identifier, internet message identifier, thread identifier, location, sender, recipients, subject, date, flags, attachment presence, size, MIME structure, body reference | body reference is null when not cached |
+| Message | remote identifier, internet message identifier, fallback identity digest, thread identifier, location, sender, recipients, subject, date, flags, attachment presence, size, MIME structure, body reference | body reference is null when not cached; the digest is computed at ingest under D-44 |
 | Thread | remote thread identifier, normalized subject, last activity, message count | scoped to the account — see [threading](../mail/threading.md) |
 | Tag | tag identity and display name, and its membership | present only where the account declares tag support |
 | Full-text index | subject, body text, sender text, recipient text | see [search](search.md) |
@@ -152,7 +152,58 @@ only unique within a folder generation.
 
 **The internet message identifier is not reliably unique.** Some servers and some senders duplicate it,
 and some omit it. Any deduplication or cross-folder join keyed on it MUST have a defined fallback and MUST
-NOT assume uniqueness. What that fallback is remains [an open question](../open-questions.md).
+NOT assume uniqueness. That fallback is D-44 below.
+
+## D-44 — Identity joins are corroborated, and an uncorroborated join does not happen
+
+**Chosen:** the internet message identifier narrows a join's candidates and never keys it; the result is
+corroborated against a **fallback identity digest** stored per message; and a candidate set that does not
+reduce to one resolves to distinct messages.
+**Rejected:** a normalized-header digest promoted to a second identity key; accepting the ambiguity and
+never joining at all.
+
+Three documents required a fallback here and none defined one — [threading](../mail/threading.md)'s
+reconstruction, the cross-folder join above, and the move join on
+[Microsoft Graph](../mail/providers/microsoft-graph.md). All three are joins *within one account*, because
+threading forbids merging across them, and that is what lets one rule serve all three.
+
+**Every join is scoped before it is keyed.** Candidates are drawn from within one account and from the
+bounded set the join's own context supplies: the reference chain for FR-11 reconstruction, the
+conversation identifier for the Graph move join, the sibling folder for a cross-folder join. Sift MUST NOT
+discover a join by scanning a store for identifier equality. Scoping is what does the work; the identifier
+only orders the candidates within a scope that was already small.
+
+**The digest corroborates a candidate; it does not key one.** The digest is taken at ingest over a
+normalized tuple — originator address, origination date, normalized subject, and the message's own
+reference chain — chosen because those are what a compliant relay carries unchanged. It MUST be used only
+to confirm or reject a candidate the scope already proposed. Promoted to a key, it would join a
+mailing-list copy to a direct copy of the same mail, which is right for deduplication and wrong for the
+move join, where the two are separate objects the user can move independently.
+
+**Ambiguity resolves to distinct messages.** Where the identifier is absent, or the candidate set is not a
+singleton after corroboration, Sift MUST NOT join, and MUST record the near-miss for the FR-33 debug view
+rather than passing over it silently.
+
+**Why.** The two failure directions are not symmetric, so a rule that must guess should default to the
+recoverable one. A missed join shows a message twice, or shows two threads where there should be one: it
+is visible, the user can see both copies, and nothing is destroyed. A false join collapses two distinct
+messages into one entity — and because FR-13 intents act on the entity, the next archive or delete reaches
+mail the user never saw. Failing to merge is a display defect; merging wrongly is data loss wearing a
+display defect's clothes.
+
+**What it costs.** A fixed-size digest per message, computed on a path that already parses the headers.
+Duplicates survive where a server both omits the identifier and rewrites the corroborating headers, and
+that combination is not rare on the mailing lists where the problem is worst. On Microsoft Graph, a move
+that cannot be resolved presents as a delete plus an arrival, so local flags and read state for that
+message do not survive it. Changing the normalization rules is a reindex of one column, not a resync,
+which is what keeps this inside NFR-48.
+
+**Contestable because:** the normalization tuple is a hypothesis about which headers survive transit, and
+no corpus stands behind it — it belongs in the fidelity corpus of the
+[reference environment](../product/reference-environment.md), and [R-5](../open-questions.md) stays open
+against it. If measurement shows the tuple collides materially, or diverges across an ordinary relay hop,
+the retreat is the rejected third option: never join. That costs duplicate display and the Graph move, and
+nothing else, which is why it is a retreat rather than a redesign.
 
 ## D-32 — Migrations are versioned, forward-only, and never resync
 
