@@ -41,9 +41,19 @@ at all — it is Rust — so the ABI exists for exactly one consumer, and keepin
 macOS shell's assumptions leaking into a layer the Linux shell also uses. See
 [presentation layer](presentation-layer.md), which owns that constraint.
 
+**The ABI is the contract, not the macOS shell's copy of it.** The GTK shell links Rust directly and could
+therefore reach presentation-layer API the ABI never exposes; it MUST NOT. Anything a shell is permitted
+to use MUST be expressible across the C ABI, and a capability that exists for one shell and not the other
+is a defect in this boundary rather than a Linux feature. The failure this forbids is quiet: the ABI
+becomes the poorer of two interfaces, the two shells drift apart in what they can do, and the
+[presentation layer](presentation-layer.md)'s whole argument — one UI codebase, two view layers — is lost
+one convenience at a time. It is the same failure mode that document names for designing against a single
+consumer, running in the opposite direction.
+
 **What it costs:** every type crossing the boundary needs an explicit, stable representation, and the
 ownership rules for anything passed across it must be written down rather than inferred. Memory-safety
-bugs are possible at this boundary in a way they are not elsewhere in the core.
+bugs are possible at this boundary in a way they are not elsewhere in the core. The rule above adds a
+second cost: the Linux shell pays for a narrow C-shaped interface it does not itself need.
 
 **Contestable because:** a serialized protocol would have kept the two-process option open at low cost,
 and would have made the boundary auditable by inspection rather than by reading unsafe code. If the ABI
