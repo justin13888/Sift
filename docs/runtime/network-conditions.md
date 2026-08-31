@@ -34,7 +34,7 @@ detection is found wanting.
 | **Unrestricted** | wired or wifi, definitely unmetered | full body and inline-image prefetch, attachment prefetch under NFR-39's ceiling, filter-list updates |
 | **Conservative** | metered unknown or guessed, or cellular | envelopes only; bodies on demand; no image prefetch; no filter-list updates; mutations flush normally |
 | **Minimal** | metered, or constrained mode | inbox envelopes only; longest poll interval; mutations flush — they are bytes; everything else deferred |
-| **Offline — portal** | captive portal | queue everything; one bounded reattempt per 60 seconds against the account's own provider — D-96, never a probe to a detection host; no connection churn |
+| **Offline — portal** | captive portal | queue everything; one bounded reattempt per L-28 against the account's own provider — D-96, never a probe to a detection host; no connection churn |
 | **Offline — no path** | offline, airplane mode, or system sleep | queue everything; **zero connection attempts of any kind, including the reattempt above**, until the path returns |
 | **Paused** | the user pausing sync under FR-22, or cumulative usage reaching FR-36's cap | no delta, no push, no prefetch, no list updates; connections torn down under NFR-33; **mutations still flush** |
 

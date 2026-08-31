@@ -19,27 +19,26 @@ loops are prohibited.** This is a code-review rule.
 **Push over poll, except on cellular.** Where a provider offers practical push it MUST be preferred. The
 exception inverts on cellular links and is described in [network conditions](network-conditions.md).
 
-**Connection budget.** Five accounts watching three folders each is fifteen sockets and fifteen keepalive
-timers. Sift MUST prefer mechanisms that watch many mailboxes over one connection where the provider
-offers them; otherwise it watches only the inbox and refreshes other folders lazily on user navigation.
-See [IMAP](../mail/providers/imap.md).
+**Connection budget.** Five accounts watching three folders each is fifteen sockets and fifteen
+keepalive timers; the bound is L-23 in [limits](../limits.md). Sift MUST prefer mechanisms that
+watch many mailboxes over one connection where the provider offers them; otherwise it watches only
+the inbox and refreshes other folders lazily on user navigation. See
+[IMAP](../mail/providers/imap.md).
 
-**FR-43.** The set of watched folders MUST be per account, user-selectable, and persisted as account
-policy. The default is the inbox plus the special-use folders FR-5 resolves; every other folder is
-refreshed lazily on navigation, and FR-12's "not cached" state carries the difference honestly.
+**FR-43.** The set of watched folders MUST be per account,
+user-selectable, and persisted as account policy. The default is the inbox plus the special-use
+folders FR-5 resolves; every other folder is refreshed lazily on navigation, and FR-12's "not
+cached" state carries the difference honestly. The watched-folder count is the multiplier on NFR-11
+and NFR-15, both of which are stated per account, so leaving it unstated meant every idle target was
+measured against a configuration nobody had chosen. It is also an affordance the set already
+promised without creating: NFR-29 in [IMAP](../mail/providers/imap.md) tells a user on a degraded
+server that they can act "by narrowing which folders are watched", and until now nothing let them.
+**Platform integration.** Sift MUST use each platform's coalescing-friendly scheduling facilities
+rather than raw timers, and MUST respect low-power and metered states. The mechanism is D-25 below.
 
-The watched-folder count is the multiplier on NFR-11 and NFR-15, both of which are stated per account, so
-leaving it unstated meant every idle target was measured against a configuration nobody had chosen. It is
-also an affordance the set already promised without creating: NFR-29 in
-[IMAP](../mail/providers/imap.md) tells a user on a degraded server that they can act "by narrowing which
-folders are watched", and until now nothing let them.
-
-**Platform integration.** Sift MUST use each platform's coalescing-friendly scheduling facilities rather
-than raw timers, and MUST respect low-power and metered states. The mechanism is D-25 below.
-
-**Backoff on failure.** Reconnection after network loss MUST use exponential backoff with a cap and
-jitter. Hot-looping reconnect is the classic "the mail client ate my battery on a flaky hotspot" bug and
-MUST NOT be possible by construction.
+**Backoff on failure.** Reconnection after network loss MUST use exponential backoff with the cap
+and jitter of L-24 in [limits](../limits.md). Hot-looping reconnect is the classic "the mail client
+ate my battery on a flaky hotspot" bug and MUST NOT be possible by construction.
 
 ## D-94 — NFR-11 is an application bound wearing a per-account label
 

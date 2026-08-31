@@ -214,11 +214,14 @@ visible and correctable by the user, while marking read wrongly hides mail they 
 Reversal is executed as that compensation, never as a queue retraction.
 
 **An intent that removes a message from the view the user is looking at MUST additionally offer a
-timed undo window** — 10 seconds by default. Today that is archive, delete to trash, move, and report
-junk. These are the actions where the user loses sight of what they did and has nothing left to click,
-which is what a window is for; mark-read, flag and tag leave the message in front of the user, where the
-affordance that applied the change is also the affordance that reverses it. Offering a countdown toast for
-every message the reader marks read would make the mechanism worthless by making it constant.
+timed undo window** — L-22 in [limits](../limits.md). Today that is archive, delete to trash, move,
+and report junk. These are the actions where the user loses sight of what they did and has nothing
+left to click, which is what a window is for; mark-read, flag and tag leave the message in front of
+the user, where the affordance that applied the change is also the affordance that reverses it.
+Offering a countdown toast for every message the reader marks read would make the mechanism
+worthless by making it constant.
+
+
 
 Stating a rule rather than a list is deliberate. The list was previously "archive, delete, and move",
 which D-40 falsified the moment it added an intent whose whole argument is that report-junk and

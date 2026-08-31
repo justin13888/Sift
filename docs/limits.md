@@ -1,8 +1,17 @@
 # Limits
 
-Every numeric bound Sift enforces, in one place.
+Every numeric bound Sift enforces at runtime, in one place.
 
-**Owns:** L-1 through L-16.
+**Owns:** L-1 through L-29.
+
+**"Enforces at runtime" is the boundary, and it is narrower than the old wording.** This page previously
+claimed every numeric bound in the project, which reached two populations it does not own and should not.
+A **performance or resource target** — 400 ms, 90 MB, 5% over 14 days — belongs to its requirement in
+[requirements](requirements.md), because exceeding it is a regression rather than a rule being applied. A
+**gate threshold** — the perceptual-diff bound, the soak slope — belongs to
+[verification](build/verification.md) under [D-64](build/verification.md), because CI enforces it and
+Sift does not. What is here is the third kind: a number Sift itself checks, where crossing it changes
+what the running application does.
 
 ## Why these are a register rather than constants
 
@@ -70,6 +79,14 @@ Asserted by the [resource broker](architecture/resource-broker.md), before a dec
 | **L-12** | Rasterized output of a vector image | the same 40 megapixels | A vector image declares no pixel dimensions of its own, so the bound is on what it is rasterized into. D-29 refuses what cannot be rasterized inside it |
 | **L-13** | Bytes of a single fetch without explicit confirmation | 25 MB | The default NFR-39 in [network conditions](runtime/network-conditions.md) requires and does not supply. User-configurable, like the cache budget |
 
+## Concurrency and connection limits
+
+| ID | Bounds | Value | Notes |
+|---|---|---|---|
+| **L-23** | Concurrent provider connections per installation | 16 | The budget [scheduling](runtime/scheduling.md) names and does not number. It is that document's own arithmetic — five accounts watching three folders each — plus one for on-demand work, and it is what decides how many folders may be watched at all when a provider cannot watch several over one connection |
+| **L-26** | Envelopes fetched per backfill page | 500 | The page size [D-53](mail/sync-engine.md)'s resumable backfill requires and does not state. It is the granularity a resume rewinds to, so it trades round trips against work repeated after an interruption |
+| **L-29** | Concurrent resource loads per rendered document | 8 | The bound [D-91](architecture/resource-broker.md) requires so that one message with several hundred fetching positions cannot saturate the pool the store, the queue and search share. Requests beyond it queue rather than fail |
+
 ## Storage and display limits
 
 | ID | Bounds | Value | Notes |
@@ -77,6 +94,7 @@ Asserted by the [resource broker](architecture/resource-broker.md), before a dec
 | **L-14** | Bytes of a single blob | 2 GB | Above the cache budget's own default, so in practice NFR-14 binds first; this exists so that a single attachment cannot be the thing that makes the budget unenforceable |
 | **L-15** | Characters in a tag name | 256 | The "length and charset limits" the tag capability row in [provider model](mail/provider-model.md) refers to and does not state. The charset is Unicode scalar values excluding control characters, normalized under NFR-54 like every other attacker-controlled string |
 | **L-20** | Default envelope and index budget | 1 GB | The value NFR-52 in [cache and blobs](storage/cache-and-blobs.md) calls user-configurable and does not supply, and which [D-53](mail/sync-engine.md) makes the *sole* bound on first sync. At roughly two kilobytes per message including its index entry it lands near the 500,000 messages [NFR-5](storage/search.md) is measured over, so the benchmark and the shipped default describe the same product rather than two |
+| **L-25** | Characters in a header-derived display value | 998 | The length bound NFR-54 in [presentation layer](architecture/presentation-layer.md) requires and does not state, over display names, subjects, folder and tag names and attachment names. Chosen as the internet message format's own line bound, which is far above any legitimate value and far below a denial of service against native chrome. Truncation is at a grapheme boundary and follows normalization, per [D-100](architecture/presentation-layer.md) |
 | **L-16** | Characters in a snippet | 280 | Truncated rather than rejected, per the exception above. Bounds the envelope, which NFR-52 in [cache and blobs](storage/cache-and-blobs.md) budgets and which is retained far longer than any body |
 
 ## Time limits
@@ -92,6 +110,10 @@ does rather than how fast it does it.
 | **L-18** | Time with no reader visible before the body view is torn down | 30 seconds | The period NFR-46 in [webview isolation](rendering/webview-isolation.md) calls configured and does not supply. Long enough to survive switching folders and returning; short enough that the largest single allocation in the running application does not persist through an interruption. [D-90](rendering/webview-isolation.md) defines what counts as visible |
 
 | **L-21** | Reader dwell before a message is marked read | 2 seconds | The value [D-52](mail/mutations.md) calls "a short configurable dwell" and does not supply, in the decision that argues this number sets the queue write rate, the flush wakeup rate against NFR-11 and the data-cap burn. Longer than arrow-key traversal and shorter than reading, which is the only property it has to have. May be set to off |
+| **L-22** | Duration of FR-15's timed undo window | 10 seconds | Stated in [mutations](mail/mutations.md) since FR-15 was written and never registered here, which is the drift this page exists to prevent. [D-86](mail/mutations.md) explains why the window withholds nothing, so this bounds an affordance rather than a network delay |
+| **L-24** | Cap on reconnection and retry backoff | 15 minutes, with ±25% jitter | The cap and jitter [scheduling](runtime/scheduling.md) requires and does not supply, and the number NFR-38's "no retry storm on wake" rests on. The cap matches the longest aligned poll interval, so a backed-off account rejoins an existing wheel fire rather than adding one |
+| **L-27** | Interval at which an IMAP idle watch is re-issued | 29 minutes | Stated loosely as "roughly every 29 minutes" in [IMAP](mail/providers/imap.md). It is a bound rather than a preference: it sits below the protocol's own 30-minute expectation and below common network-address-translation timeouts, and exceeding it drops a watch silently |
+| **L-28** | Interval between reattempts while a captive portal is present | 60 seconds | The cadence in [network conditions](runtime/network-conditions.md)'s offline-portal tier. Under [D-96](runtime/network-conditions.md) it is a bounded reattempt of the account's own next operation rather than a probe to a detection host |
 | **L-19** | Time the pressure signal must stay clear before a shed tier is released | 60 seconds | The hysteresis [D-93](runtime/memory-pressure.md) requires. Without it a system oscillating around the threshold reparses the 40 MB filter engine on every crossing. One value serves every tier, which that decision records as its weakest point |
 
 ## Changing a limit

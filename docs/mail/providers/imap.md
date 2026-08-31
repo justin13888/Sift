@@ -71,7 +71,7 @@ invalidation per NFR-18 in [sync engine](../sync-engine.md).
 
 ## Push and the connection budget
 
-IDLE watches one mailbox per connection and MUST be re-issued periodically — roughly every 29 minutes — to
+IDLE watches one mailbox per connection and MUST be re-issued at L-27 in [limits](../../limits.md) to
 survive server and NAT timeouts. NOTIFY watches many mailboxes over a single connection and MUST be
 preferred where available.
 
