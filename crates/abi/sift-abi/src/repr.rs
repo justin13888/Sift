@@ -34,7 +34,10 @@ use core::slice;
 /// them would make every panic look like an ordinary parse failure, which D-47 forbids
 /// explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
+// `repr(C)` rather than `repr(i32)`: this is a C enum and the C representation is what a C
+// header and Swift's importer both expect. Pinning the width instead makes the generator emit
+// a C23 typed enum behind a version conditional, which resolves to two types of one name.
+#[repr(C)]
 pub enum SiftStatus {
     /// The call succeeded and any out-parameters have been written.
     Ok = 0,
@@ -204,6 +207,37 @@ impl<'a, T> SiftRows<'a, T> {
 impl<T> core::fmt::Debug for SiftRows<'_, T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "SiftRows(len={})", self.len)
+    }
+}
+
+/// An identifier, as sixteen big-endian bytes.
+///
+/// D-78's local identity is 128 bits, and **C has no portable 128-bit integer type** — so it
+/// crosses as bytes. That is not a workaround: the identity was already defined big-endian
+/// *so that lexicographic byte order is numeric order is time order*, because the value is an
+/// index key in every account database. The same property is what lets a shell compare two of
+/// these with `memcmp` and get D-55's tiebreak.
+///
+/// D-78 records the cost this is part of: the width is paid in every index, every foreign
+/// reference, **and every row crossing this boundary** — for a property only the
+/// unified-inbox merge needs, and D-4 concedes that is the feature to cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(C)]
+pub struct SiftId {
+    pub bytes: [u8; 16],
+}
+
+impl SiftId {
+    #[must_use]
+    pub const fn from_u128(v: u128) -> Self {
+        Self {
+            bytes: v.to_be_bytes(),
+        }
+    }
+
+    #[must_use]
+    pub const fn to_u128(self) -> u128 {
+        u128::from_be_bytes(self.bytes)
     }
 }
 

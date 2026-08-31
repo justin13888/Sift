@@ -1,0 +1,9 @@
+// D-60 — the Swift shell reaches the C ABI through a module map over the generated header.
+//
+// A binding framework was rejected rather than overlooked: D-17 already refused
+// schema-generated bindings, and a framework that owned the boundary's shape would own
+// exactly the thing D-17 keeps deliberately narrow.
+module CSift {
+    header "../../../../crates/abi/include/sift.h"
+    export *
+}

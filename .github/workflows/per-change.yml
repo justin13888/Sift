@@ -45,6 +45,8 @@ jobs:
         run: cargo xtask invariants
       - name: Gate 3 — new dependency edges reviewed rather than absorbed
         run: cargo xtask deps
+      - name: D-60 — the committed header matches the ABI crate
+        run: cargo xtask header
 
   # Gates 1 and 2 of the dependency policy. Each fails the build rather than warning.
   dependencies:
@@ -90,6 +92,22 @@ jobs:
           key: ${{ matrix.target }}
       - run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
       - run: cargo test --workspace --target ${{ matrix.target }}
+
+  # D-61 inverts the usual relationship on macOS: the platform toolchain owns the bundle and
+  # links the Rust core as a static library. That is why "CI needs a macOS host for even a
+  # smoke build" is listed as a cost of the decision rather than an inconvenience.
+  macos-shell:
+    name: the macOS shell builds against the generated header
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: the static library the bundle links
+        run: cargo build --release -p sift-abi
+      - name: the header has not drifted from it
+        run: cargo xtask header
+      - run: swift build -c release --package-path shells/macos
 
   # The floor is a promise, not a preference: "a build failing on the stated floor is a
   # defect rather than an invitation to raise it." Nothing else checks it, so a

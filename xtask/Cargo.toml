@@ -23,3 +23,6 @@ dbg_macro = "deny"
 
 [dependencies]
 serde_json = "1"
+# D-60 requires the header be *generated from the ABI crate's source* rather than
+# hand-written and reviewed. This is the generator; it is tooling and does not ship.
+cbindgen = { version = "0.29", default-features = false }

@@ -1,0 +1,49 @@
+[package]
+name = "sift-gtk"
+description = "D-1 — the Linux shell. GTK4 and libadwaita, above the ABI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+todo = "warn"
+dbg_macro = "deny"
+
+# The shell's testable half is a library, and the binary is a thin wrapper over it. That is
+# not packaging convenience: the parts worth asserting — which actions are bound, which shell
+# owns what, whether an engine version is acceptable — are properties of the design rather
+# than of the toolkit, and they should be checkable on a machine that cannot build GTK.
+[lib]
+name = "sift_gtk"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sift"
+path = "src/main.rs"
+
+[dependencies]
+sift-presentation.workspace = true
+sift-foundation.workspace = true
+
+# D-61 inverts the macOS relationship here: **Cargo owns the Linux binary** and the GTK shell
+# is Rust in the same workspace, so the Flatpak manifest wraps an ordinary Cargo build.
+#
+# The toolkit is a target-conditional dependency rather than an unconditional one, so that
+# `cargo test --workspace` works on a machine with no GTK development libraries — which is
+# every macOS developer and every hosted runner that is not building this shell. The shell
+# code is `cfg`-gated to match, and on other platforms the binary says why it is not the one
+# you want rather than failing to link.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk4 = { version = "0.10", optional = true }
+libadwaita = { version = "0.8", optional = true }
+
+[features]
+# Off by default so the workspace builds anywhere. The Flatpak manifest turns it on.
+toolkit = ["dep:gtk4", "dep:libadwaita"]

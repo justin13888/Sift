@@ -57,6 +57,7 @@ members = [
 
     # Shells — above the ABI. The macOS shell is Swift and outside this workspace; the
     # Linux shell and D-65's command-driven harness are Rust and in it.
+    "crates/shells/sift-gtk",
     "crates/shells/sift-harness",
 
     # Tooling. Not a layer; excluded from the architecture rules it enforces.

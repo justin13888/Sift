@@ -22,3 +22,7 @@ dbg_macro = "deny"
 
 [dependencies]
 sift-foundation.workspace = true
+sift-presentation.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]

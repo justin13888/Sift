@@ -1,0 +1,42 @@
+# D-60 — the generated header's shape.
+#
+# Consumed by Swift through a module map. A binding framework was rejected: D-17 already
+# refused schema-generated bindings, and a framework that owns the boundary's shape would
+# own the thing D-17 keeps deliberately narrow.
+
+language = "C"
+# Typedefs only, with no separate struct or enum tags. With both, the header declares an
+# enum tag *and* a typedef of the same name, and Swift's C importer sees two types called
+# SiftStatus — which it reports, correctly, as ambiguous.
+style = "type"
+# Typedefs only, no separate struct/enum tags. With both, the header declares  *and* a  typedef, and Swift'''s C importer sees two types with one
+# name — which it reports, correctly, as ambiguous.
+header = """
+/*
+ * Sift's C ABI — D-17's boundary.
+ *
+ * GENERATED FROM crates/abi/sift-abi. Do not edit.
+ *
+ * This file is committed deliberately. Committing generated output is widely disliked, and
+ * D-60 accepts the dislike for two reasons: it keeps the Swift target independent of the
+ * Rust toolchain in day-to-day shell work, and it makes every addition to the boundary
+ * visible in review — which is what lets D-17's tripwire actually trip.
+ *
+ * Regenerating in CI and finding a difference fails the build.
+ */
+"""
+include_guard = "SIFT_ABI_H"
+autogen_warning = ""
+documentation = true
+documentation_style = "doxy"
+# Off: Swift imports the C header directly, and the C++ compatibility path emits the status
+# typedef twice, which Swift then reports as an ambiguous type. Nothing consumes this from
+# C++.
+cpp_compat = false
+usize_is_size_t = true
+
+[export]
+prefix = ""
+
+[parse]
+parse_deps = false

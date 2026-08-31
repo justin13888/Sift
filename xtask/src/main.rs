@@ -7,6 +7,7 @@
 
 mod arch;
 mod deps;
+mod header;
 mod invariants;
 mod layers;
 mod meta;
@@ -18,16 +19,25 @@ fn main() -> ExitCode {
     let result = match task.as_deref() {
         Some("arch") => arch::run(),
         Some("deps") => deps::run(std::env::args().any(|a| a == "--bless")),
+        Some("header") => {
+            if std::env::args().any(|a| a == "--bless") {
+                header::bless()
+            } else {
+                header::check()
+            }
+        }
         Some("invariants") => invariants::run(),
         Some("coverage") => invariants::coverage(),
         Some("all") | None => arch::run()
             .and_then(|()| invariants::run())
-            .and_then(|()| deps::run(false)),
+            .and_then(|()| deps::run(false))
+            .and_then(|()| header::check()),
         Some(other) => Err(format!(
             "unknown task `{other}`\n\n\
              arch        the crate graph of D-59: one-way edges, the ABI a leaf, unsafe in four places\n\
              invariants  the prohibitions docs/ states as code-review rules\n\
              deps        the third dependency gate: new edges reviewed rather than absorbed\n\
+             header      D-60's generated C header, and the drift check over it\n\
              coverage    which crates each invariant rule currently covers\n\
              all         all of the above (default)"
         )),

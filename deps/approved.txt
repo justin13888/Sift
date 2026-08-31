@@ -18,6 +18,7 @@ arrayvec 0.7.8
 base64 0.22.1
 bitflags 2.13.1
 blake3 1.8.7
+cbindgen 0.29.4
 cc 1.4.4
 cfg-if 1.0.4
 cipher 0.4.4
@@ -32,6 +33,8 @@ displaydoc 0.2.7
 dtoa 1.0.11
 dtoa-short 0.3.5
 either 1.18.0
+equivalent 1.0.2
+errno 0.3.14
 fallible-iterator 0.3.0
 fallible-streaming-iterator 0.1.9
 fastrand 2.5.0
@@ -40,9 +43,12 @@ flatbuffers 25.12.19
 foldhash 0.1.5
 form_urlencoded 1.2.2
 generic-array 0.14.7
+getrandom 0.4.3
 ghash 0.5.1
 hashbrown 0.15.5
+hashbrown 0.17.1
 hashlink 0.10.0
+heck 0.5.0
 html5ever 0.39.0
 icu_collections 2.1.1
 icu_locale_core 2.1.1
@@ -53,11 +59,13 @@ icu_properties_data 2.1.2
 icu_provider 2.1.1
 idna 1.1.0
 idna_adapter 1.2.1
+indexmap 2.14.1
 inout 0.1.4
 itertools 0.14.0
 itoa 1.0.18
 libc 0.2.189
 libsqlite3-sys 0.35.0
+linux-raw-sys 0.12.1
 litemap 0.8.3
 lock_api 0.4.14
 log 0.4.34
@@ -65,6 +73,7 @@ markup5ever 0.39.0
 markup5ever_rcdom 0.39.0+unofficial
 memchr 2.8.3
 new_debug_unreachable 1.0.6
+once_cell 1.21.4
 opaque-debug 0.3.1
 parking_lot 0.12.5
 parking_lot_core 0.9.12
@@ -82,6 +91,7 @@ proc-macro2 1.0.107
 psl 2.1.226
 psl-types 2.0.11
 quote 1.0.47
+r-efi 6.0.0
 redox_syscall 0.5.18
 regex 1.13.1
 regex-automata 0.4.18
@@ -89,6 +99,7 @@ regex-syntax 0.8.11
 rusqlite 0.37.0
 rustc-hash 2.1.3
 rustc_version 0.4.1
+rustix 1.1.4
 scopeguard 1.2.0
 seahash 4.1.0
 semver 1.0.28
@@ -96,6 +107,7 @@ serde 1.0.229
 serde_core 1.0.229
 serde_derive 1.0.229
 serde_json 1.0.151
+serde_spanned 1.1.1
 shlex 2.0.1
 siphasher 1.0.3
 smallvec 1.15.2
@@ -106,12 +118,17 @@ subtle 2.6.1
 syn 2.0.119
 syn 3.0.4
 synstructure 0.13.2
+tempfile 3.27.0
 tendril 0.5.1
 thiserror 1.0.69
 thiserror-impl 1.0.69
 tinystr 0.8.4
 tinyvec 1.12.0
 tinyvec_macros 0.1.1
+toml 0.9.12+spec-1.1.0
+toml_datetime 0.7.5+spec-1.1.0
+toml_parser 1.1.3+spec-1.1.0
+toml_writer 1.1.2+spec-1.1.0
 typenum 1.20.1
 unicode-ident 1.0.24
 unicode-normalization 0.1.25
@@ -123,6 +140,9 @@ vcpkg 0.2.15
 version_check 0.9.5
 web_atoms 0.2.6
 windows-link 0.2.1
+windows-sys 0.61.2
+winnow 0.7.15
+winnow 1.0.4
 writeable 0.6.4
 xml5ever 0.39.0
 yoke 0.8.3

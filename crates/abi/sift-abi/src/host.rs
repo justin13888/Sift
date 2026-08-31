@@ -34,7 +34,7 @@
 //! A shell's rule inside one of these is the same as inside any callback — *receive,
 //! record, return; act on the next turn of the loop*.
 
-use crate::repr::SiftStr;
+use crate::repr::{SiftId, SiftStr};
 use core::ffi::c_void;
 
 /// An opaque pointer the shell supplies at registration and receives back with every
@@ -70,7 +70,7 @@ pub struct SiftHostCallbacks {
     /// screen. D-88's classifier is deliberately conservative about reaching here: only a
     /// well-formed provider denial is non-transient, so a captive portal answering with a
     /// login page does not produce this on every account at once.
-    pub reauthentication_needed: extern "C" fn(HostContext, account: u128),
+    pub reauthentication_needed: extern "C" fn(HostContext, account: SiftId),
 
     /// **The bundle was replaced** — FR-26.
     ///
@@ -83,7 +83,7 @@ pub struct SiftHostCallbacks {
     ///
     /// Opens that message, which under FR-25 may mean opening a window on a process that
     /// has none.
-    pub notification_activated: extern "C" fn(HostContext, account: u128, message: u128),
+    pub notification_activated: extern "C" fn(HostContext, account: SiftId, message: SiftId),
 
     /// **The account condition changed** — D-49.
     ///
@@ -92,7 +92,7 @@ pub struct SiftHostCallbacks {
     /// position in its `ALL`, and under D-66 the shell handles it **exhaustively at build
     /// time** — there is no runtime fallback for an unrecognised value and one must not be
     /// added.
-    pub account_condition_changed: extern "C" fn(HostContext, account: u128, condition: u32),
+    pub account_condition_changed: extern "C" fn(HostContext, account: SiftId, condition: u32),
 
     /// **An authorization callback arrived** — D-36.
     ///
