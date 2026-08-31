@@ -2,7 +2,7 @@
 
 What happens between a click in a message and a page in a browser.
 
-**Owns:** FR-30.
+**Owns:** FR-30, FR-42.
 
 ## Navigation never happens in place
 
@@ -39,3 +39,29 @@ destination is not locally recoverable, Sift MUST say so rather than guess.
 
 Tracking query parameters MUST be stripped using the removal rules already carried by the filter lists,
 rather than a bespoke parameter list.
+
+## FR-42 — Unsubscribing is shown, never performed
+
+**FR-42.** Where a message declares an unsubscribe destination, Sift MUST surface it in the reader, under
+the same display rules as any other link, and MUST open it in the system browser on explicit confirmation.
+**Sift MUST NOT issue an unsubscribe request itself**, by any method.
+
+Unsubscribing is among the most common things a person wants to do with the mail a triage client is for,
+so leaving it out entirely would be the kind of gap that keeps a web interface open — which
+[mutations](../mail/mutations.md) names as the outcome this product exists to avoid.
+
+Performing it is nonetheless out of the question, for two independent reasons. The historical form is a
+message, which [scope](../product/scope.md)'s no-send constraint forbids outright. The modern form is an
+HTTP request, which would be egress from somewhere other than the
+[resource broker](../architecture/resource-broker.md) — falsifying the completeness of the
+[egress table](../security/privacy.md) — and the address it goes to carries a high-entropy per-recipient
+token, which is precisely what FR-29 in [content blocking](content-blocking.md) treats as evidence that a
+resource is tracking the reader. Sift would be issuing the request its own heuristics exist to prevent.
+
+Showing the destination costs nothing and gives the user the action. Opening it in the browser is the same
+handoff FR-41 makes for replying, for the same reason: the capability belongs to another application, and
+Sift's job is to be honest about where the user is going rather than to go there for them.
+
+A `mailto:` unsubscribe destination is shown and reported as requiring a mail handler, exactly as FR-41's
+absent-handler case is. It is not silently omitted, because a user who cannot see it cannot know it
+existed.

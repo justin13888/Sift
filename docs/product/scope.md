@@ -29,6 +29,13 @@ These are not "later"; they are **excluded by design**.
 | Calendar, contacts, tasks — except contact *name resolution* for display | a second sync domain with its own delta model and conflict semantics |
 | Server-side rule and filter management | provider-divergent rule languages, no shared abstraction |
 | Mobile | a third platform family and a different resource model |
+| Registering as the system mail handler, or for `mailto:` | FR-41's handoff would resolve to Sift, which then needs a compose surface — the first step of the degradation this document describes below |
+| Honouring read receipts and disposition-notification requests | an outbound message path. The *request* is still surfaced; see below |
+| Setting the answered flag after a handoff | Sift asserting an outbound message it did not send and cannot verify, which FR-41 already forbids in a different position |
+| Creating, renaming, or deleting folders | a second mutation domain with its own capability rows, its own conflict semantics, and it breaks FR-5's semantic resolution the moment a user renames a special-use folder |
+| Emptying the trash | a bulk permanent delete, which [mutations](../mail/mutations.md) excludes for the reason it gives: a wrong query and a wrong click composing into unrecoverable loss |
+| Snooze, pin, mute-thread, and other local-only per-message state | local state the provider cannot refill inverts the "cache is not the source of truth" framing that permits aggressive shedding, and makes NFR-18 recovery and D-32's resync lossy |
+| Translated interface strings in the first release | none, given [D-56](../architecture/presentation-layer.md). Without that rule this row would be a non-goal that quietly becomes permanent |
 
 ## The no-send constraint
 
@@ -72,6 +79,35 @@ What "hands off" means needs specifying, because the failure cases are where a h
 **This is not a deferred item under the section below.** A handoff introduces no outbound message path,
 so there is nothing here to defer — it is the constraint being made liveable rather than being softened.
 
+### Four consequences of no-send, stated rather than discovered
+
+The table above excludes four things that a reader will otherwise assume are oversights. Each is a real
+loss and each is written down here so that the cost of the no-send constraint is visible in one place.
+
+**Sift must not be the system's mail handler.** FR-41 hands off to "the user's configured mail handler",
+and if that handler is Sift the handoff resolves to itself. So Sift MUST NOT register for the role or for
+the `mailto:` scheme, and a `mailto:` link in a message body resolves through the platform's handler like
+any other — where the resolution names Sift, that is the *no handler configured* case FR-41 already
+requires to be stated rather than silently doing nothing.
+
+**A user cannot tell which messages they have replied to.** The answered flag is real, syncing,
+per-message state on all four providers, and Sift does not set it, because doing so would assert an
+outbound message it did not send and cannot verify. A reply composed in a browser will never set it
+either. This is the second-largest honest cost of the no-send constraint, after the inability to reply at
+all, and it is the one most likely to be reported as a bug.
+
+**A read receipt is refused but not concealed.** Sift cannot honour a disposition-notification request
+without sending. It does surface that one was asked for, beside the blocked-remote-content indicator,
+because it is the non-image half of the same attempt to learn that a message was opened — and this
+product's position everywhere else is to report what a message tried to do rather than absorb it silently.
+
+**Unsubscribing is a link, not an action Sift takes.** The one-click form is an HTTP request and the older
+form is a `mailto:`; the second is excluded above and the first would be an egress path outside the
+[resource broker](../architecture/resource-broker.md), in a table that claims to be complete — carrying a
+per-recipient token, which is the same signal FR-29 treats as evidence of tracking. Sift therefore
+displays the destination and opens it in the system browser on confirmation, and issues nothing itself.
+That is [FR-42](../rendering/link-handling.md).
+
 ## Deferred, with a defined insertion point
 
 **This section is not the non-goals table, and the difference is load-bearing.** A non-goal is excluded
@@ -82,7 +118,16 @@ with **the seam it would enter through**, so that adding it later is an append r
 Anything entered here MUST name that seam. An item nobody can name a seam for is a non-goal in disguise,
 and belongs in the table above with its consequence written out.
 
-There is one such item today.
+Three items today. Two are small enough to state in a line each, and the third has its own section.
+
+**Printing a message.** The seam is an additional consumer of stage 7 of
+[the pipeline](../rendering/pipeline.md), with a print stylesheet appended to the base stylesheet that
+[platforms and distribution](platforms-and-distribution.md) already requires. Note that print media
+queries are resolved by [D-27](../rendering/dark-mode.md)'s cascade, so the machinery is present.
+
+**Saving a message as a file.** The seam is a read from the [blob store](../storage/cache-and-blobs.md)
+of bytes Sift already holds, written under NFR-53's path rules like an attachment. No new machinery, and
+no new egress.
 
 ## D-39 — End-to-end encrypted and signed mail is deferred, not excluded
 

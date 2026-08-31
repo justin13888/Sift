@@ -83,7 +83,7 @@ what makes deferring them different from deferring a feature.
 | P0 | — (spikes only) | NFR-8, NFR-9, NFR-12, NFR-44, NFR-45 |
 | P1 | FR-2, FR-5, FR-6, FR-8, FR-9, FR-11, FR-12, FR-13, FR-14, FR-19, FR-22, FR-24, FR-25, FR-28, FR-30, FR-33, FR-34, FR-41 | NFR-1, NFR-3, NFR-5, NFR-10, NFR-11, NFR-15, NFR-25, NFR-28, NFR-40, NFR-41, NFR-46, NFR-50 |
 | P2 | FR-1, FR-3, FR-4, FR-20, FR-21, FR-37, FR-43 | NFR-2, NFR-18, NFR-29, NFR-30, NFR-31, NFR-32, NFR-33, NFR-34, NFR-35, NFR-37, NFR-38, NFR-39, NFR-48 |
-| P3 | FR-15, FR-16, FR-17, FR-18, FR-38, FR-39 | NFR-7, NFR-17 |
+| P3 | FR-15, FR-16, FR-17, FR-18, FR-38, FR-39, FR-42 | NFR-7, NFR-17 |
 | P4 | FR-7, FR-10, FR-23, FR-26, FR-27, FR-29, FR-31, FR-32, FR-35, FR-36, FR-40 | NFR-4, NFR-6, NFR-13, NFR-26, NFR-27, NFR-42, NFR-43, NFR-47, NFR-49, NFR-53 |
 
 NFR-36 is absent because it is struck — see [requirements](../requirements.md).

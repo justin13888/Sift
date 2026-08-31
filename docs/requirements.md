@@ -60,6 +60,7 @@ two homes and one of them would go stale.
 | FR-39 | Report junk and not-junk as intents, where the account declares junk-reporting support | [mail/mutations](mail/mutations.md) |
 | FR-40 | Contact name resolution for display, read-only from the platform contact store | [architecture/presentation-layer](architecture/presentation-layer.md) |
 | FR-41 | Reply, reply-all and forward hand off to the platform's mail handler; Sift never constructs or transmits a message | [product/scope](product/scope.md) |
+| FR-42 | Unsubscribe destination shown and opened in the system browser; never requested by Sift | [rendering/link-handling](rendering/link-handling.md) |
 | FR-43 | Watched folder set per account, user-selectable and persisted | [runtime/scheduling](runtime/scheduling.md) |
 
 ## Performance
