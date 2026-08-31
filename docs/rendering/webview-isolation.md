@@ -2,7 +2,7 @@
 
 The containment boundary around message rendering.
 
-**Owns:** D-3, D-28, D-50, N-1, NFR-20, NFR-21, NFR-25, NFR-46, NFR-50.
+**Owns:** D-3, D-28, D-50, D-54, N-1, NFR-20, NFR-21, NFR-25, NFR-46, NFR-50.
 
 ## D-3 — Bodies render in a separate, hardened document
 
@@ -167,6 +167,41 @@ cosmetic one.
 
 Verification belongs in the fidelity corpus gate rather than in manual spot checks — see
 [reference environment](../product/reference-environment.md).
+
+## D-54 — One body view, and a thread is not one document
+
+**Chosen:** at most one body view is live at a time. A thread renders as native rows in the reader, with
+the body of the selected message shown beneath them in that single view.
+**Rejected:** rendering a whole conversation as one document; one body view per message, stacked.
+
+**Why the alternatives fail on this page's own terms.** Rendering a conversation as one document is what
+most threaded clients do and what users expect, and it puts several senders' markup and CSS in **one
+document with one origin**. NFR-25 above exists to stop two messages correlating through shared storage;
+a shared document is a stronger channel than the one that requirement closes, and it adds a second
+problem the requirement never had to consider — one sender's styles apply to another sender's message, so
+a hostile sender can restyle the mail above theirs in a thread they were merely copied on.
+
+A view per message preserves isolation and still reads as one scroll, and it fails on memory instead.
+Each view is a separate engine content process, and the reading state is already the tightest in the
+design: NFR-9 leaves roughly twenty megabytes above the window-less floor, and
+[memory pressure](../runtime/memory-pressure.md) calls the body view "the largest single allocation in the
+running application". A ten-message thread would be ten of them.
+
+**What this fixes beyond itself.** [Q-12](../open-questions.md) requires NFR-8, NFR-9 and the reading peak
+to be re-derived together, and describes that peak as "a warm body view" — singular — without anything
+having fixed the count at one. It does now, so the state P0 measures is determinate rather than a function
+of how a thread happens to be presented. It also keeps NFR-46's teardown trigger meaningful: "no reader
+visible" is a state one view either is or is not in, where with N views it would need a policy of its own.
+
+**What it costs:** reading a long thread is a sequence of selections rather than one continuous scroll,
+which is a real regression against what people are used to. Quoted-text chains make it worse, because the
+context a reader loses by moving between messages is exactly what the quoting was there to supply.
+
+**Contestable because:** this is the most user-visible thing in this documentation set decided on
+non-user-visible grounds. If the sequence-of-selections reading proves unacceptable in use, the honest
+retreat is one document per *sender-origin group* within a thread rather than per message — which keeps
+the correlation boundary that decides this and recovers most of the scroll, at the cost of a rule users
+would have to be able to see.
 
 ## Navigation
 

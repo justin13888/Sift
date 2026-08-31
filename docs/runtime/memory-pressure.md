@@ -147,11 +147,13 @@ rather than arithmetically hopeless, which is what the previous reading was when
 
 **What the repair exposes is a third state that no requirement budgets.** Reading a message means the
 window, the filter engine, and a warm body view at once, and that view is the largest single allocation in
-the running application — the one L2 exists to reclaim. It sits above L0, it is what a user sees for most
-of the time they are actually using Sift, and no NFR names it. NFR-8, NFR-9 and that reading peak MUST be
-re-derived together once P0 has measured toolkit residue and a warm body view: they are one budget stated
-at three lifecycle points, and moving any one of them alone reintroduces exactly the incoherence the tier
-targets above were just corrected for. Tracked with NFR-8's placeholder in
+the running application — the one L2 exists to reclaim. [D-54](../rendering/webview-isolation.md) fixes
+that count at exactly one, so the state is determinate rather than a function of how a thread is
+presented; before it, "a warm body view" named a quantity nothing bounded. It sits above L0, it is what a
+user sees for most of the time they are actually using Sift, and no NFR names it. NFR-8, NFR-9 and that
+reading peak MUST be re-derived together once P0 has measured toolkit residue and a warm body view: they
+are one budget stated at three lifecycle points, and moving any one of them alone reintroduces exactly the
+incoherence the tier targets above were just corrected for. Tracked with NFR-8's placeholder in
 [open questions](../open-questions.md).
 
 **NFR-13 and NFR-46 measure different clocks, and the distinction is normative.** NFR-13 bounds the time

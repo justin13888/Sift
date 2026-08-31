@@ -53,7 +53,9 @@ is a reason to host an engine instead.
 
 **FR-6.** The message list MUST be virtualized, showing sender, subject, snippet, date, flags, an
 attachment indicator, and thread count. Sorting by date is required; grouping by thread MUST be
-toggleable.
+toggleable. How an opened thread is then presented — native rows over a single body view — is
+[D-54](../rendering/webview-isolation.md), which decides it on isolation and memory grounds rather than
+presentational ones.
 
 **FR-22.** A menu-bar or tray presence is the always-on surface, offering at minimum: open, quit, and
 pause sync. See [process model](process-model.md) for the quit semantics it must express.
