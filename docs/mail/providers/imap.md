@@ -93,3 +93,7 @@ the degradation to the user**.
 A server that forces full-scan resynchronization makes the account structurally slower and more
 data-hungry than the others. Hiding that produces an unanswerable support question; showing it lets the
 user act — by switching servers, by accepting the cost, or by narrowing which folders are watched.
+
+The account's *degraded* condition is where this reaches the user, and
+[failure model](../../runtime/failure-model.md) owns it along with the rest of what can be wrong with an
+account.

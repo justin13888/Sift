@@ -67,7 +67,8 @@ them.
 **Runtime** — the behaviours that make an always-on app tolerable.
 
 - [Scheduling and wakeups](runtime/scheduling.md) · [Memory pressure](runtime/memory-pressure.md) ·
-  [Network conditions](runtime/network-conditions.md) · [Observability](runtime/observability.md)
+  [Network conditions](runtime/network-conditions.md) · [Failure model](runtime/failure-model.md) ·
+  [Observability](runtime/observability.md)
 
 **Security** — the adversary and the boundaries.
 

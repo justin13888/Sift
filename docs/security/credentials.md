@@ -18,7 +18,9 @@ Generic IMAP accounts using password authentication follow the same storage rule
 Because Sift stays resident with no window (see [process model](../architecture/process-model.md)), a
 failed refresh may occur when there is nothing on screen to prompt. The re-auth prompt MUST therefore be
 raised through the always-on surface in [UI shell](../architecture/ui-shell.md), and the affected account
-MUST show as needing attention rather than merely stalling.
+MUST show as needing attention rather than merely stalling. *Needs authentication* is the
+highest-precedence condition in [failure model](../runtime/failure-model.md), which owns how it composes
+with everything else that can be wrong with an account.
 
 ## D-36 — Authorization returns through a URI scheme, not a socket
 
