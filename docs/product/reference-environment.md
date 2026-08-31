@@ -18,7 +18,7 @@ target met by changing the rig has not been met.
 
 ## Reference corpus
 
-Two distinct corpora serve two distinct purposes.
+Three distinct corpora serve three distinct purposes.
 
 **Scale corpus** — for performance and resource targets. Approximately 5 accounts, 500,000 messages
 total, 50,000 of them in an inbox. Synthetic generation is acceptable; the shape matters more than the
@@ -27,6 +27,22 @@ content.
 **Fidelity corpus** — for rendering correctness. Real-world messages spanning marketing HTML, transactional
 mail, mailing-list traffic, CJK, RTL, and plain text, plus every published mutation-XSS payload as a
 permanent regression vector. See [sanitizer invariants](../rendering/sanitizer-invariants.md).
+
+**Relevance corpus** — for search ranking. Real queries against a known mailbox, each recorded with the
+message the person issuing it was actually looking for. This corpus MUST exist, and it is the one that
+does not yet.
+
+It is listed because [D-5](../storage/search.md) gates its own reconsideration on "measured ranking
+failure" while conceding that ranking quality is where it is weakest and that ranking *is* the product —
+and neither corpus above can measure that. The scale corpus is synthetic, where "the shape matters more
+than the content"; the fidelity corpus answers whether a message *renders*, not whether the right one came
+back first. A decision whose stated falsification condition has no instrument is settled by default rather
+than on evidence.
+
+Synthetic generation is **not** acceptable here, unlike the scale corpus: a generated query has no correct
+answer that was not generated alongside it, so a synthetic relevance corpus measures the generator. This
+is the only corpus of the three that requires human judgement to build, and that cost is the reason to
+size it deliberately rather than aspire to it.
 
 ## NFR-26 — Rendering correctness gate
 

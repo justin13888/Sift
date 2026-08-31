@@ -17,7 +17,9 @@ doesn't" bug.
 
 **Contestable because:** ranking quality is the product here — a search that returns the right message
 fourth is a worse product than one that returns it first. Revisit **only on measured ranking failure**
-against the [reference corpus](../product/reference-environment.md), not on preference.
+against the [relevance corpus](../product/reference-environment.md), not on preference — and note that
+this condition could not fire until that corpus was named, because neither the scale nor the fidelity
+corpus can measure whether the right message came back first.
 
 ## FR-19 — Local search
 
