@@ -21,6 +21,7 @@ Capability notes for the Gmail adapter. The abstraction it implements is in
 | ID stability | stable globally |
 | Server search | full query syntax, including operators Sift's own grammar does not expose |
 | Maximum batch size | **unknown — plans conservatively pending [Q-9](../../open-questions.md)** |
+| Snippet source | provider-supplied |
 
 ## Delta
 

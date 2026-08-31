@@ -21,6 +21,7 @@ Consumer and organizational accounts share one code path.
 | ID stability | **unstable on move** |
 | Server search | search over mail properties |
 | Maximum batch size | **unknown — plans conservatively pending [Q-9](../../open-questions.md)** |
+| Snippet source | provider-supplied |
 
 ## Delta
 

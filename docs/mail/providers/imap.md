@@ -30,6 +30,7 @@ has gone away is surfaced under NFR-29 below, like every other degradation on th
 | ID stability | stable per folder, keyed on folder validity plus UID; globally stable only where the server offers object identifiers |
 | Server search | the base search command, extended where the server advertises it |
 | Maximum batch size | **unknown — plans conservatively pending [Q-9](../../open-questions.md)** |
+| Snippet source | **client-derived** — no preview field exists; derived only from a body already fetched, never by fetching one |
 
 ## D-31 — A hand-written IMAP client
 

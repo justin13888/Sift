@@ -31,6 +31,7 @@ This is the only way the abstraction survives contact with a fifth provider.
 | ID stability | stable globally; stable per folder; unstable on move | Whether a remote identifier may be used as a join key |
 | Server search | per-provider capability set | What can be delegated to the server — see [search](../storage/search.md) |
 | Maximum batch size | integer, or unknown | Batching limit for bulk operations. Magnitude-valued: unknown means "plan conservatively", never "unsupported" — see the growth rules below |
+| Snippet source | provider-supplied; client-derived; none | Where FR-6's list snippet comes from. Three providers return a preview with the envelope and one does not — see [sync engine](sync-engine.md) |
 
 Adapter responsibilities are: enumerate folders, produce a delta against a cursor, fetch envelopes, fetch
 a specific body part, apply a batch of mutations, and expose a change-notification stream. Nothing more.

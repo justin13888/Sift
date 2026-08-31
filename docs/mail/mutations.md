@@ -2,7 +2,7 @@
 
 The only writes Sift performs, and the subsystem that performs them.
 
-**Owns:** D-38, D-40, D-51, FR-13, FR-14, FR-15, FR-16, FR-17, FR-18, FR-38, FR-39, NFR-16, NFR-17.
+**Owns:** D-38, D-40, D-51, D-52, FR-13, FR-14, FR-15, FR-16, FR-17, FR-18, FR-38, FR-39, NFR-16, NFR-17.
 
 Budget for this as a first-class subsystem, not a thin adapter method. It is where "read-only plus triage"
 quietly becomes expensive, and it is the only place in Sift where a bug can lose a user's mail.
@@ -174,6 +174,37 @@ of their own.
 in under a second — so a reader may reasonably argue that a materialized state plus careful sequencing at
 the applier would do, at less cost on the read path. The answer is that "careful sequencing" is a property
 nothing can test for, and its failure mode is silent and indistinguishable from ordinary reconciliation.
+
+## D-52 — A message is read when the user reads it
+
+**Chosen:** read is set when the user selects a message in the reader and it remains selected past a short
+dwell. Never on list traversal, never on hover, and never on a message whose body was not rendered —
+opening a thread marks read only the messages actually shown. The dwell is configurable, including off.
+**Rejected:** marking read immediately on selection; never marking read automatically.
+
+**Why this belongs here rather than in a shell.** Marking read is an FR-13 intent, so its trigger decides
+how many intents the highest-frequency mutation in the product generates. That number sets the queue's
+write rate, the flush wakeup rate against NFR-11 and NFR-15, and the data-cap burn under FR-36. A rule
+invented per shell would give the two platforms different resource profiles for the same user behaviour.
+
+**Why not immediately on selection.** FR-24 requires every action to be keyboard-reachable, so users
+traverse the list with the arrow keys — and under immediate marking, walking past forty messages marks
+forty messages read, each a durable queued intent and a provider call. FR-15 deliberately gives mark-read
+no timed undo window, on the reasoning that the message stays in front of the user; that reasoning holds
+for one deliberate mark and not for forty incidental ones. The result is a mutation that is individually
+unnoticed and collectively hard to reverse.
+
+**Why not manual-only either**, though it is the most defensible-sounding option for a triage-first
+client. Unread counts are how most people decide whether to open a mail client at all, and a client whose
+counts only fall when the user says so has redefined the number rather than served it.
+
+**What it costs:** a preference, and a dwell timer that MUST NOT run while the window is unfocused — a
+message left selected while the user is elsewhere has not been read.
+
+**Contestable because:** the dwell is a guess about attention, and any specific duration is wrong for
+someone. If measurement or complaint shows it wrong more often than right, the retreat is manual-only
+rather than immediate marking, because the failure directions are not symmetric: failing to mark read is
+visible and correctable by the user, while marking read wrongly hides mail they never saw.
 
 ## FR-15 — Undo
 

@@ -29,6 +29,30 @@ This is the single largest lever on perceived speed and on the network targets i
 scrolling instant; bodies are fetched on demand; attachments are fetched only on request. See
 [cache and blobs](../storage/cache-and-blobs.md) for what is retained.
 
+## The snippet is part of the envelope only where the provider supplies one
+
+FR-6 requires a snippet in every list row and the [glossary](../glossary.md) puts it in the envelope, "the
+cheap per-message summary". For three of the four providers it is cheap, because a preview comes back with
+the envelope. **For generic IMAP no such field exists**, and the difference has to be declared rather than
+discovered — it is the *snippet source* capability in [provider model](provider-model.md).
+
+Where the source is *client-derived*, a snippet MUST be derived only from a body Sift has already fetched
+for its own reasons, and MUST NOT cause a fetch. A list row with no snippet is honest; a backfill that
+fetches body text for half a million messages to fill one column is a different product, and it would
+multiply the initial sync's cost against NFR-15 and NFR-31 for a line of grey text.
+
+**There is a specific hazard at the end of the naive path, and it is why this is normative rather than
+advisory.** On IMAP, fetching body text without the peek form of the command **sets the seen flag**. A
+snippet derived during backfill without that care therefore marks the user's entire mailbox read — a
+data-integrity incident produced by an unstated UI requirement, on the adapter where degradation is
+already the norm, and one that no amount of care in [D-52](mutations.md)'s mark-read rule would prevent.
+
+The snippet is derived after part selection and before sanitization is required — it is text, not markup —
+and it is stored with the envelope, so it survives body eviction under NFR-14 exactly as the rest of the
+envelope does. It is bounded by L-16 in [limits](../limits.md) and is truncated rather than rejected, and
+because it is attacker-controlled text destined for a native list row it is normalized under NFR-54 in
+[presentation layer](../architecture/presentation-layer.md) like every other such string.
+
 ## Scheduling
 
 All periodic sync work MUST funnel through the single coalesced scheduler described in

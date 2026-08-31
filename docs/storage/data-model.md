@@ -55,7 +55,7 @@ Per-account, unless noted.
 | Account | provider, display name, declared capabilities | one row; the file *is* the account |
 | Folder | remote identifier, semantic kind | kind is semantic, never a display name — see FR-5 |
 | Folder sync state | per folder: cursor, validity identifier, last successful sync, degradation reason | one row per folder; see below |
-| Message | remote identifier, internet message identifier, fallback identity digest, thread identifier, location, sender, recipients, subject, date, flags, attachment presence, size, MIME structure, body reference | body reference is null when not cached; the digest is computed at ingest under D-44. Location and flags are the **base** state [D-51](../mail/mutations.md) defines; the pending overlay is held with the queue, not here |
+| Message | remote identifier, internet message identifier, fallback identity digest, thread identifier, location, sender, recipients, subject, date, flags, attachment presence, size, MIME structure, body reference, snippet | body reference is null when not cached; the snippet is present only where the account declares a snippet source, and is bounded by L-16; the digest is computed at ingest under D-44. Location and flags are the **base** state [D-51](../mail/mutations.md) defines; the pending overlay is held with the queue, not here |
 | Thread | remote thread identifier, normalized subject, last activity, message count | scoped to the account — see [threading](../mail/threading.md) |
 | Tag | tag identity and display name, and its membership | present only where the account declares tag support |
 | Full-text index | subject, body text, sender text, recipient text | see [search](search.md) |

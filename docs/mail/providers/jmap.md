@@ -24,6 +24,7 @@ rather than being derived from an awkward case and generalized upward.
 | ID stability | stable globally |
 | Server search | filter conditions in the query, negotiated per server |
 | Maximum batch size | **unknown — plans conservatively pending [Q-9](../../open-questions.md)** |
+| Snippet source | provider-supplied |
 
 ## Delta and push
 
