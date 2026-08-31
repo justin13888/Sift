@@ -1,6 +1,6 @@
 # Cache and blobs
 
-**Owns:** D-23, D-57, D-73, D-77, FR-10, FR-12, NFR-14, NFR-49, NFR-52, NFR-53.
+**Owns:** D-23, D-57, D-73, D-77, D-102, FR-10, FR-12, NFR-14, NFR-49, NFR-52, NFR-53.
 
 ## The cache is not the source of truth
 
@@ -202,6 +202,71 @@ detect malice.
 
 The [threat model](../security/threat-model.md) carries the filename parameter and the save path as inputs
 in its own table, which they were previously absent from.
+
+## D-102 — Eviction spares what is live, and a fetch is staged before it is addressed
+
+**Chosen:** eviction skips any message carrying a pending overlay or a queued intent, and any message
+currently open; it runs in batches down to a low-water mark rather than per insertion; a thread's
+aggregate figures describe the messages still held, and a thread with none is retired. A fetch is staged
+outside the content-addressed store and enters it only when complete; concurrent requests for the same
+content coalesce; and a transfer is checked against its declared length.
+**Rejected:** evicting purely by age and budget; evicting one row per insertion; writing partial content
+into the store under a provisional address.
+
+**Why eviction has to see live state.** NFR-52 below evicts envelopes *"oldest-first"*, which is correct
+about ordering and silent about exceptions — and two of them are load-bearing. A message with a queued
+intent is the target of a write that has not happened; evicting its row leaves
+[D-85](../mail/mutations.md)'s intent naming a message the store no longer has, and its pending overlay
+attached to a base row that is gone. **The queue is the one thing in an account that outlives the cache**
+under [D-74](data-model.md), so the cache MUST NOT evict what the queue still refers to. A message the
+user is reading is the second: evicting it while it is on screen is a defect a user watches happen.
+
+**Neither exception unbounds the budget**, which is the objection to make. An intent is bounded by
+[L-17](../limits.md) and an open message is one per window, so the spared set is small and self-draining
+— unlike a general pinning mechanism, which is why there is not one.
+
+**Why batches and a low-water mark.** NFR-52 says eviction is *"driven by the budget rather than by a
+periodic sweep"*, which taken literally means a store at its cap evicts on every insert — during
+[D-53](../mail/sync-engine.md)'s backfill, that is an eviction per envelope for as long as the backfill
+runs. Evicting in batches down below the cap gives the same bound with a fraction of the work, and it is
+the same hysteresis argument [D-93](../runtime/memory-pressure.md) makes for shed tiers.
+
+**A thread describes what is held.** [Data model](data-model.md) gives a thread a message count and a
+last activity, and eviction changes both. They describe the messages the account still holds, and a
+thread whose members are all evicted is retired with them — the alternative is a thread row claiming
+messages that are not there, which is a search result that opens onto nothing.
+
+**A re-delivered message is discovered, not arrived.** Mail evicted and later re-fetched arrives at
+ingest looking new, and [FR-23](../architecture/ui-shell.md) defines new as *delivered* rather than
+discovered. Re-ingest after eviction is a rediscovery, exactly as
+[D-84](../mail/sync-engine.md)'s recovery is, and it MUST NOT notify — otherwise a user's cache filling
+up is a burst of notifications about mail they have already read.
+
+**Why a fetch is staged.** A blob's address is a hash of its complete content, so **it is not known until
+the last byte arrives**. Writing partial content into the content-addressed store therefore requires
+inventing a provisional name, which is a second naming scheme in the one place
+D-77 says there is one. Staging outside the store and moving in on completion keeps the store's
+invariant — every file in it is complete and named by what it contains — and makes an interrupted fetch
+leave nothing the store has to reason about. Interrupted stages are collected by the same pass that
+collects orphans under D-77.
+
+**Concurrent requests for the same content coalesce**, because two accounts holding the same attachment
+is the case [D-22](encryption.md)'s deduplication exists for and is exactly when both are likely to want
+it at once. They share one transfer and each takes its own wrapped key.
+
+**A transfer is checked against its declared length.** [L-10](../limits.md) does this for images and
+nothing did it for attachments — so a sender who declares a small attachment and sends an endless one
+meets [L-14](../limits.md)'s 2 GB bound and nothing sooner. Enforcing the declared length as well means
+the mismatch is caught at the point it becomes a mismatch, which is also the point at which it is
+evidence rather than a resource problem.
+
+**What it costs:** eviction that must consult the queue, a staging area outside the store, and a
+coalescing table on the fetch path.
+
+**Contestable because:** sparing messages with queued intents means a store at its budget can grow past
+it, briefly, by the size of the queue's working set. That is a real violation of a hard-capped budget,
+accepted because the alternative violates something worse — and it is bounded only by L-17, which is
+seven days.
 
 ## D-57 — The cache is excluded from backup; the queue is not
 
