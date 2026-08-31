@@ -75,7 +75,11 @@ whose train went into a tunnel.
 account, it is already a [policy tier](network-conditions.md), and every account shares it. An account
 that is merely offline is not an account with something wrong with it.
 
-**What this document does not own.** The conditions below are the account-scoped set. Every other
+**What this document does not own.** The conditions below are the account-scoped set. Failures that
+belong to the process rather than to any account — a subsystem that never started — are
+[D-71](../architecture/lifecycle.md), which places them in a second scope for the reason D-49 places
+offline outside this table: reporting a subsystem's absence as a fault of all five accounts would be
+false. Every other
 identified state the layer can raise — reconciliation notices, blocking reasons, not-cached versus
 not-available, a quarantined intent, a caught panic — lives in the
 [state register](../architecture/state-register.md) under [D-68](../architecture/state-register.md),

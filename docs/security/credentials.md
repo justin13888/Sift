@@ -46,9 +46,15 @@ inconsistent.
 a surface any local application can invoke, so the authorization state parameter is doing real work
 against a forged callback rather than being ceremony.
 
+**A registration that did not install is checked before a flow starts, not discovered after one.**
+[D-71](../architecture/lifecycle.md) makes it a process-scoped refusal: Sift MUST NOT begin an
+authorization whose callback has nowhere to arrive, because the user then experiences a working
+credential entry followed by silence, and concludes their credentials were rejected. The check is cheap
+and the alternative is the diagnosis problem below, met by every affected user.
+
 **Contestable because:** providers document and test the loopback path most thoroughly, and a scheme
-registration that fails to install is a first-run failure with no obvious diagnosis. If a provider refuses
-scheme redirects for the scopes Sift needs, NFR-24 gets its carve-out after all.
+registration that fails to install is a first-run failure with no obvious diagnosis. If a provider
+refuses scheme redirects for the scopes Sift needs, NFR-24 gets its carve-out after all.
 
 ## NFR-23 — Storage boundary
 

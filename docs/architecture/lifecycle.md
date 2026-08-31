@@ -3,7 +3,7 @@
 What happens between launch and an interactive list, what happens on the way out, and what is true when
 a subsystem never starts.
 
-**Owns:** D-69.
+**Owns:** D-69, D-70, D-71, D-72.
 
 [Process model](process-model.md) settles that there is one resident process and what FR-25's two exits
 mean to a user. It does not say what the process does when it starts, in what order, or what "started"
@@ -77,6 +77,136 @@ creates, and it is why the deferred set above is enumerated rather than describe
 *list*, and nobody has measured which the user notices. If the engine's load turns out to be fast enough
 to sit inside NFR-1, this decision buys complexity for nothing — but it is cheap to reverse in that
 direction and expensive in the other, which is why it is drawn here.
+
+## D-70 — Quitting is bounded, and it flushes nothing
+
+**Chosen:** a quit tears down in a fixed order — stop accepting intents, tear down the body view, close
+the stores, exit — under a stated bound, after which the process exits regardless. **No provider call is
+awaited and no queue is flushed.**
+**Rejected:** draining the mutation queue before exit; awaiting in-flight network calls; an unbounded
+graceful shutdown.
+
+**Why nothing is flushed, which reads wrong and is right.** [FR-25](process-model.md) calls the
+close-versus-quit distinction *"the single most likely source of user distrust in the whole design"*, so
+the instinct is to make quit do as much as possible. That instinct produces a slow quit and buys nothing,
+because the property it is reaching for is already guaranteed: under
+[failure model](../runtime/failure-model.md) an intent *"MUST be durably enqueued before it is applied
+optimistically"*, so by the time the user has seen a triage action take effect, it is on disk. There is
+no window in which quitting loses a mutation the user watched succeed.
+
+An unflushed queue is therefore the ordinary state, not an error state, and quitting with one is exactly
+the state the process is in every time [NFR-16](../mail/mutations.md) is exercised by an abrupt
+termination. **A quit that did something a crash cannot do would mean the crash path was never the
+supported one**, which is the opposite of what NFR-16 asserts.
+
+**Why in-flight provider calls are abandoned rather than awaited.** A call already sent has an unknown
+outcome, and waiting does not make it known — it makes it slower and then still unknown, because the
+answer may never come. The queue already has the machinery for this: NFR-17 requires the adapter to
+reconcile against server state before retrying rather than blindly replaying, and that path runs on the
+next launch regardless of how this one ended.
+
+**What quit MUST do, in order:** stop accepting new intents; tear down the body view, so no engine
+process outlives the one that owns it; check-point and close the stores, which is the only step whose
+omission costs anything, and costs recovery time rather than data; release the credential material held
+in memory; exit.
+
+**A quit MUST NOT block on [D-48](view-protocol.md)'s cancellation.** Cancellation rendezvous with
+worker-side work and can wait; a quit that cancelled every live observation first would make the exit
+path's duration depend on whatever query happened to be running. Teardown discards observations by
+advancing their generation, which is [D-66](view-protocol.md)'s mechanism used in the direction it is
+already correct for.
+
+**The bound exists because the ordered path can hang.** A store that will not close, a body view that
+will not tear down, and a blocking-pool task that will not return are all possible, and a quit that waits
+forever is the behaviour FR-25 exists to prevent wearing the opposite costume — the user asked to quit
+and the application did not. When the bound expires the process exits, which is a crash by another name,
+which NFR-16 already covers.
+
+**What it costs:** an unclean exit is a supported outcome rather than an exceptional one, so the recovery
+path runs often enough to be ordinary — which is the argument for it, since a recovery path that never
+runs is one nobody has tested.
+
+**Contestable because:** it makes "quit" and "kill" nearly the same operation, and a reader may
+reasonably want the deliberate exit to be the tidy one. The answer is that tidiness here would be
+decorative: it would improve the case that is already safe and leave the case that is not.
+
+## D-71 — A failure that is not an account's belongs to the process, and some refuse rather than degrade
+
+**Chosen:** a second, process-scoped condition set beside [D-49](../runtime/failure-model.md)'s
+account-scoped one; a subsystem whose absence weakens a **security** guarantee causes a refusal, and one
+whose absence weakens a **resource or feature** guarantee causes a visible degradation.
+**Rejected:** widening the account conditions to carry process failures; treating a failed subsystem as a
+condition of every account at once.
+
+**Why account conditions cannot carry these.** D-49 makes the annunciator per account deliberately, and
+its own text puts offline outside the table because it is *"a property of the network rather than of an
+account"*. The same reasoning excludes every subsystem failure: the filter lists failing to parse, the
+body view's content process failing to spawn, the pressure-signal source failing to subscribe, the timing
+wheel or the tagging allocator failing to start, and the URI-scheme registration not installing — which
+[credentials](../security/credentials.md) already concedes is *"a first-run failure with no obvious
+diagnosis"* and then specifies no behaviour for. Reporting any of them as a fault of all five accounts
+would be false, and reporting them nowhere is what the design did.
+
+**The split, and why it is not uniform.**
+
+| Subsystem absent | Kind | Behaviour |
+|---|---|---|
+| The credential store | security | **Refuse.** Already stated: [failure model](../runtime/failure-model.md) enters *storage unavailable* for every account |
+| The filter engine's lists | security | **Degrade, visibly and safely.** [Content blocking](../rendering/content-blocking.md) already rules that an absent authority denies, so the failure direction is a message with missing images. The process-scoped condition is what says so rather than leaving it silent |
+| The body view | feature | **Degrade.** A message falls back to [FR-9](../rendering/pipeline.md)'s plain-text and raw views, which exist and are the same answer D-47 gives for a failed pipeline stage |
+| The pressure-signal source | resource | **Degrade, and say so.** Sift then runs with no governor while claiming NFR-8 and NFR-9, which it cannot honour; caches keep their own budgets, so the loss is the shed tiers rather than every bound |
+| The scheduler's timing wheel | resource | **Refuse.** Without it there is no coalesced work at all, and the fallback an implementer would reach for is the per-account sleep loop [scheduling](../runtime/scheduling.md) prohibits outright |
+| The URI-scheme registration | security | **Refuse to begin an authorization**, and say why. [D-36](../security/credentials.md) returns the callback through that scheme; starting a flow whose answer cannot arrive teaches the user their credentials failed |
+
+**Why security absences refuse and feature absences degrade.** A degraded feature is a smaller product;
+a degraded security guarantee is the same product making a claim that is no longer true. This set's
+constraints are stated as absolutes — no script, no unrequested egress, credentials only in the OS store,
+never a listening socket — and a build that keeps running with one of them unenforceable is not degraded,
+it is wrong. The filter engine is the instructive case: it looks like a security subsystem and its
+absence is safe, because the design already made the failure direction deny rather than allow.
+
+**What it costs:** a second condition scope, which is a second thing a shell renders and a second place a
+reader has to look before answering "what can be wrong".
+
+**Contestable because:** two scopes invite a third, and the honest risk is that "process condition"
+becomes where anything awkward is filed. The defence is that the set above is closed and each entry names
+the guarantee it protects; an entry that cannot name one does not belong.
+
+## D-72 — View state is durable, and losing it is never an error
+
+**Chosen:** window count and geometry, each window's folder or account, sort and grouping, and the
+reader's open message are **durable installation policy**, written through the boundary by the shell and
+restored on launch. Scroll position and an in-progress search are **not** restored.
+**Rejected:** holding view state only in a live shell; restoring everything including transient state.
+
+**Why anything is restored.** [L3](../runtime/memory-pressure.md) destroys every window and repaints
+*"from cold on next activation"*, and [presentation layer](presentation-layer.md) forbids the layer to
+hold *"state that only a live shell can reconstruct"*. Both are satisfied by losing all of it, which is
+what the design said, and which means a memory-pressure event silently rearranges the user's workspace.
+The same gap covers quit-and-relaunch, where NFR-1's *"interactive list"* presupposes some restored
+context and never said which.
+
+**Why durable rather than in-layer.** Making it durable is what satisfies the presentation layer's rule
+rather than bending it: state read back from the store is not state only a live shell can reconstruct.
+[Data model](../storage/data-model.md) enumerates nine kinds of durable user decision and this was not
+among them; it is installation-scoped because a window is not an account's.
+
+**Why scroll position and a running search are excluded.** They are the two whose restoration is worse
+than their loss. A restored scroll position in a list that has changed underneath is a position in
+different mail; a restored search is a query re-run against a store that has moved on, presented as
+though the user had just typed it. Both fail by looking correct.
+
+**Losing view state is never an error, and MUST NOT produce a state.** It is the one durable thing in
+this design whose absence has an obviously right answer — one window, the default folder, default sort —
+so a shell that finds none restores that and says nothing. This is the exception to the register's
+general rule, and it is stated because the alternative is an error nobody can act on.
+
+**What it costs:** writes on window movement, which MUST be coalesced rather than issued per event, for
+the reason [scheduling](../runtime/scheduling.md) gives about everything else that happens continuously.
+
+**Contestable because:** restoring the reader's open message means a launch that opens a message, which
+runs the pipeline and spawns a body view on the cold-start path NFR-1 measures. The alternative — restore
+the folder and not the message — is defensible and loses the thing users most often want back.
 
 ## Related
 
