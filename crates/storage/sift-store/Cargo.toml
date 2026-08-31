@@ -21,3 +21,10 @@ todo = "warn"
 dbg_macro = "deny"
 
 [dependencies]
+sift-foundation.workspace = true
+sift-crypto.workspace = true
+# D-21 names SQLite explicitly, which is the case where a dependency is named because the
+# choice *is* the architectural decision. Bundled so the version is Sift's rather than the
+# platform's — D-15 pins the rendering engine for the same reason, and a store format that
+# moved with the OS would be worse.
+rusqlite = { version = "0.37", features = ["bundled", "blob"] }

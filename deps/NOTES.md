@@ -99,3 +99,28 @@ blob bytes.
 
 Constant-time comparison primitives. `BSD-3-Clause`. No unsafe of consequence, no floor,
 no syscalls.
+
+---
+
+## `rusqlite` and the SQLite tree beneath it
+
+**Reached by:** `sift-store`. D-21 names SQLite explicitly, which is the case
+`docs/build/README.md` describes as a dependency named "where the choice **is** the
+decision".
+
+- **Unsafe.** Extensive, and expected: this is the C engine's FFI, which is **one of the
+  four places `docs/architecture/overview.md` permits unsafe**. It does not widen the
+  exception.
+- **Is it on a hostile-input path?** No, and D-21 argues this deliberately: the mitigation
+  for naming a C dependency is that **the database never parses attacker-controlled bytes**.
+  Everything reaching it has already been through the rendering pipeline, and what is stored
+  is normalized text and Sift's own identifiers.
+- **`bundled`.** The engine is compiled from vendored source rather than linked against the
+  platform's. This is the same argument D-15 makes for pinning WebKitGTK under Flatpak:
+  version skew in a component that owns the on-disk format is worse than owning the update
+  cadence. It also means the store format is Sift's rather than moving with an OS update.
+  It does compile C, unlike blake3 — unavoidable, since SQLite *is* C.
+- **Licence.** `MIT` for rusqlite; SQLite itself is public domain. Clears the allowlist.
+- **Floor.** None above Sift's.
+- **Threads, timers, sockets.** No sockets. SQLite's own threading is configured through
+  pragmas rather than by spawning; nothing here arms a timer, which is what NFR-11 counts.
