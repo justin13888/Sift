@@ -24,7 +24,7 @@ the definition here wins.
 | **Capability** | A declared property of a provider account that the sync engine, mutation queue, and UI plan against, in place of the provider's name |
 | **Synthetic origin** | The first-party origin derived from authenticated sender identity, because an email has no document origin. See [sender origin](rendering/sender-origin.md) |
 | **Shed tier** | One of the L0–L3 memory-pressure response levels. See [memory pressure](runtime/memory-pressure.md) |
-| **Policy tier** | One of the Unrestricted / Conservative / Minimal / Offline network behaviour levels. See [network conditions](runtime/network-conditions.md) |
+| **Policy tier** | One of the Unrestricted / Conservative / Minimal / Offline-portal / Offline-no-path network behaviour levels. See [network conditions](runtime/network-conditions.md) |
 | **Footprint** | The memory metric Sift is measured by: `phys_footprint` on macOS, PSS on Linux. Never RSS. See [observability](runtime/observability.md) |
 | **Fidelity corpus** | The real-world message set that rendering correctness is gated on. Distinct from the scale corpus used for performance. See [reference environment](product/reference-environment.md) |
 | **Seam** | The named place a deferred feature would enter, recorded so that adding it later is an append rather than a redesign. Required of anything in [scope](product/scope.md)'s deferred list |
