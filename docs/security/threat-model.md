@@ -24,7 +24,7 @@ a malicious provider, and physical attacks against a running machine.
 | HTML body | the sanitizer, then the body view | [sanitizer invariants](../rendering/sanitizer-invariants.md) I1–I10 |
 | CSS | the sanitizer, the blocker, the dark transform | parsed as a tree, fetching positions enumerated explicitly |
 | Remote resource URLs | the resource broker | blocked by default; [content blocking](../rendering/content-blocking.md) |
-| Images | the decoder, in the broker | bounded decode; classification cached by content hash |
+| Images | the decoder, **in the resident process** | bounded decode; classification cached by content hash. The placement is [an open question](../open-questions.md) |
 | Link targets | the confirmation UI | punycode decoding and bidi stripping — [link handling](../rendering/link-handling.md) |
 | Filter lists | the filter engine, and generated stylesheets | stale-tolerant; never blocking; fetched over the network policy tier. **Integrity is an open gap** — see below |
 
@@ -46,6 +46,12 @@ degradation, not an incident:
 - A sanitizer URL-rewriting failure is backstopped by the body view having no network capability.
 - A blocker rule failure is backstopped by compiled engine-level content rules from the same source.
 - A containment failure is backstopped by the body rendering in its own document with its own data store.
+
+**One attacker-controlled input in the table above reaches no layer at all.** Image bytes are decoded in
+the core for classification under [D-29](../rendering/content-blocking.md), so a decoder defect is a
+memory-safety bug in the resident process rather than a degradation something else catches — and it is the
+one hostile input the design hands to the trusted half of the system rather than the disposable half. That
+placement is tracked as [an open question](../open-questions.md).
 
 The invariants **without** a backstop — idempotence, boundedness, parse stability, no content invention,
 encoding determinism — are where review attention belongs. See

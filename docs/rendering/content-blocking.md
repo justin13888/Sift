@@ -152,6 +152,21 @@ script, so metadata is inert there.
 format to test, and metadata stripped by construction. If the fidelity corpus shows the engine's decoders
 are the weak point rather than Sift's, that argument wins.
 
+**The placement question is separate from the transcoding question, and it is the sharper of the two.**
+Decoding "in the broker" means decoding in the core, and under [D-2](../architecture/process-model.md) the
+core is the single resident process holding every account's sync state, its mutation queue, and credential
+material read out of the OS store to be used. The path this decision declined — letting the engine
+decode — puts the same hostile bytes in WebKit's own content process: sandboxed, out of process, and
+destroyed on teardown under NFR-46.
+
+Read that way the asymmetry in the paragraph above runs opposite to how it reads. The question is not
+whether Sift's decoders might turn out better than the engine's. It is that Sift's run **unsandboxed in
+the process NFR-19 exists to protect**, while the engine's run in the one component the design is built to
+kill and respawn. [D-8](../architecture/overview.md)'s argument for Rust on hostile-input paths applies
+here at its strongest, and this is also where mature Rust decoders are least available for the formats
+mail actually carries. Left as it stands the placement is [an open question](../open-questions.md), not a
+settled trade.
+
 ## Prefetch
 
 **If the broker prefetches remote images, that prefetch *is* the tracking event.** Prefetch MUST be gated

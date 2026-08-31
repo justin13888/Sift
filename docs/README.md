@@ -97,7 +97,7 @@ contestable. A decision without its counter-argument is an assertion.
 **Open questions are not resolved by deletion.** Answering one means writing the answer into its owning
 document and striking the entry in [open questions](open-questions.md) with a pointer.
 
-**The design is settled *pending* five open questions, three of which are load-bearing. That is a weaker
+**The design is settled *pending* six open questions, four of which are load-bearing. That is a weaker
 claim than settled, and the distinction between the two groups is the useful part.**
 
 The three that can still move the design: Q-10 leaves every number in this set unfalsifiable until the
@@ -108,8 +108,12 @@ usually described as a set of numbers needing measurement, but [its own entry](o
 model, which is the second document in the reading order and the thing most of the rest hangs from. A
 question that can reverse a settled structural decision is not bounded, whatever its units.
 
-The other two are bounded. Q-9 needs a number per provider and now has a rule that makes its absence legal
-in the meantime. Q-13 asks whether one feature works on one platform. Neither reaches a decision.
+Q-14 joins them for the same reason. It asks where hostile image bytes are decoded, and one of its three
+answers is "in a separate process" — which is D-2 again, arrived at from the rendering side rather than
+the memory one.
+
+The remaining two are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
+legal in the meantime. Q-13 asks whether one feature works on one platform. Neither reaches a decision.
 
 Q-8 — the fallback join when the internet message identifier is absent or duplicated — was the fourth, and
 is now [D-44](storage/data-model.md). What it leaves behind is a risk rather than a question: R-5, that
