@@ -840,6 +840,10 @@ dependencies = [
 [[package]]
 name = "sift-blobs"
 version = "0.1.0"
+dependencies = [
+ "sift-crypto",
+ "sift-foundation",
+]
 
 [[package]]
 name = "sift-block"
@@ -895,6 +899,10 @@ version = "0.1.0"
 [[package]]
 name = "sift-governor"
 version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+ "sift-subsystem",
+]
 
 [[package]]
 name = "sift-graph"
@@ -923,6 +931,10 @@ version = "0.1.0"
 [[package]]
 name = "sift-index"
 version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+ "unicode-normalization",
+]
 
 [[package]]
 name = "sift-jmap"
@@ -946,6 +958,9 @@ dependencies = [
 [[package]]
 name = "sift-net"
 version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+]
 
 [[package]]
 name = "sift-observe"

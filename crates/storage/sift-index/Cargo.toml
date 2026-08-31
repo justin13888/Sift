@@ -12,3 +12,5 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+sift-foundation.workspace = true
+unicode-normalization = "0.1"
