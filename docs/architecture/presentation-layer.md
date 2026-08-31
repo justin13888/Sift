@@ -2,7 +2,7 @@
 
 The shared Rust layer that makes two native shells affordable.
 
-**Owns:** D-4, D-18, D-41, D-55, D-56, FR-7, FR-40, NFR-51, NFR-54.
+**Owns:** D-4, D-18, D-41, D-55, D-56, D-99, D-100, FR-7, FR-40, NFR-51, NFR-54.
 
 ## Purpose
 
@@ -220,11 +220,104 @@ addressing a user incorrectly rather than merely formatting a value oddly.
 Translation of interface strings is a separate concern belonging to each shell. This requirement is about
 the layer beneath them not foreclosing it.
 
+## D-99 — Multi-selection, the query selection, and what a mixed selection can do
+
+**Chosen:** selection is a set keyed on local identity, per window, with an anchor for range extension; it
+survives a sort or grouping change and is cleared by a folder, account or search change. A selection over
+search results MAY instead be a **query selection** — the query and a count, never an enumerated list.
+Affordances over a selection spanning accounts resolve to the **intersection** of those accounts'
+capabilities.
+**Rejected:** enumerating a large result selection; taking the union of capabilities; refusing a
+cross-account selection.
+
+**Why this needed writing.** This layer's opening list promises *"selection state and multi-selection
+semantics — see below"*, and every rule below it is about a single selection: opening a folder selects
+nothing, selection keys on identity, a departed message clears it. The multi-selection half was promised
+and never delivered, in a layer both shells bind to.
+
+**Anchor and extension, and what survives.** A range extends from an anchor set by the last unextended
+selection, which is the behaviour both toolkits' users expect and neither toolkit decides. **A sort or
+grouping change preserves the selection** because it is keyed on identity rather than position — the same
+argument the single-selection rule already makes about row indices. **A folder, account or search change
+clears it**, because a selection carried across a scope change is a set of messages the user can no
+longer see, and the next keystroke would act on it.
+
+**The query selection is a different kind, and the ABI has to know it.**
+[FR-17](../mail/mutations.md) requires bulk operations over *"selections and search results"*, and a
+result set at the 500,000 messages [NFR-5](../storage/search.md) is measured over is not something to
+enumerate — not across the boundary, not in memory, and not into five hundred thousand rows of
+[D-85](../mail/mutations.md) queue. So "everything matching this query" crosses as the query and a count,
+and is expanded per account at flush time, inside the batching
+[FR-17](../mail/mutations.md) already requires.
+
+**It is expanded once, and what it expanded to is recorded.** A query re-evaluated at flush time would
+act on a different set than the user saw — mail arrives between the gesture and the flush — so expansion
+happens when the gesture is made, and the resulting identities are what the intents and the
+[D-85](../mail/mutations.md) undo group carry. The count shown to the user is therefore the count acted
+on, which is the only version of this a confirmation dialog can honestly state.
+
+**A mixed selection resolves to the intersection.** In the unified inbox (D-4 above) a
+selection can span accounts with different declared capabilities, and three answers were available. The
+union offers an action that will fail for some of the selection, which
+[provider model](../mail/provider-model.md) forbids in principle — an affordance that is absent when
+unsupported cannot be present when unsupported for half the selection. Refusing cross-account selection
+makes the flagship view untriageable in bulk, which is what it exists for. **The intersection is the only
+answer where every offered action applies to everything selected**, which is the property a user assumes
+without being told.
+
+**What it costs:** a second selection kind on the boundary, and an intersection that silently shrinks the
+available actions as a selection widens — a user who adds one IMAP message to a Gmail selection loses the
+tag action with nothing saying why.
+
+**Contestable because:** that last effect is genuinely confusing, and showing the union with per-message
+failure afterwards is how several mail clients behave. It is rejected because the failures arrive later,
+individually, as [FR-16](../mail/mutations.md) conflicts the user cannot connect to the gesture that
+caused them.
+
+## D-100 — Bidirectional text is isolated, and normalization precedes truncation
+
+**Chosen:** bidirectional control characters are **isolated**, not stripped; normalization runs **before**
+[L-16](../limits.md)'s truncation; and the normalized form is the form
+[FR-19](../storage/search.md) indexes.
+**Rejected:** stripping bidi controls; truncating first; normalizing for display only.
+
+**Why isolate rather than strip.** NFR-54 below says *"stripped or isolated"*, and those are two different
+products. Stripping removes the controls that make legitimate Arabic and Hebrew subjects read correctly,
+so a defence against spoofing becomes a bug for every user who receives mail in those languages —
+in a requirement that sits beside NFR-51's locale-awareness-from-the-first-commit. **Isolation neutralizes
+the attack without altering the text**: the run cannot escape its own bounds to reorder the chrome around
+it, and inside those bounds it renders as its author intended. That is what
+[link handling](../rendering/link-handling.md) is reaching for when it warns that a naive treatment *"is
+worse"*, applied to headers rather than to URLs.
+
+**Why normalization must precede truncation.** L-16 bounds a snippet and NFR-54 bounds display lengths, and
+if truncation runs first it can cut a value in the middle of an isolate — producing an unbalanced control
+sequence, which is precisely the state isolation exists to prevent, manufactured by Sift's own bound. It
+can also split a grapheme. Normalizing first and truncating the normalized form at a grapheme boundary is
+the only order in which both properties hold, and it is the order an implementer optimizing for "bound it
+early, cheaply" would get backwards.
+
+**Why the indexed form is the normalized form.** [D-81](../storage/search.md) already pins the index's
+normalization form to this requirement's. Stating the direction here closes the loop: what a user sees is
+what is indexed, so searching for exactly the string on screen finds it. The alternative fails
+invisibly — two forms that are visually identical and compare unequal.
+
+**What it costs:** isolation is more work than deletion and produces text a naive downstream consumer can
+still mishandle, so the property holds only as far as the boundary. Beyond it, the shells render what they
+are given.
+
+**Contestable because:** isolating leaves attacker-chosen control characters in the string, and a reviewer
+looking for the safest possible answer would strip. The defence is that safety measured only against the
+attack ignores the users the attack is not about, and this set already refuses that trade in
+[dark mode](../rendering/dark-mode.md) and in [I9](../rendering/sanitizer-invariants.md)'s refusal to
+invent text.
+
 ## NFR-54 — Untrusted text is normalized once, here
 
 **NFR-54.** Every attacker-controlled string this layer emits — sender and recipient display names,
 subject, snippet, folder and tag names, attachment names — MUST be normalized before it crosses the
-boundary: bidirectional control characters stripped or isolated, other control characters removed,
+boundary: bidirectional control characters **isolated** under D-100 above, other control characters
+removed,
 internationalized domains rendered under the same rules as a URL, and length bounded. Where a display name
 is shown, the address MUST be shown alongside it and MUST NOT be replaced by it.
 
