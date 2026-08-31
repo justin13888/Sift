@@ -16,7 +16,7 @@ them.
 2. [Architecture overview](architecture/overview.md) — the one structural claim everything follows from
 3. [Provider model](mail/provider-model.md) — how four providers become one abstraction
 4. [Rendering pipeline](rendering/pipeline.md) — how attacker-controlled input becomes pixels
-5. [Decisions](decisions.md) — the forty-three calls that shaped the rest, and where each is weak
+5. [Decisions](decisions.md) — the fifty-eight calls that shaped the rest, and where each is weak
 
 ## Indexes
 
@@ -105,7 +105,7 @@ contestable. A decision without its counter-argument is an assertion.
 **Open questions are not resolved by deletion.** Answering one means writing the answer into its owning
 document and striking the entry in [open questions](open-questions.md) with a pointer.
 
-**The design is settled *pending* eight open questions, five of which are load-bearing. That is a weaker
+**The design is settled *pending* ten open questions, five of which are load-bearing. That is a weaker
 claim than settled, and the distinction between the two groups is the useful part.**
 
 The three that can still move the design: Q-10 leaves every number in this set unfalsifiable until the
@@ -122,11 +122,16 @@ the memory one. Q-15 is the third of this kind: it observes that D-27's resolved
 viewport width while the transform built from it does not, and one of its answers is to drop media queries
 from the cascade — which is D-27 being narrowed by a case D-27 did not consider.
 
-The remaining three are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
-legal in the meantime. Q-13 asks whether one feature works on one platform. Q-16 asks what licence the App
-Store channel requires — bounded because no architecture moves on the answer, and the most urgent item on
-this page regardless, because it is the only one that cannot be revisited: its deadline is the first
-external contribution. None of the three reaches a decision.
+The remaining five are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
+legal in the meantime. Q-13 asks whether one feature works on one platform. Q-18 asks what the list
+endpoint's address and payload commit Sift to, given that nothing self-updates.
+
+Two of the five are bounded in design terms and urgent in every other sense, because they are the ones
+that cannot be revisited. Q-16 asks what licence the App Store channel requires of Sift's own code; its
+deadline is the first external contribution. **Q-17 is the same deadline reached from outside** — the
+licences of the filter lists, the sender-infrastructure list and the fonts Sift bundles but does not own,
+which no contributor agreement can reach and which ship inside the binary. Neither reaches a decision, and
+shipping is what spends them.
 
 Q-8 — the fallback join when the internet message identifier is absent or duplicated — was the fourth, and
 is now [D-44](storage/data-model.md). What it leaves behind is a risk rather than a question: R-5, that

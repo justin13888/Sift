@@ -204,9 +204,10 @@ system-wide store readable by any administrator, and its redaction is opt-out pe
 than opt-in — so a sender address logged with the wrong specifier is published outside Sift's control, and
 cannot be unpublished on a machine that already ran that build.
 
-**A log is the one unbounded thing the no-unbounded rule does not reach.** [Memory
-pressure](../runtime/memory-pressure.md) requires every cache to declare a budget and NFR-14 hard-caps the
-disk, and neither reaches a log file — in a process designed to run for fourteen days at a time.
+**A log is the one unbounded thing the no-unbounded rule does not reach.**
+[Memory pressure](../runtime/memory-pressure.md) requires every cache to declare a budget and NFR-14
+hard-caps the disk, and neither reaches a log file — in a process designed to run for fourteen days at a
+time.
 
 Nothing here restricts what the [debug views](../runtime/observability.md) may show. Those are local
 surfaces that transmit nothing and are read by the user in front of the machine; a log is a file that

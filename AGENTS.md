@@ -43,6 +43,10 @@ breaking one, stop and say so.
 | What loads a message's images, and how is that decided? | [architecture/resource-broker](docs/architecture/resource-broker.md) |
 | Is X out of scope, or just not built yet? | [product/scope](docs/product/scope.md) — non-goals versus deferred-with-a-seam |
 | What are the memory, CPU, and network budgets? | [requirements](docs/requirements.md) |
+| What is the numeric bound on X, and what happens when it is exceeded? | [limits](docs/limits.md) |
+| What can be wrong with an account, and how is the user told? | [runtime/failure-model](docs/runtime/failure-model.md) |
+| What does a shell have to honour to call across the boundary? | [architecture/view-protocol](docs/architecture/view-protocol.md) |
+| Which macOS version, which architecture, which identifiers are permanent? | [product/platform-baseline](docs/product/platform-baseline.md) |
 | Why was X chosen over Y? | [decisions](docs/decisions.md) |
 | What is still undecided? | [open-questions](docs/open-questions.md) |
 | What does this term mean here? | [glossary](docs/glossary.md) |
