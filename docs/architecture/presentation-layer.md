@@ -56,6 +56,33 @@ hard, not merely tedious.
 **FR-7.** A unified inbox across accounts. Threads MUST NOT span accounts, see
 [threading](../mail/threading.md).
 
+### The unified inbox shows cross-account duplicates
+
+This is a decision rather than an oversight, and it is the most visible day-one consequence of three
+decisions made elsewhere, so it is stated here where the user meets it.
+
+A message delivered to two of the user's addresses — a mailing list is the ordinary case, not the exotic
+one — is two messages in two accounts with two local identities. [Threading](../mail/threading.md) forbids
+merging threads across accounts, and [D-44](../storage/data-model.md) scopes every identity join to within
+a single account. Nothing in the design can collapse the pair. So in the flagship view of a multi-account
+client the user sees both copies, and archiving one does nothing to the other.
+
+The alternative was rejected in those documents rather than this one: a cross-account join would have to
+key on the internet message identifier, which [R-5](../open-questions.md) says is not reliably unique, and
+a false join is unrecoverable under FR-13 because the next archive or delete reaches mail the user never
+saw. Duplicate display is the failure that stays visible and costs nothing. It is chosen.
+
+What this layer owes the user is that the duplication is **legible rather than mysterious**. Where the
+same message is present in more than one account, the merged view MUST mark the copies as such rather than
+presenting them as unrelated arrivals. This is [FR-12](../storage/cache-and-blobs.md)'s rule about
+distinguishing "not cached" from "not available" applied to a different confusion: the user is entitled to
+know which of two odd-looking states they are in.
+
+**Marking is not joining.** The two messages stay two entities, a mutation applies only to the one it was
+issued against, and the marking is a display property computed at merge time by comparing the fallback
+identity digests D-44 already stores. Nothing durable is written, and no candidate crosses an account
+boundary.
+
 ## D-18 — View models are observed, and observation is cancellable
 
 **Chosen:** the shells register observers over a declared window of a result set and receive change
