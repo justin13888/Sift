@@ -1,0 +1,20 @@
+# The Sift page format, version 1 — the definition, in bytes.
+#
+# D-75 requires one portable interface producing one byte-identical on-disk format
+# on macOS and on Linux, and docs/build/verification.md requires this check exist
+# from the first commit rather than after the first divergence. R-16 is why: two
+# implementations of one format can disagree, and the disagreement is silent — it
+# writes a store the other platform cannot read, or reads one incorrectly.
+#
+# A platform backend that produces different bytes for these inputs is wrong,
+# however audited its cipher is.
+#
+# Inputs: page number 7, write counter 42.
+# Regenerate with `cargo run -p sift-crypto --example bless-fixtures` — but read
+# that file's header first, because regenerating is almost never the right answer.
+
+key = 4242424242424242424242424242424242424242424242424242424242424242
+key_id = abababababababababababababababab
+plaintext = 53514c69746520666f726d617420330020612070616765206f66206120536966742073746f7265
+header = 53494654504730310001abababababababababababababababab000000000000002a000000000000000000000000000000000000000000000000000000000000
+sealed = 000000000000002a7579c8759cf819f1b35bd5564a71aae2d0d0aa8b858a7cb54c3f5f67dad2b5a8d67f90c4ab8b8efe350e1c76d8ba5e735880d913daad57

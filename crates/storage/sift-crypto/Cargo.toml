@@ -11,6 +11,9 @@ rust-version.workspace = true
 # One of the four places overview.md permits unsafe code. It does not take the
 # workspace lint set, and `cargo xtask arch` asserts that the set of crates doing so
 # is exactly those four.
+[[example]]
+name = "bless-fixtures"
+
 [lints.rust]
 unsafe_code = "allow"
 missing_debug_implementations = "warn"
@@ -21,3 +24,18 @@ todo = "warn"
 dbg_macro = "deny"
 
 [dependencies]
+sift-foundation.workspace = true
+# D-23's content address and D-43's keyed derivation. Chosen "to avoid a hardware mandate
+# rather than for speed" — the SHA extensions a SHA-256 choice would want arrived late on
+# mainstream Intel mobile, later than the 2020-era reference laptop.
+# `pure` turns off the hand-written SIMD assembly. That costs throughput and buys two
+# things D-23 cares about more: it removes a C toolchain from the build, and it takes an
+# unsafe SIMD path off a surface that hashes attacker-influenced blob bytes. D-23 is
+# explicit that BLAKE3 was chosen "to avoid a hardware mandate rather than for speed" and
+# that "nothing hashes at idle" — hashing a body is a rounding error against NFR-3's 80 ms
+# and hashing a large attachment is under 2% of its transfer time. So the assembly is
+# paying for a property this design does not want.
+blake3 = { version = "1", default-features = false, features = ["std", "pure"] }
+# The AEAD construction. See page.rs for why AES-256-GCM and not another.
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+subtle = "2"

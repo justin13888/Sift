@@ -68,6 +68,11 @@ private = { ignore = true }
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace-internal path dependencies carry no version and are not the thing this rule is
+# for: it exists to catch `foo = "*"` against a registry, where any future release is
+# accepted sight unseen. A path dependency inside this workspace is reviewed by the crate
+# graph check instead.
+allow-wildcard-paths = true
 
 deny = [
     # D-8: no garbage-collected runtime and no language shim to reach a provider SDK.
