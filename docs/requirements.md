@@ -11,6 +11,10 @@ and tests. A requirement that is dropped is struck through here with a reason; i
 All performance and resource figures are **hypotheses to be validated** against the
 [reference environment](product/reference-environment.md), never measured facts.
 
+**Phase assignment is not here.** Which phase ships or gates a requirement is owned by the
+[roadmap](product/roadmap.md), which carries the coverage table. Restating it here would give the mapping
+two homes and one of them would go stale.
+
 ## Functional requirements
 
 | ID | Requirement | Owner |
