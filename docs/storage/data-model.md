@@ -228,6 +228,19 @@ expensive, network-free-but-not-free resync that NFR-18 works to avoid.
 only recovery is account removal and resync. For a cache-shaped store that is defensible; a reader who
 finds it indefensible should argue for reversible migrations, not for additive-only.
 
+**The store is cache-shaped in every place but one, and that is where this costs something.** NFR-48 below
+preserves queued mutations across an *upgrade*. Nothing preserves them across the downgrade this decision
+makes unsupported, because the stated recovery is removal and resync, and a resync restores what the
+provider knows. A queued mutation is exactly what the provider does not know yet. So a downgrade after a
+migration discards writes the user watched succeed — the one failure [mutations](../mail/mutations.md)
+says the queue exists to prevent, arriving down a path that document does not cover.
+
+That is not an argument for reversing D-32. It is a requirement on the recovery path: removal-and-resync
+after a refused open MUST drain or export the queue before it destroys the database, and MUST NOT do
+neither silently. The exposure is also uneven across channels, which is worth knowing before judging how
+theoretical it is — the Mac App Store offers users no way to downgrade, while Homebrew Cask and Flatpak
+both do. See [platforms and distribution](../product/platforms-and-distribution.md).
+
 **NFR-48.** A schema migration MUST preserve envelopes, cached blobs, queued mutations, unflushed read
 state, and **both scopes of policy state above**, and MUST NOT require a resynchronization from the
 provider. Serialized intents carry their own
