@@ -2,7 +2,7 @@
 
 What screens exist, what a window is, and how a user reaches everything.
 
-**Owns:** D-97, D-98.
+**Owns:** D-97, D-98, D-101.
 
 [UI shell](ui-shell.md) argues why the shells are native and states the requirements they must satisfy.
 It describes no screen. The set implies more than twenty surfaces, names several of them inside
@@ -175,6 +175,70 @@ user with a Gmail account and an IMAP account will find that the same keystroke 
 them with no visible reason. Showing them disabled would explain it — at the cost of advertising
 capabilities the account does not have, which provider-model chose against for the affordance and this
 follows for the action.
+
+## D-101 — Settings are enumerated with their defaults, and the scope split is the storage split
+
+**Chosen:** the settings surface is enumerated here, every setting has a stated default, and it is
+organized by the **scope** [data model](../storage/data-model.md) already stores it at — installation or
+account — rather than by topic.
+**Rejected:** organizing by topic; leaving defaults to each shell; a settings surface that accretes per
+feature.
+
+**Why enumerate at all.** Roughly a dozen settings are named in passing across this set — *"the budget is
+user-configurable"*, *"the dwell is configurable, including off"*, *"list subscriptions and custom rules
+MUST be user-manageable"* — and several have no value anywhere. Under [D-56](presentation-layer.md) the
+surface is written twice, in Swift and in GTK, so a settings model that accretes per feature ends up
+shaped differently in each, which is *"a capability that exists for one shell and not the other"* by
+another route.
+
+**Why organize by scope.** It is the split that already exists in storage and the split that decides
+behaviour: an account setting disappears with [FR-4](../mail/accounts.md)'s removal and an installation
+setting does not. Organizing by topic would put the cache budget beside the per-sender allowlist, which
+look related and have opposite lifetimes — and the allowlist is the one that matters, because
+[data model](../storage/data-model.md) says it *"is security state, not a preference, and MUST be treated
+as such"*.
+
+### Installation settings
+
+| Setting | Default | Owner |
+|---|---|---|
+| Cache budget for bodies, attachments and blobs | 90 days or 2 GB, whichever binds first | [NFR-14](../storage/cache-and-blobs.md) |
+| Envelope and index budget | L-20 | [NFR-52](../storage/cache-and-blobs.md) |
+| Single-fetch ceiling before confirmation | L-13 | [NFR-39](../runtime/network-conditions.md) |
+| Filter-list subscriptions and custom rules | the standard public blocking and privacy lists, plus the bundled email list, all enabled | [FR-27](../rendering/content-blocking.md) |
+| Dark transform | **off** | [FR-31](../rendering/dark-mode.md), which makes it opt-in by name |
+| Mark-read dwell | L-21, and it may be set to off | [D-52](../mail/mutations.md) |
+| Data cap, and the accounting window | no cap; a 30-day rolling window | [FR-36](../runtime/network-conditions.md) |
+| Per-network overrides | none; detection decides | [FR-35](../runtime/network-conditions.md) |
+| Quiet mode, and notification defaults for new accounts | quiet off; notify on new mail in the inbox only | [FR-23](ui-shell.md) |
+| Debug view and runtime panel | **off** | [FR-33, FR-34](../runtime/observability.md), preference-gated by their own decision |
+
+### Account settings
+
+| Setting | Default | Owner |
+|---|---|---|
+| Watched folder set | the inbox and the account's special-use folders | [FR-43](../runtime/scheduling.md) |
+| Per-folder notification rules | inherited from the installation default at account creation | [FR-23](ui-shell.md) |
+| Paused | not paused, including for an account added while others are paused | [D-95](../runtime/network-conditions.md) |
+| Per-sender remote-content allowlist | empty | [FR-8](../rendering/pipeline.md) — **security state**, and presented as such rather than as a preference list |
+| Per-sender dark-mode choices | empty | [FR-31](../rendering/dark-mode.md) |
+
+**The two per-sender lists are shown but are not edited like preferences.** They are records of decisions
+the user made in context — allowing a sender's images, keeping a sender's own dark styling — and the
+settings surface's job is to make them **reviewable and revocable**, not to invite bulk editing of a
+security-relevant list in a screen away from any message.
+
+**Every default above is a decision that ships**, which is why they are here rather than in each shell. A
+default chosen independently by two shells is two products, and the ones that matter most are the ones
+that look least like decisions: dark transform off, debug off, no cap, allowlist empty.
+
+**What it costs:** a surface that must grow deliberately, and two tables that go stale the first time
+somebody adds a preference without adding a row.
+
+**Contestable because:** organizing by scope is a storage-shaped organization presented to users, who do
+not know what an installation is. The defence is that the tables are the specification rather than the
+layout, and a shell is free to group them for humans — but a shell that *invents* a setting, or ships a
+different default, is the failure this exists to prevent.
 
 ## Related
 

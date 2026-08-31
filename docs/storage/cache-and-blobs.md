@@ -315,8 +315,9 @@ cache undiscardable, which is the property the rest of the design spends.
 within 5%, and the cap MUST be **enforced, never advisory**. A cache that grows forever is not a cache.
 
 **NFR-52.** Envelopes, the message rows carrying them, and their
-[full-text index](search.md) entries MUST stay within a second declared, user-configurable budget, evicted
-oldest-first, with an envelope and its index entry evicted together as one unit.
+[full-text index](search.md) entries MUST stay within a second declared, user-configurable budget,
+defaulting to L-20 in [limits](../limits.md), evicted oldest-first, with an envelope and its index entry
+evicted together as one unit.
 
 **NFR-14 was false as written, and the repair is a coherence fix rather than a measurement.** It said disk
 was bounded by the cache budget and hard-capped, while this document retained envelopes indefinitely and

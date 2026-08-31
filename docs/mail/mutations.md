@@ -180,7 +180,8 @@ nothing can test for, and its failure mode is silent and indistinguishable from 
 
 **Chosen:** read is set when the user selects a message in the reader and it remains selected past a short
 dwell. Never on list traversal, never on hover, and never on a message whose body was not rendered —
-opening a thread marks read only the messages actually shown. The dwell is configurable, including off.
+opening a thread marks read only the messages actually shown. The dwell defaults to L-21 in
+[limits](../limits.md) and is configurable, including off.
 **Rejected:** marking read immediately on selection; never marking read automatically.
 
 **Why this belongs here rather than in a shell.** Marking read is an FR-13 intent, so its trigger decides

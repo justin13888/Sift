@@ -76,6 +76,7 @@ Asserted by the [resource broker](architecture/resource-broker.md), before a dec
 |---|---|---|---|
 | **L-14** | Bytes of a single blob | 2 GB | Above the cache budget's own default, so in practice NFR-14 binds first; this exists so that a single attachment cannot be the thing that makes the budget unenforceable |
 | **L-15** | Characters in a tag name | 256 | The "length and charset limits" the tag capability row in [provider model](mail/provider-model.md) refers to and does not state. The charset is Unicode scalar values excluding control characters, normalized under NFR-54 like every other attacker-controlled string |
+| **L-20** | Default envelope and index budget | 1 GB | The value NFR-52 in [cache and blobs](storage/cache-and-blobs.md) calls user-configurable and does not supply, and which [D-53](mail/sync-engine.md) makes the *sole* bound on first sync. At roughly two kilobytes per message including its index entry it lands near the 500,000 messages [NFR-5](storage/search.md) is measured over, so the benchmark and the shipped default describe the same product rather than two |
 | **L-16** | Characters in a snippet | 280 | Truncated rather than rejected, per the exception above. Bounds the envelope, which NFR-52 in [cache and blobs](storage/cache-and-blobs.md) budgets and which is retained far longer than any body |
 
 ## Time limits
@@ -90,6 +91,7 @@ does rather than how fast it does it.
 
 | **L-18** | Time with no reader visible before the body view is torn down | 30 seconds | The period NFR-46 in [webview isolation](rendering/webview-isolation.md) calls configured and does not supply. Long enough to survive switching folders and returning; short enough that the largest single allocation in the running application does not persist through an interruption. [D-90](rendering/webview-isolation.md) defines what counts as visible |
 
+| **L-21** | Reader dwell before a message is marked read | 2 seconds | The value [D-52](mail/mutations.md) calls "a short configurable dwell" and does not supply, in the decision that argues this number sets the queue write rate, the flush wakeup rate against NFR-11 and the data-cap burn. Longer than arrow-key traversal and shorter than reading, which is the only property it has to have. May be set to off |
 | **L-19** | Time the pressure signal must stay clear before a shed tier is released | 60 seconds | The hysteresis [D-93](runtime/memory-pressure.md) requires. Without it a system oscillating around the threshold reparses the 40 MB filter engine on every crossing. One value serves every tier, which that decision records as its weakest point |
 
 ## Changing a limit
