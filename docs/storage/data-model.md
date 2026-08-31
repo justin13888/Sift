@@ -2,7 +2,7 @@
 
 What Sift stores, and how it is partitioned.
 
-**Owns:** D-6, D-21, D-32, D-44, D-74, NFR-48.
+**Owns:** D-6, D-21, D-32, D-44, D-74, D-78, NFR-48.
 
 ## D-6 — One database per account
 
@@ -215,8 +215,8 @@ hard cap in NFR-14, so the failure mode costs disk that eviction was going to re
 A refcount rebuild from the union of all account references MUST exist, and MUST run after abnormal
 termination. **It MUST also collect blob files the index does not name**, which
 [D-77](cache-and-blobs.md) requires for the reason eviction cannot: eviction reads the index, so a file
-with no row is disk no budget can see. It is a repair path, not the collection mechanism; collection itself runs as part of eviction
-per NFR-14 in [cache and blobs](cache-and-blobs.md).
+with no row is disk no budget can see. It is a repair path, not the collection mechanism; collection
+itself runs as part of eviction per NFR-14 in [cache and blobs](cache-and-blobs.md).
 
 ## Identity
 
@@ -227,6 +227,49 @@ only unique within a folder generation.
 **The internet message identifier is not reliably unique.** Some servers and some senders duplicate it,
 and some omit it. Any deduplication or cross-folder join keyed on it MUST have a defined fallback and MUST
 NOT assume uniqueness. That fallback is D-44 below.
+
+## D-78 — Local identity is globally comparable and time-ordered, without coordination
+
+**Chosen:** local identity is a fixed-width value generated per account with no cross-account
+coordination, ordered by generation time, unique across every account in an installation, never reused,
+and stable for the life of the message.
+**Rejected:** a per-database row identifier; a per-account counter; a single installation-wide counter.
+
+**Why this is not an implementation detail.** [D-55](../architecture/presentation-layer.md) makes local
+identity the tiebreak for the unified inbox's sort, and argues that a merge over independently mutating
+per-account streams *"needs a **total** order"*. Under D-6 each account is a separate file with no
+cross-account SQL, so a per-database row identifier or a per-account counter
+gives values that collide constantly across accounts — five accounts all have a message number seven.
+D-55's tiebreak then does not break ties; it produces an ordering that depends on the order accounts
+happened to be merged, which is exactly the instability D-55 says it must not have.
+
+**Why not one installation-wide counter.** It is the obvious repair and it is the wrong one: it puts a
+write to a shared store on the ingest path of every message in every account, which serializes the
+parallel writers D-6 exists to provide and makes the installation policy store hot during the one
+operation — [D-53](../mail/sync-engine.md)'s backfill — that is already
+the heaviest thing Sift does.
+
+**Why time-ordered rather than random.** A random identifier would satisfy uniqueness and total order and
+would make the tiebreak arbitrary. Ordering by generation time makes it *meaningful*: two messages the
+server stamped with the same received time are ordered by which Sift ingested first, which is the closest
+thing to a real answer available and is stable across restarts and across the merge. It also keeps
+identities that are adjacent in time adjacent in the store, which is the access pattern the list has.
+
+**Stability, and its one exception.** Local identity is stable for as long as the message exists in that
+account, which is what [view protocol](../architecture/view-protocol.md) already permits a shell to rely
+on for selection, the undo stack and notification click-through. **It is never reused after deletion**,
+so a stale identity resolves to nothing rather than to a different message — the failure that would turn
+a queued intent or a notification into an action on unrelated mail. The exception is D-44's: a move that
+does not corroborate to exactly one candidate presents as a delete plus an arrival, and the arrival has a
+new identity.
+
+**What it costs:** a wider key than a row identifier, in every index and every foreign reference in the
+store, and in every row crossing the [C ABI](../architecture/view-protocol.md).
+
+**Contestable because:** the width is paid everywhere and the property is needed in one place — the
+unified inbox merge. An installation-wide counter would be narrower and is only rejected on a contention
+argument that has not been measured, and D-4 itself concedes the unified inbox is the feature to cut if
+the merge dominates. If it is cut, this decision loses its reason.
 
 ## D-44 — Identity joins are corroborated, and an uncorroborated join does not happen
 

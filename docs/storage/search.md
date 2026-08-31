@@ -1,6 +1,6 @@
 # Search
 
-**Owns:** D-5, FR-19, FR-20, FR-21, NFR-5.
+**Owns:** D-5, D-79, FR-19, FR-20, FR-21, NFR-5.
 
 ## D-5 — Local full-text search via the embedded database's FTS extension
 
@@ -58,6 +58,63 @@ failure. What a given account can delegate to the server is a declared capabilit
 
 Server-side search is a network operation and is therefore subject to the active policy tier in
 [network conditions](../runtime/network-conditions.md).
+
+## D-79 — The merge ranks on comparable features, not on scores from different corpora
+
+**Chosen:** the presentation layer orders merged results by a **relevance signal it computes itself**
+from features that do not depend on any one index's corpus statistics; each index's own score is used
+only to order results *within* one account. Where a query carries no relevance signal at all, the order
+falls back to [D-55](../architecture/presentation-layer.md)'s list order.
+**Rejected:** merging on the per-index relevance scores directly; normalizing scores across indexes;
+ordering everything by received time.
+
+**Why the obvious merge is wrong.** FR-19 above scopes search to every account by default and describes
+the mechanism — *"five separate indexes … merged in the
+[presentation layer](../architecture/presentation-layer.md) on every keystroke"*. A full-text relevance
+score is computed against the statistics of the corpus it came from: how rare a term is *in that index*.
+Five accounts are five different corpora, so the same document scores differently depending only on which
+account it landed in, and a term that is rare in a small work account and common in a large personal one
+produces scores that cannot be compared at all. Sorting by them looks like ranking and is closer to
+sorting by account size.
+
+Normalizing them is worse, because it looks principled. There is no shared distribution to normalize
+against, and a per-index rescaling makes the top result of a three-message account outrank a genuinely
+better match in a half-million-message one.
+
+**What the layer computes instead.** Features that mean the same thing in every account: which field
+matched, whether the match was a phrase or scattered terms, how many of the query's terms are present,
+and recency. None of them consults corpus statistics, so all of them are comparable across accounts by
+construction. The per-index score is not discarded — it is the right tool for its own scope, and it
+orders results within one account where the corpus *is* shared.
+
+**Why this is D-5's weak point being made explicit rather than repaired.** D-5 concedes that ranking
+quality is where that choice is weakest and that *"a search that returns the right
+message fourth is a worse product than one that returns it first"*. This decision does not fix that. It
+makes sure the merge does not *add* a second, larger ranking error on top of it — and it is the thing the
+[relevance corpus](../product/reference-environment.md) will actually be measuring, since that corpus is
+defined over real queries against a known mailbox rather than over one account's share of it.
+
+**Server results interleave by the same features, and are labelled.** FR-21's server-side results arrive
+ranked by somebody else's algorithm and usually carry no score at all, so they cannot join a score-based
+merge under any scheme. They can join a feature-based one, because the features are computed from the
+message rather than from the index that found it. Provenance labelling under FR-21 stays exactly as it
+is, and is what lets a user see that the ordering mixed two sources.
+
+**The no-relevance case is not an edge case.** A query of pure structured operators — unread mail in a
+folder, everything with an attachment before a date — has no terms to be relevant about, and a ranking
+built from term features would order it arbitrarily. Falling back to the list order means such a query
+returns the same order the folder would, which is what a user issuing it expects and is already the
+order they read in.
+
+**What it costs:** a second ranking implementation beside the index's own, which must be cheap enough to
+run on every keystroke inside NFR-5's 100 ms over the merged set, and which is one more thing that can be
+wrong about relevance.
+
+**Contestable because:** a hand-built feature ranking is a worse ranker than a well-tuned corpus-aware one
+within a single account, so this trades peak quality for cross-account coherence. If measurement against
+the relevance corpus shows the merged ranking is materially worse than the per-account one, the honest
+retreat is not to normalize scores but to reconsider [D-6](data-model.md)'s per-account databases — which
+is the revisit D-6 already names, arriving from the search side.
 
 ## NFR-5 — Latency
 
