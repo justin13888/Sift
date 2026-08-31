@@ -126,7 +126,8 @@ a message that never arrived.
 
 The blob store is shared across accounts and content-addressed, so a reference count is a property of the
 *store*, not of any one account. It therefore lives in a **shared blob index** alongside the store — hash,
-size, last use, and count — while each account database holds only its own references. The index is
+size, last use, count, and the image classification derived from the content under
+[dark mode](../rendering/dark-mode.md) — while each account database holds only its own references. The index is
 encrypted under the per-installation secret in [D-43](encryption.md); it belongs to no single account, so
 the per-account keys of [D-22](encryption.md) cannot cover it.
 

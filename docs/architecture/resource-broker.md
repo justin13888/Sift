@@ -71,9 +71,10 @@ before any decoder is handed bytes, because a decode bomb reaching Sift is a den
 user's mail under NFR-19. The broker is where the hostile-input posture of the
 [pipeline](../rendering/pipeline.md) continues after sanitization, not where it relaxes.
 
-**Nothing here is a cache exemption.** Classification results are cached by content address so an image is
-classified once ever, and that cache is declared, budgeted, and sheddable like every other — see
-[memory pressure](../runtime/memory-pressure.md).
+**Nothing here is a cache exemption.** The in-memory classification cache is declared, budgeted, and
+sheddable like every other — see [memory pressure](../runtime/memory-pressure.md). What makes an image
+classified *once ever* is not that cache but the durable record beneath it in the shared blob index, which
+the cache reads through to — see [cache and blobs](../storage/cache-and-blobs.md).
 
 ## Egress
 

@@ -83,8 +83,9 @@ reader who thinks the budget is unachievable should say so before the cascade is
    nowhere else under [D-29](content-blocking.md) — so it can compute a histogram and alpha
    coverage, classify the image — photograph, transparent logo, logo baked onto white, screenshot, pixel —
    and act accordingly: never invert photographs, consider inverting transparent logos, leave or
-   light-chip logos baked onto white. The classification is cached **by content hash**, so a given image is
-   classified once ever. See [cache and blobs](../storage/cache-and-blobs.md).
+   light-chip logos baked onto white. The classification is keyed **by content hash** and recorded durably
+   in the shared blob index, so a given image is classified once ever rather than once per shed cycle. See
+   [cache and blobs](../storage/cache-and-blobs.md).
 7. **Provide an escape hatch.** A one-key per-message toggle back to the original, plus per-sender
    persistence.
 

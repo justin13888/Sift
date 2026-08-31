@@ -28,8 +28,21 @@ blob index and its ordering rules are in [data model](data-model.md).
 
 Content addressing gives deduplication for free, which matters more in mail than elsewhere: the same
 attachment arrives repeatedly, in multiple accounts, forwarded and re-forwarded. It also makes the
-[image classification cache](../rendering/dark-mode.md) keyable by content hash, so a given image is
-classified once ever.
+[image classification](../rendering/dark-mode.md) keyable by content hash.
+
+**"Classified once ever" is a claim about durability, and it therefore needs a durable home.** A
+classification is the output of a full decode — the one expensive operation
+[D-29](../rendering/content-blocking.md) exists to avoid — and it is a pure function of the bytes, so
+recomputing it is waste rather than correctness. If it lived only in an in-memory cache, the L1 shed tier
+in [memory pressure](../runtime/memory-pressure.md) would discard it and "once ever" would be false in
+exactly the conditions under which decoding is least affordable.
+
+Classifications are therefore held in the **shared blob index**, beside the hash, size, last use and
+reference count already recorded there — see [data model](data-model.md). The in-memory classification
+cache is a read-through cache over that record, declared and budgeted and sheddable like any other; the
+record beneath it is not. It is a few bytes per distinct image, it is evicted with the blob it describes
+rather than on its own schedule, and it is encrypted under the per-installation secret with the rest of
+the index under [D-43](encryption.md).
 
 Reference counting is what makes [account removal](../mail/accounts.md) correct rather than approximate.
 
