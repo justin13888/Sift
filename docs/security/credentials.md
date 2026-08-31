@@ -74,7 +74,22 @@ a small number of users. Every serious third-party Gmail client has had to solve
 **It MUST be resolved before a line of the Gmail adapter is written** — see
 [roadmap](../product/roadmap.md), where it is a P0 gate.
 
-The escape hatches each reshape the product rather than merely delaying it: ship open-source and require
-each user to supply their own OAuth client identifier, or restrict Gmail support to organizational tenants.
-Neither is a small decision, which is why this is settled first. Tracked in
+The escape hatches each reshape the product rather than merely delaying it, and each one collides with a
+decision made elsewhere. Reading them against that decision is what turns this from a list of options into
+a single question.
+
+**Requiring each user to supply their own OAuth client identifier is incompatible with the App Store
+channel.** [D-33](../product/platforms-and-distribution.md) ships two macOS channels on the argument that
+they reach different people, and it names the App Store as where "everyone else" looks — the non-technical
+half, explicitly. Asking that audience to create a cloud project and paste a client identifier is not a
+first run they complete. So this hatch is available to the Homebrew Cask and Flatpak builds and absent
+from the one channel it would matter most for.
+
+**Restricting Gmail support to organizational tenants** gives up the consumer Gmail user, who is the
+largest single population this product could serve.
+
+What is left once both are read against D-33 is not an engineering choice between three options. It is:
+**fund a recurring third-party security assessment, or ship a client whose largest provider is unreachable
+through its largest channel.** That is a budget question rather than a design one, which is why it is
+settled before the adapter is written rather than discovered during it. Tracked in
 [open questions](../open-questions.md).
