@@ -59,6 +59,7 @@ two homes and one of them would go stale.
 | FR-38 | Thread mutations with defined partial-failure semantics under client fan-out | [mail/mutations](mail/mutations.md) |
 | FR-39 | Report junk and not-junk as intents, where the account declares junk-reporting support | [mail/mutations](mail/mutations.md) |
 | FR-40 | Contact name resolution for display, read-only from the platform contact store | [architecture/presentation-layer](architecture/presentation-layer.md) |
+| FR-41 | Reply, reply-all and forward hand off to the platform's mail handler; Sift never constructs or transmits a message | [product/scope](product/scope.md) |
 
 ## Performance
 

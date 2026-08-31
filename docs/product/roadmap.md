@@ -74,14 +74,14 @@ commit" in its own text.
 |---|---|---|
 | Standing | — | NFR-14, NFR-16, NFR-19, NFR-20, NFR-21, NFR-22, NFR-23, NFR-24, NFR-51 |
 | P0 | — (spikes only) | NFR-8, NFR-9, NFR-12, NFR-44, NFR-45 |
-| P1 | FR-2, FR-5, FR-6, FR-8, FR-9, FR-11, FR-12, FR-13, FR-14, FR-19, FR-22, FR-24, FR-25, FR-28, FR-30, FR-33, FR-34 | NFR-1, NFR-3, NFR-5, NFR-10, NFR-11, NFR-15, NFR-25, NFR-28, NFR-40, NFR-41, NFR-46, NFR-50 |
+| P1 | FR-2, FR-5, FR-6, FR-8, FR-9, FR-11, FR-12, FR-13, FR-14, FR-19, FR-22, FR-24, FR-25, FR-28, FR-30, FR-33, FR-34, FR-41 | NFR-1, NFR-3, NFR-5, NFR-10, NFR-11, NFR-15, NFR-25, NFR-28, NFR-40, NFR-41, NFR-46, NFR-50 |
 | P2 | FR-1, FR-3, FR-4, FR-20, FR-21, FR-37 | NFR-2, NFR-18, NFR-29, NFR-30, NFR-31, NFR-32, NFR-33, NFR-34, NFR-35, NFR-37, NFR-38, NFR-39, NFR-48 |
 | P3 | FR-15, FR-16, FR-17, FR-18, FR-38, FR-39 | NFR-7, NFR-17 |
 | P4 | FR-7, FR-10, FR-23, FR-26, FR-27, FR-29, FR-31, FR-32, FR-35, FR-36, FR-40 | NFR-4, NFR-6, NFR-13, NFR-26, NFR-27, NFR-42, NFR-43, NFR-47, NFR-49 |
 
 NFR-36 is absent because it is struck — see [requirements](../requirements.md).
 
-Nine assignments are not obvious from the phase descriptions, and each is a claim worth disagreeing with:
+Ten assignments are not obvious from the phase descriptions, and each is a claim worth disagreeing with:
 
 **FR-13 and FR-14 are P1, not P3.** The slice ships archive, and archive is an intent applied
 optimistically through a durable queue. The mechanism cannot be added afterwards without rewriting
@@ -115,6 +115,12 @@ P1, under FR-8. Gating NFR-50 three phases later lets it strip every accessibili
 likes with nothing to catch the loss until P4, which is this document's own retrofit argument — made for
 the soak harness in P0 and for NFR-51 from the first commit — running backwards. NFR-27's screen-reader
 support across the list and the reader is genuine P4 work and stays there.
+
+**FR-41 is P1.** The reply handoff looks like polish and is not: it is the answer to "how does a user
+reply from a client that cannot send", and a phase that ships reading without it demonstrates the
+objection rather than the product. It is also the cheapest requirement in the phase — a platform handoff
+with no MIME behind it — so deferring it buys nothing and leaves every P1 evaluation of the vertical slice
+running into the same question.
 
 **FR-4 is P2.** Provable erasure arrives with multiple accounts rather than before them; with one account
 it is untestable in the way that matters, since there is nothing it must leave behind.

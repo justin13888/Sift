@@ -2,7 +2,7 @@
 
 What Sift is, what it will never be, what it defers, and why each boundary is drawn where it is.
 
-**Owns:** D-39.
+**Owns:** D-39, FR-41.
 
 ## Product statement
 
@@ -43,8 +43,34 @@ The constraint degrades through requests that individually sound small. A reply 
 composition needs drafts; drafts need sync; sync needs conflict resolution. Any change that introduces
 an outbound message path is a scope change requiring this document to be amended first.
 
-Sift MAY link to the user's configured mail handler for a reply; it MUST NOT construct or transmit the
-message itself.
+## FR-41 — The reply handoff is a requirement, not a permission
+
+**FR-41.** Sift MUST offer reply, reply-all and forward actions that hand off to the user's configured
+mail handler, and MUST NOT construct or transmit the message itself.
+
+This was previously a MAY, and the upgrade is the point. The no-send constraint has a consequence the
+section above states nowhere: **Sift alone cannot answer mail, so a user who installs only Sift has a mail
+client they cannot reply from.** That is this product's largest adoption objection, and leaving its only
+remedy optional made the answer to it an optional feature.
+
+What "hands off" means needs specifying, because the failure cases are where a handoff stops being honest.
+
+- The action MUST pass the message's **identification** — recipients, subject, and the identifier being
+  replied to — to the platform's handler, and MUST NOT depend on Sift knowing what the handler then does.
+- It MAY additionally pass quoted text of the original. **That is the closest this comes to composition
+  and is deliberately capped there:** no MIME construction, no attachment handling, no encoding or
+  alignment decisions, and no code path that could grow into one. A reader checking the no-send constraint
+  should check exactly this line.
+- Where **no handler is configured**, Sift MUST say so and MUST NOT present a reply affordance that
+  silently does nothing. This is the rule [mutations](../mail/mutations.md) already applies to junk
+  reporting on an account that does not support it: absent, not approximated.
+- The reply is composed and sent by another application, so it belongs to that application's record of
+  what was sent. Sift MUST NOT imply otherwise, and in particular MUST NOT show a handed-off message as
+  sent or as part of the thread until the provider returns it through the ordinary
+  [sync](../mail/sync-engine.md) path like any other message.
+
+**This is not a deferred item under the section below.** A handoff introduces no outbound message path,
+so there is nothing here to defer — it is the constraint being made liveable rather than being softened.
 
 ## Deferred, with a defined insertion point
 
