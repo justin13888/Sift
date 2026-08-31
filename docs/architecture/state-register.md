@@ -84,6 +84,7 @@ navigation and never source. They are listed as one row so that the register is 
 | Not cached | the message | [FR-12](../storage/cache-and-blobs.md) — distinct from the next row, which is the whole point of FR-12 |
 | Not available | the message, the reason it cannot be fetched now | [FR-12](../storage/cache-and-blobs.md) |
 | Resource blocked | the count, and per resource the verdict and the rule or heuristic that produced it | [FR-33](../runtime/observability.md), [content blocking](../rendering/content-blocking.md) |
+| Resource unavailable | the count, and per resource why — decrypt failure, missing blob, timeout, or revoked document | [D-91](resource-broker.md), which distinguishes this from both a block and a fabricated address |
 | Content withheld by a shed | the count | L1 in [memory pressure](../runtime/memory-pressure.md), which requires the shed be named rather than a rule |
 | Blocker disagreement | the resource, the two verdicts | [D-10](../rendering/content-blocking.md) |
 | No special-use folder resolved | the account, the semantic kind, the candidate folders | [FR-5](../mail/provider-model.md) |
