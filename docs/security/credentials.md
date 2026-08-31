@@ -12,8 +12,60 @@ The system browser rather than an embedded view is not a convenience choice: an 
 view sees the user's password, defeats the provider's own phishing protections, and is increasingly
 refused by providers outright.
 
-Generic IMAP accounts using password authentication follow the same storage rule. See
-[accounts](../mail/accounts.md).
+### Password and hybrid authentication
+
+**A generic IMAP account authenticates with a password, and Sift MUST NOT try to know what kind it is.**
+An application-specific password, a device password and an ordinary one are indistinguishable at the
+protocol, and a client that guesses gets it wrong for some provider. It is a secret the user supplied, it
+goes in the credential store under NFR-23 like every other, and the provider's own guidance is what tells
+the user which to generate.
+
+**Where a provider offers OAuth over IMAP, Sift uses it rather than a password.**
+[D-7](../mail/providers/gmail.md)'s Gmail design needs exactly this — it holds an IMAP connection as a
+doorbell beside an API delta, and that connection authenticates with the same OAuth grant rather than a
+second credential. The bearer mechanism is the provider's standard SASL one; what matters here is that
+**one account has one grant**, so a refresh under D-88 re-authenticates both paths and a revocation
+removes both.
+
+**A rejected password is classified the way a rejected refresh is.** D-88's rule applies unchanged: the
+account enters *needs authentication* only on an explicit server-side rejection of the credential, and
+never on a transport failure or an unparseable response, for the captive-portal reason that decision
+gives. A password changed on the server is therefore indistinguishable from a password revoked, which is
+correct — both need the user, and Sift does not need to know which.
+
+### Credential items
+
+**One item per account per credential kind**, named by a stable scheme combining the service name, the
+account's own identity under [D-89](../mail/accounts.md), and the kind. The **scheme** is permanent —
+[platform baseline](../product/platform-baseline.md) records that the service and access-group names are
+*"published in the Cask uninstall stanza, so a change breaks uninstall for existing users"*, and a naming
+scheme that cannot be enumerated cannot be uninstalled. Individual items are not permanent; they come and
+go with accounts.
+
+Keying on the account's identity rather than on its address is what makes an item survive the address
+changing, and is why D-89 exists. An item whose account no longer exists is recognisable by that key
+alone, so **FR-4's erasure can be asserted by enumeration** rather than believed.
+
+### When the credential store goes away mid-session
+
+[Failure model](../runtime/failure-model.md) covers the store being unavailable **at launch**. It can also
+become unavailable while Sift is running — a session lock policy, a keyring service that exits, a user
+who locks their keyring deliberately.
+
+**Material already read stays usable, and Sift MUST NOT tear down working accounts.** The account keys
+and tokens in memory are what the process is already using; discarding them would convert a recoverable
+condition into an interactive re-authentication of every account, which is the cascade NFR-34 warns
+about, arriving from the credential store instead of the network. **An account enters *storage
+unavailable* only when it needs material it does not hold** — a refresh that must write, or an account
+opened for the first time this session.
+
+**In-memory credential material lives for the life of the process** and is released on the shutdown path
+[D-70](../architecture/lifecycle.md) defines. [Privacy](privacy.md) already concedes this material is in
+memory and that its absence from a crash dump is *"unverifiable in principle"*; what is stated here is
+that it is not re-read per use, because a design that re-read on every request would put the credential
+store on the hot path and would still not shorten the window that matters.
+
+See [accounts](../mail/accounts.md).
 
 Because Sift stays resident with no window (see [process model](../architecture/process-model.md)), a
 failed refresh may occur when there is nothing on screen to prompt. The re-auth prompt MUST therefore be
