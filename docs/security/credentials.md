@@ -1,6 +1,6 @@
 # Credentials
 
-**Owns:** D-36, FR-2, NFR-23.
+**Owns:** D-36, D-88, FR-2, NFR-23.
 
 ## FR-2 — Authentication
 
@@ -21,6 +21,84 @@ raised through the always-on surface in [UI shell](../architecture/ui-shell.md),
 MUST show as needing attention rather than merely stalling. *Needs authentication* is the
 highest-precedence condition in [failure model](../runtime/failure-model.md), which owns how it composes
 with everything else that can be wrong with an account.
+
+## D-88 — The flow, in the detail that decides whether an account survives it
+
+**Chosen:** Sift is a **public** client with no embedded secret; the scope set per provider is fixed
+before the client is verified and is permanent; a refresh is **single-flight** per account; a rotated
+token pair is written to the credential store **before** it is used and the previous pair is retained
+until the new one has succeeded once; and a refresh failure is non-transient **only** when the provider
+returns a well-formed error explicitly denying the grant.
+**Rejected:** an embedded client secret; per-request refresh; treating any refresh failure as
+authoritative; discarding the previous token pair on receipt of a new one.
+
+FR-2 gives the shape — OAuth 2.0, PKCE, system browser, silent refresh — and each of the five points
+below is a place where the obvious implementation loses the user's account rather than degrading.
+
+**Public client, no embedded secret.** A secret shipped in a binary distributed through
+[three channels](../product/platforms-and-distribution.md) is not a secret, and treating it as one would
+make every security property that rested on it false. PKCE is what replaces it, which is why FR-2 names
+it rather than treating it as an option.
+
+**The scope set is permanent, and it is smaller than it looks.** A scope string is baked into the
+verified client and into every existing user's grant, so widening it later forces the entire install base
+through re-consent. Each provider document records its own set. Two rules hold across all of them: the
+set is the minimum for read, search and the FR-13 intent set, and **no send or compose scope is ever
+requested**, which is [the no-send constraint](../product/scope.md) expressed where a reviewer can check
+it against an authorization screen rather than against a code path.
+
+**Refresh is single-flight per account.** Push, delta, body fetch and queue flush run concurrently under
+[D-19](../architecture/overview.md), so an expired token produces several simultaneous refusals and, with
+no coordination, several simultaneous refreshes. Against a provider that rotates refresh tokens, the
+second refresh presents a token the first has already spent, and the provider's correct response is to
+invalidate the grant — **so the uncoordinated implementation logs the user out by trying too hard.** One
+refresh at a time per account, with the others awaiting its result.
+
+**The write precedes the use, and the old pair is kept until the new one works.** The dangerous window is
+between receiving a rotated pair and durably storing it: a crash there leaves the provider having retired
+the old refresh token and Sift having lost the new one, which is a total lockout requiring interactive
+re-authentication. So the new pair is written first and used second, and the previous pair is retained —
+marked superseded — until the new one has completed one request. Providers commonly tolerate the old
+token briefly, which is exactly the window this exploits, and retaining it costs one extra credential
+item for seconds.
+
+**A refresh failure is non-transient only when the provider says so.**
+[Failure model](../runtime/failure-model.md) enters *needs authentication* on a refresh *"that failed
+non-transitively"* and never defined the term. The classification is narrow deliberately: only a
+well-formed provider error explicitly denying the grant counts. A transport failure, a 5xx, a timeout, a
+throttling response under [D-87](../mail/provider-model.md), and **anything that is not a well-formed
+provider error response** are all transient.
+
+That last clause is doing specific work. [NFR-34](../runtime/network-conditions.md) warns that a captive
+portal returns *"plausible-looking HTTP responses"* and must not *"cascade into re-prompting for
+credentials on every account at once"* — which is precisely what a lenient classifier produces the moment
+a user opens a laptop on hotel wifi. **A response that does not parse as the provider's own error
+document is evidence about the network, not about the grant.**
+
+**Removal revokes, best-effort, and never blocks.** [FR-4](../mail/accounts.md) makes removal *"provably
+erase"* local state, and most users will assume that includes Sift's access to their mailbox — an
+assumption that is wrong unless the grant is revoked at the provider. So removal attempts revocation. It
+**MUST NOT** block on it, because a user removing an account while offline, or after the credential has
+already expired, must still be able to remove it; the local erasure FR-4 specifies is what is provable,
+and revocation is best-effort on top.
+
+**The in-flight flow's secrets are held in memory and nowhere else.** The PKCE verifier and the state
+parameter exist before the account does, so they cannot live in an account store, and they are worthless
+afterwards, so they MUST NOT live in the credential store either. They are held for the duration of one
+authorization, bounded by a timeout, and discarded. **Concurrent authorizations correlate by their state
+parameter** — which is the work D-36 below already says that parameter is doing against a forged callback,
+serving a second purpose here — and a callback whose state matches no flow in progress is discarded
+without comment.
+
+**What it costs:** a refresh path with a coordination primitive, a transient credential item, and a
+classifier whose default answer is "try again", which means a genuinely revoked grant takes longer to
+surface than it would under a lenient rule.
+
+**Contestable because:** the conservative classifier delays the *needs authentication* prompt for a user
+whose access really was revoked, and FR-2's whole point is that a silent sync stall is unacceptable. The
+answer is the asymmetry: a late prompt is an annoyance, and a prompt raised on every account because a
+hotel router answered a refresh with a login page is an application that appears to have lost the user's
+credentials.
 
 ## D-36 — Authorization returns through a URI scheme, not a socket
 
