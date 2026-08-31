@@ -2,6 +2,8 @@
 
 Phasing, and what each phase is allowed to leave unproven.
 
+**Owns:** D-105.
+
 The ordering principle: **prove the risks that can kill the design before building on top of them.** A
 client that becomes fast later never does, so performance and resource targets are gates on every phase
 rather than a final-phase activity.
@@ -20,6 +22,21 @@ Nothing else starts until these resolve. Each is capable of invalidating a settl
 | Non-script content sizing and find-in-message in the body view | [D-50](../rendering/webview-isolation.md), and FR-24's keyboard reachability of finding text |
 | The accessibility tree crossing the body view's process and sandbox | NFR-50, which P1 gates on and which [webview isolation](../rendering/webview-isolation.md) makes normative without establishing that it is reachable |
 
+### Each spike passes on a stated answer, not on being attempted
+
+A spike with no pass criterion resolves whenever somebody says it has. Each of the seven above resolves a
+named decision, so each has an answer that decides it:
+
+| Spike | Passes when |
+|---|---|
+| Hardened body webview against the hostile-HTML corpus | No sample achieves script execution, network egress, or storage shared with another view, on both engines. Any single failure fails the spike, because N-1 and NFR-20 are absolutes rather than rates |
+| Memory soak harness with allocation attribution | The harness runs 72 hours unattended, produces a per-subsystem series, and D-24's attribution measures at or under NFR-44's 2% |
+| Toolkit residue, and a warm body view alongside it | Figures exist for both architectures and both platforms, separately, and NFR-8 and NFR-9 have been re-derived from them together with the reading peak — see D-105 below, which is what "passes" means for a spike whose output is a number |
+| Sandboxed login-item residency on macOS | A sandboxed build registered as a login item stays resident with no window, syncs, and posts a notification. **If it cannot, the App Store is not a channel** and [D-33](platforms-and-distribution.md) and [D-45](platform-baseline.md) both reopen — which is why this is the spike whose failure is most expensive |
+| Google OAuth restricted-scope verification path | The requirements, the cost and the timeline are documented well enough for [R-1](../open-questions.md) to become a budget decision rather than an unknown. It does not pass by being granted; it passes by being answerable |
+| Non-script content sizing and find-in-message | Both work in a view with script disabled engine-wide, on both engines, through a non-script platform interface. [D-50](../rendering/webview-isolation.md) depends on it and FR-24 requires the second |
+| The accessibility tree crossing the body view | A screen reader announces body content as part of the reader on both platforms, under all five constraints [webview isolation](../rendering/webview-isolation.md) names. [R-14](../open-questions.md) says this has never been shown to exist, so a negative result is a real outcome and reopens NFR-50's P1 gate |
+
 The soak harness and allocation attribution MUST be built here rather than later; they cannot be
 retrofitted, and NFR-12 is only observable over weeks. See [observability](../runtime/observability.md),
 which states the same phase requirement.
@@ -31,6 +48,45 @@ NFR-9 contains one, since NFR-46's teardown means it cannot, but because the sta
 is what reading a message costs and no requirement budgets it. The shed-tier targets are stated as
 subtractions from that family of figures, so replacing any one of them alone leaves the tiers describing a
 budget that no longer exists.
+
+## D-105 — A phase may be gated on producing a number, and that is a different gate
+
+**Chosen:** two kinds of gate. A **conformance gate** requires a measurement to meet a stated target. A
+**derivation gate** requires that a target be *produced*, recorded in its owning document, and derived by
+the stated protocol. P0 gates NFR-8, NFR-9 and the reading peak as derivation; every later phase gates
+them as conformance.
+**Rejected:** treating P0's gate on those requirements as a conformance gate; removing them from P0's
+gates; letting a phase self-certify a number it produced.
+
+**Why.** P0's Gates column names NFR-8 and NFR-9, and [Q-12](../open-questions.md) says both *"are
+placeholders and MUST be re-derived together"* by the spike P0 contains. **A phase cannot be gated on
+numbers the phase exists to produce** — read as conformance, the gate is satisfied by whatever the spike
+measured, which is to say by nothing. Read as "not applicable", the two hardest resource requirements in
+the set are gated by no phase at all, which this document calls a defect in its own coverage rules.
+
+The derivation gate is neither. It says what P0 owes: figures for both architectures and both platforms,
+separately, arrived at through the [measurement protocol](reference-environment.md), for all three of
+NFR-8, NFR-9 and the reading peak **together** — because the shed-tier targets are stated as subtractions
+from that family and replacing one alone leaves the tiers describing a budget that no longer exists.
+
+**A derived number is recorded by amendment, which is what makes it accepted.** There is no separate
+approval step, because this documentation set already has one: the number is written into
+[requirements](../requirements.md) and its owning document, and that is a change somebody reviews. The
+same applies to lowering a target later — it is an amendment, visible in history, rather than an
+adjustment to a constant.
+
+**The guard against a target that moves to meet a build.**
+[Reference environment](reference-environment.md) already states this for the machine — *"a target met by
+changing the rig has not been met"* — and the same rule now covers the number: **a target met by
+relaxing the target has not been met.** A change to a figure MUST say that is what happened and why, which
+is the rule [docs/README](../README.md) already applies to adjusting a number to match a measurement.
+
+**What it costs:** a second gate kind, which is one more thing to know before reading the coverage table.
+
+**Contestable because:** a derivation gate is weak by construction — it can be satisfied by a measurement
+that is honest and terrible, and nothing here says what NFR-8 must not exceed for the design to remain
+viable. That threshold exists in Q-12's own terms (a bad Linux figure reopens D-2), and stating it as a
+number now would be inventing the answer the spike is for.
 
 ## P1 — Vertical slice
 
@@ -80,7 +136,7 @@ what makes deferring them different from deferring a feature.
 | Phase | Ships | Gates |
 |---|---|---|
 | Standing | — | NFR-14, NFR-16, NFR-19, NFR-20, NFR-21, NFR-22, NFR-23, NFR-24, NFR-51, NFR-52, NFR-54, NFR-55 |
-| P0 | — (spikes only) | NFR-8, NFR-9, NFR-12, NFR-44, NFR-45 |
+| P0 | — (spikes only) | NFR-8, NFR-9, NFR-12, NFR-44, NFR-45 — the first two and the reading peak as **derivation** gates under D-105, the rest as conformance |
 | P1 | FR-2, FR-5, FR-6, FR-8, FR-9, FR-11, FR-12, FR-13, FR-14, FR-19, FR-22, FR-24, FR-25, FR-28, FR-30, FR-33, FR-34, FR-41 | NFR-1, NFR-3, NFR-5, NFR-10, NFR-11, NFR-15, NFR-25, NFR-28, NFR-40, NFR-41, NFR-46, NFR-50 |
 | P2 | FR-1, FR-3, FR-4, FR-20, FR-21, FR-37, FR-43 | NFR-2, NFR-18, NFR-29, NFR-30, NFR-31, NFR-32, NFR-33, NFR-34, NFR-35, NFR-37, NFR-38, NFR-39, NFR-48 |
 | P3 | FR-15, FR-16, FR-17, FR-18, FR-38, FR-39, FR-42 | NFR-7, NFR-17 |
