@@ -56,7 +56,7 @@ its own store. That removes the contradiction outright, makes FR-4's erasure tri
 only duplicate storage under a budget that is hard-capped anyway. If per-blob key wrapping proves to be
 the complexity that breaks the store, that is the retreat.
 
-## D-42 — Account databases are encrypted at the page level, beneath the database engine
+## D-42 — Every database is encrypted at the page level, beneath the database engine
 
 **Chosen:** a page-level encryption layer sitting underneath the database engine, so that every page
 written to disk is encrypted and authenticated under the account key from D-22, and the engine above it
@@ -83,6 +83,12 @@ Page-level encryption leaves the index, the query planner and the write-ahead lo
 D-21 and D-5 assume, because everything above the page layer sees plaintext. The write-ahead log MUST be
 covered by the same layer; a journal written in the clear would defeat the whole arrangement while
 looking correct in every test that inspects only the main file.
+
+**The same layer covers the two installation-scoped stores.** The shared blob index and the installation
+policy store are databases of the same engine holding no account's data, so D-43 supplies their key and
+this decision supplies their mechanism — page-level, write-ahead log included, authenticated. Naming both
+halves matters because D-43 settles *under what secret* and would otherwise leave *by what means* to
+inference, which is the shape of gap that produced D-42 in the first place.
 
 **What it costs:** a cryptographic layer beneath a C dependency, in a project that argues hard for Rust
 on parsing paths. The mitigation D-21 already states applies here too — the database sees no
