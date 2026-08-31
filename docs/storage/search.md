@@ -25,6 +25,18 @@ corpus can measure whether the right message came back first.
 
 Full-text search across cached mail, incremental as the user types, with sub-second results.
 
+**Search is scoped to every account by default**, narrowable to one account or one folder. This is the
+scope NFR-5 already assumes without saying so: its 500,000 messages are the whole
+[scale corpus](../product/reference-environment.md) across five accounts, not one account's share of it,
+so the target is a statement about the merged case — five separate indexes, each behind
+[D-42](encryption.md)'s page-decryption layer, merged in the
+[presentation layer](../architecture/presentation-layer.md) on every keystroke.
+
+Stating the default matters because the number means different things at different scopes, and a
+per-folder default would let NFR-5 be met by a build that never does the hard thing. It also matters for
+the product: a user searching for a message rarely knows which account it arrived in, which is the same
+observation [D-4](../architecture/presentation-layer.md) makes about the unified inbox.
+
 ## FR-20 — Structured operators
 
 The query grammar MUST support at minimum: sender, recipient, subject, attachment presence, unread state,

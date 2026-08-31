@@ -94,6 +94,22 @@ surface in the product. The mitigation is that the [fidelity corpus](../product/
 and the fuzzing under NFR-40 are supposed to find these before users do — if they do not, this decision is
 what made the difference.
 
+## Queries are not retained
+
+**Search queries MUST NOT be stored by default**, and neither policy scope in
+[data model](../storage/data-model.md) carries a row for them.
+
+A history of what someone searched their own mail for is correspondence metadata by this document's own
+definition — the clause that names domains explicitly is drawn narrower than the queries would be, since a
+query is often a person's name or an address typed in full. NFR-22 keeps that class of data out of
+telemetry; a durable local record of it would be the same data, collected without being asked, in the
+store that [encryption](../storage/encryption.md) notes is "backed up, synced, copied between machines,
+and attached to bug reports".
+
+This is the same judgement [D-41](../architecture/presentation-layer.md) makes in refusing to derive an
+address book from observed mail: **Sift should not construct locally what it refuses to transmit.**
+Recent queries within a session are a convenience and are not durable.
+
 ## The debug views are not telemetry
 
 The [debug panels](../runtime/observability.md) expose a great deal about a message and about Sift's
