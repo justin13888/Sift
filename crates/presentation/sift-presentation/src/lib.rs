@@ -5,3 +5,7 @@
 //! holds no state that only a live shell could reconstruct.
 
 pub mod action;
+pub mod debug_view;
+pub mod merge;
+pub mod settings;
+pub mod surface;
