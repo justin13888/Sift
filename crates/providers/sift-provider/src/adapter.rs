@@ -1,0 +1,194 @@
+//! The adapter contract: six responsibilities, and nothing more.
+//!
+//! `docs/mail/provider-model.md` enumerates them and says "nothing more" in as many words.
+//! The list is short on purpose — everything an adapter is *not* asked to do is something
+//! that would otherwise be done four times, differently.
+//!
+//! Notably absent: threading (D-103 assigns local identity), identity joins (D-44 is one
+//! rule serving four consumers), retry and backoff (D-87 puts a stated delay on the wheel
+//! rather than in a sleep), conflict resolution (D-38 lives in the presentation layer),
+//! and any decision about *when* to run (D-25's wheel owns that).
+
+use crate::capability::Capabilities;
+
+/// A cursor into a provider's change feed. Opaque to everything above the adapter.
+///
+/// D-82 requires it be acquired **before** a folder's backfill walks history: backfill-first
+/// loses every change in a window that on a large mailbox is hours, which is silent data
+/// loss. The redundancy cursor-first creates is absorbed because reapplication is safe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cursor(pub Vec<u8>);
+
+/// Whether a message was *delivered* or merely *discovered*.
+///
+/// **This must be recorded from the first build.** FR-23's notification rule ships three
+/// phases later and defines new mail as delivered-and-unread-at-that-moment; it cannot be
+/// reconstructed afterwards without a resynchronization NFR-18 forbids.
+///
+/// D-84's cursor recovery marks everything it observes as `Discovered`, **including rows it
+/// inserts**, and D-102's re-ingest after eviction does the same. A backfill discovers; only
+/// a delta delivers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    /// The delta reported it as an arrival.
+    Delivered,
+    /// Backfill, cursor recovery, a full scan, or re-ingest after eviction.
+    Discovered,
+}
+
+/// What the adapter is asked to do, and nothing more.
+pub trait Adapter {
+    type Error;
+
+    /// What this account can do. Everything above plans against this and never against a
+    /// provider name.
+    fn capabilities(&self) -> &Capabilities;
+
+    /// 1. Enumerate folders.
+    ///
+    /// D-83: a folder that stops appearing here is **retired, not deleted**, and a new one
+    /// is *discovered* rather than adopted — it is backfilled only if it is in FR-43's
+    /// watched set.
+    fn enumerate_folders(&self) -> Result<Vec<RemoteFolder>, Self::Error>;
+
+    /// 2. Produce a delta against a cursor.
+    ///
+    /// The **only** path by which change is applied. Push answers "has something changed?";
+    /// this answers "what changed?", and there is exactly one code path that applies it.
+    fn delta(&self, folder: &RemoteFolderId, cursor: Option<&Cursor>)
+    -> Result<Delta, Self::Error>;
+
+    /// 3. Fetch envelopes.
+    ///
+    /// **Sift MUST NOT fetch whole messages.** Structure first, then only the part decided
+    /// for display — a message carrying a 40 MB attachment costs a few kilobytes until the
+    /// user asks for the attachment.
+    fn fetch_envelopes(&self, ids: &[RemoteMessageId]) -> Result<Vec<Envelope>, Self::Error>;
+
+    /// 4. Fetch a specific body part.
+    fn fetch_part(&self, id: &RemoteMessageId, part: &str) -> Result<Vec<u8>, Self::Error>;
+
+    /// 5. Apply a batch of mutations.
+    ///
+    /// Batched to [`Capabilities::batch_size`]. **A batch MUST NOT contain two intents for
+    /// the same message**, because intents against one message apply in the order they were
+    /// issued — always, including through batching and retry.
+    fn apply(&self, batch: &[WireMutation]) -> Result<Vec<MutationOutcome>, Self::Error>;
+
+    /// 6. Expose a change-notification stream.
+    ///
+    /// A doorbell. It says something changed; it never says what.
+    fn watch(&self, folders: &[RemoteFolderId]) -> Result<(), Self::Error>;
+}
+
+/// A provider's own folder identifier. An **attribute** of a folder, never its key: D-83
+/// gives every folder a local identity assigned on first discovery.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RemoteFolderId(pub String);
+
+/// A provider's own message identifier. Also an attribute rather than a key — and under
+/// [`IdStability::UnstableOnMove`](crate::capability::IdStability::UnstableOnMove) it does
+/// not even survive a move.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RemoteMessageId(pub String);
+
+/// The semantic kind of a special-use folder — FR-5.
+///
+/// Resolved through the provider's own mechanism and **never by string-matching a display
+/// name**: "a locale table is a bug". Where nothing resolves, Sift prompts the user once
+/// and persists the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialUse {
+    Inbox,
+    Archive,
+    Sent,
+    Trash,
+    Spam,
+    Drafts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFolder {
+    pub id: RemoteFolderId,
+    pub display_name: String,
+    pub special_use: Option<SpecialUse>,
+}
+
+/// One page of change, with the cursor that follows it.
+///
+/// D-82: a page and its cursor advance **in one transaction**. A cursor advancing past
+/// change that was not applied is silent data loss.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delta {
+    pub changes: Vec<Change>,
+    pub next: Cursor,
+    /// Whether more pages follow. A resume rewinds to the last committed page, which is
+    /// the granularity L-26 sets.
+    pub more: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    Present {
+        id: RemoteMessageId,
+        provenance: Provenance,
+    },
+    Removed {
+        id: RemoteMessageId,
+    },
+    FlagsChanged {
+        id: RemoteMessageId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Envelope {
+    pub id: RemoteMessageId,
+    pub internet_message_id: Option<String>,
+    /// **The server's received time**, which D-55 makes the authoritative sort key. Not the
+    /// `Date` header, which is the sender's and is only ever displayed.
+    pub received_at_millis: u64,
+    /// The sender's `Date` header. Displayed, never ordered on.
+    pub origination_date_millis: Option<u64>,
+    pub snippet: Option<String>,
+}
+
+/// A mutation as the adapter will send it. Resolved from a provider-agnostic intent
+/// **inside** the adapter — the layers above never construct one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireMutation {
+    pub message: RemoteMessageId,
+    /// The client-assigned identifier, sent as an idempotency key where the provider
+    /// accepts one.
+    pub intent_id: u128,
+    pub operation: Operation,
+}
+
+/// FR-13's closed set, at the wire boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operation {
+    Archive,
+    DeleteToTrash,
+    PermanentlyDelete,
+    MoveTo(RemoteFolderId),
+    SetRead(bool),
+    SetFlagged(bool),
+    AddTag(String),
+    RemoveTag(String),
+    ReportJunk,
+    ReportNotJunk,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationOutcome {
+    Applied,
+    /// Retryable. The scheduler decides when, under D-87 and L-24 — never the adapter, and
+    /// never by sleeping.
+    Transient,
+    /// The provider explicitly refused.
+    Refused,
+    /// The request went out and the answer did not come back. D-85 moves the intent to
+    /// *Reconciling*, and the adapter establishes server state before retrying rather than
+    /// blindly replaying — which is what NFR-17 means by exactly-once *observable*.
+    Unknown,
+}

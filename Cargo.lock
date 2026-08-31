@@ -361,6 +361,9 @@ version = "0.1.0"
 [[package]]
 name = "sift-provider"
 version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+]
 
 [[package]]
 name = "sift-runtime"
