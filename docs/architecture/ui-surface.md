@@ -2,7 +2,7 @@
 
 What screens exist, what a window is, and how a user reaches everything.
 
-**Owns:** D-97.
+**Owns:** D-97, D-98.
 
 [UI shell](ui-shell.md) argues why the shells are native and states the requirements they must satisfy.
 It describes no screen. The set implies more than twenty surfaces, names several of them inside
@@ -90,6 +90,91 @@ keyboard scopes, and a rule about sheets that both toolkits express differently.
 and a simpler design would open the main window and select the message. That is defensible, and it is
 rejected because the gesture is the one a user makes most often when Sift has no window at all, which is
 precisely when opening the full window is most expensive.
+
+## D-98 — Actions are a register, and the register is what FR-24 and the test harness both use
+
+**Chosen:** every user-initiated operation is a **named action** with a stable identifier, a scope, and
+an enablement rule; the set is enumerated here; the command palette is a view of it; and the shell test
+harness invokes actions by identifier. Default bindings are per platform and are **not** user-rebindable
+in the first release.
+**Rejected:** actions defined per shell; a palette with its own list; rebindable bindings now.
+
+**Why a register.** [FR-24](ui-shell.md) requires every action be keyboard-reachable including a command
+palette, and then says something stronger that nothing followed up on: *"it is also what makes the app
+testable without UI automation."* That is a claim that a test can drive the application through its
+action vocabulary — which is only true if the vocabulary is a real surface with stable names, reachable
+across the boundary. **The action set is therefore an ABI surface**, not shell polish, and it is enumerated
+here for the same reason [limits](../limits.md) is enumerated in one place: three consumers must agree on
+it, and one of them is a test.
+
+It is also what makes [provider model](../mail/provider-model.md)'s affordance rule mechanical. That
+document requires that *"if an account declares no tag support, the tag affordance is absent for that
+account"*, and a palette built from its own list would have to reimplement that check. A palette that is
+a **view of the register filtered by enablement** gets it for free, in both shells, from one rule.
+
+### What an action carries
+
+| Field | Meaning |
+|---|---|
+| Identifier | Stable, never reused. It appears in tests, in the palette's own ordering, and in bindings |
+| Scope | Application, window, list selection, or open message — which determines what must exist for it to apply |
+| Enablement | A function of the current selection, the account's declared capabilities, and the account condition. An action that is not enabled is **absent from the palette**, not shown disabled |
+| Default binding | Per platform, following that platform's idiom; the identifier is shared and the key is not |
+
+**Enablement hides rather than disables**, which is the opposite of the usual convention and follows
+[provider model](../mail/provider-model.md)'s rule that an unsupported affordance is *absent, not
+approximated*. A greyed-out "add tag" on an account that has no tags tells the user their mail has a
+feature they cannot reach; its absence tells them the truth.
+
+### The actions
+
+**Message and selection** — archive, delete to trash, permanently delete, move to folder, flag, mark
+read, mark unread, add tag, remove tag, report junk, report not junk. These are exactly
+[FR-13](../mail/mutations.md)'s intent set, and the correspondence is deliberate: **the action set MUST
+NOT contain a mutation that is not an intent**, or the closed set FR-13 describes has a second door.
+
+**Reading** — open message, open in standalone reader, next and previous message, next and previous
+unread, expand and collapse thread, show plain text, show raw source, toggle the dark transform for this
+message, allow remote content for this sender, find in message, reply, reply all, forward.
+
+**Navigation** — next and previous folder, next and previous account, go to unified inbox, focus list,
+focus reader, focus sidebar, focus search.
+
+**Search** — begin search, clear search, narrow to this account, narrow to this folder.
+
+**Application** — new main window, close window, quit, pause sync, resume sync, add account, open
+settings, open the per-message debug view, open the runtime panel, and the palette itself.
+
+**Undo** — undo the last reversible gesture, which acts over [D-85](../mail/mutations.md)'s undo group
+rather than over a message, so a bulk operation reverses as the one gesture
+[FR-17](../mail/mutations.md) promises.
+
+**Reply, reply-all and forward are actions like any other**, and they hand off under
+[FR-41](../product/scope.md). They are in this list rather than omitted because FR-41 makes the handoff a
+requirement rather than a permission, and because an action set with no reply in it is the one a reviewer
+would assume was an oversight.
+
+### Bindings are fixed in the first release, and the register is the seam
+
+**Bindings are not user-rebindable**, and this is a deferral rather than a refusal. A rebinding scheme is
+durable policy with a storage entity, a conflict model, a reset path, and a permanent format — and once
+users have rebound keys, changing any of that is a break. Shipping without it costs nothing that cannot be
+added, because the register already gives the mechanism a rebinding surface would need: stable identifiers
+to bind to. That is the [seam](../glossary.md) [scope](../product/scope.md) requires of anything deferred.
+
+**The default set follows each platform's idiom rather than being shared.** A shared key map would be
+wrong on at least one platform, and the thing that must be identical across shells is the action set, not
+the keys. This is [D-17](shell-boundary.md)'s rule applied precisely: *what a shell can do* is the
+boundary's business, and *how a user asks for it* is not.
+
+**What it costs:** a register that must be kept in step with three consumers, and an enumeration that will
+be incomplete the first time somebody adds a feature without adding its action.
+
+**Contestable because:** hiding disabled actions makes the interface change shape between accounts, and a
+user with a Gmail account and an IMAP account will find that the same keystroke does nothing in one of
+them with no visible reason. Showing them disabled would explain it — at the cost of advertising
+capabilities the account does not have, which provider-model chose against for the affordance and this
+follows for the action.
 
 ## Related
 
