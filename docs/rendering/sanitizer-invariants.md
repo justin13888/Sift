@@ -138,7 +138,7 @@ reviewer where to spend attention.
 
 | Invariant | Independent backstop |
 |---|---|
-| I1 | JavaScript disabled at the engine level — NFR-20 |
+| I1 | JavaScript disabled at the engine level — NFR-20, in the engine-wide sense [D-50](webview-isolation.md) settles. The narrower per-page setting would leave this backstop sharing a failure mode with the thing it backs up |
 | I2 | The body view has no network capability — invariant N-1 |
 | I5 | The body renders in its own document with its own data store — NFR-25 |
 

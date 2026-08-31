@@ -17,6 +17,8 @@ Nothing else starts until these resolve. Each is capable of invalidating a settl
 | Toolkit residue measured on both platforms, window destroyed and allocator collected; a warm body view measured alongside it | [D-2](../architecture/process-model.md) and **NFR-8's and NFR-9's numbers, with the reading peak neither of them names**, which are placeholders and MUST be re-derived together — see [Q-12](../open-questions.md) |
 | Sandboxed login-item residency on macOS | whether the App Store is a channel at all — [D-33](platforms-and-distribution.md) |
 | Google OAuth restricted-scope verification path | the top business risk — see [credentials](../security/credentials.md) |
+| Non-script content sizing and find-in-message in the body view | [D-50](../rendering/webview-isolation.md), and FR-24's keyboard reachability of finding text |
+| The accessibility tree crossing the body view's process and sandbox | NFR-50, which P1 gates on and which [webview isolation](../rendering/webview-isolation.md) makes normative without establishing that it is reachable |
 
 The soak harness and allocation attribution MUST be built here rather than later; they cannot be
 retrofitted, and NFR-12 is only observable over weeks. See [observability](../runtime/observability.md),

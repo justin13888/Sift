@@ -37,6 +37,10 @@ All stages run in the core, in Rust. Nothing reaches a web engine until the last
   content height reported back to size the container
 ```
 
+The height report at the bottom of that diagram is not free, and
+[D-50](webview-isolation.md) is why: script is disabled engine-wide in the body view, so the mechanism
+MUST be a non-script platform interface and is a P0 spike rather than an assumption.
+
 Stage ordering is normative. Sanitization precedes cosmetic filtering so the filter operates on a
 structure it can trust; rewriting happens *inside* sanitization so that no absolute external URL survives
 the stage whose output I2 is asserted over; the dark transform runs last because it must not be able to
