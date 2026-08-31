@@ -373,6 +373,9 @@ version = "0.1.0"
 [[package]]
 name = "sift-scheduler"
 version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+]
 
 [[package]]
 name = "sift-store"
