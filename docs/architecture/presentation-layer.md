@@ -11,7 +11,7 @@ above the store and below the shells, and it owns every decision a shell would o
 itself:
 
 - list windowing and paging
-- selection state and multi-selection semantics
+- selection state and multi-selection semantics — see below
 - sort, filter, and grouping
 - date, size, and address formatting — locale-aware under NFR-51
 - contact name resolution for display — D-41
@@ -82,6 +82,23 @@ know which of two odd-looking states they are in.
 issued against, and the marking is a display property computed at merge time by comparing the fallback
 identity digests D-44 already stores. Nothing durable is written, and no candidate crosses an account
 boundary.
+
+## Selection
+
+This layer owns selection, and owning it means stating three things that decide behaviour elsewhere.
+
+**Opening a folder selects nothing.** Auto-selecting the first row renders a body and, under
+[D-52](../mail/mutations.md), starts a dwell that will mark read a message the user never chose — so
+walking through folders would silently consume unread mail. It is the only choice that cannot do that.
+
+**Selection is keyed on local identity**, which [view protocol](view-protocol.md) guarantees is stable for
+as long as the message exists. Keying on a row index is what makes a keyboard archive land on a different
+message than the highlighted one when a delivery arrives between the keystroke and its handling, and that
+is a data-loss class of bug rather than a visual one.
+
+**A selected message that leaves the result set clears the selection** rather than sliding to a neighbour.
+Sliding means the next keystroke acts on a message the user has not looked at, which is the same failure
+one step removed.
 
 ## D-55 — The list is ordered by when the server received the message
 

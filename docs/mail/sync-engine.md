@@ -14,6 +14,11 @@ Two mechanisms, kept distinct:
 - **Push** answers *"has something changed?"*. It is a doorbell.
 - **Delta** answers *"what changed?"*. It is the authoritative change feed, resumed from a cursor.
 
+The delta MUST distinguish a message that **arrived** from one that was merely **discovered** — by a
+backfill, or by a cursor recovery re-reading what was always there — and MUST record which, from the first
+build. [FR-23](../architecture/ui-shell.md) needs it three phases later and cannot recover it after the
+fact without the resynchronization NFR-18 forbids.
+
 Separating them means a provider whose push is impractical can still be efficient by polling the delta,
 and a provider with excellent push still reconciles through the same delta path. There is exactly one
 code path that applies change.

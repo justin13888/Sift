@@ -73,6 +73,52 @@ is really scoped to "any window open" MUST say the latter.
 **FR-23.** Native notifications for new mail, with per-account and per-folder rules and a global quiet
 mode.
 
+**"New mail" needs a definition, and the obvious one is wrong.** A message is new when it was
+**delivered** — discovered by a delta as an arrival — **and was unread at that moment**, and not
+otherwise. A message
+merely *discovered* is not new: [D-53](../mail/sync-engine.md)'s backfill discovers half a million of
+them, NFR-18's cursor recovery rediscovers a mailbox, and the IMAP full-scan path rediscovers everything
+every time. Without the distinction the first thing a new account does is post fifty thousand
+notifications, and it does it worst on the server that was already degraded.
+
+**That distinction is a property of the delta path and MUST be recorded from P1**, even though this
+requirement is gated in P4. It cannot be reconstructed later: knowing whether a message arrived or was
+merely seen for the first time requires having been there, and recovering it after the fact would mean the
+resynchronization NFR-18 exists to avoid.
+
+Notifications are coalesced per account on the [scheduler](../runtime/scheduling.md)'s existing tick
+rather than posted per message, which costs no wakeups beyond the ones already being taken.
+
+**Across accounts, the same message is announced once.** The
+[presentation layer](presentation-layer.md) deliberately shows cross-account duplicates in the list and
+marks them as such, by comparing the [D-44](../storage/data-model.md) fallback digests at display time.
+The same comparison decides notification duplicates, and it is legal for the same reason that document
+gives: marking is not joining, nothing durable is written, and no candidate crosses an account boundary. A
+list that explains a duplicate is honest; two banners for one message is just noise.
+
+Activating a notification opens that message, which under FR-25 may mean opening a window on a process
+that has none.
+
+## First run
+
+Nothing else specifies what happens before an account exists, and one requirement already depends on a
+screen that was never described: FR-3 in [accounts](../mail/accounts.md) says "the setup interface MUST
+say which lookups it will perform before performing them".
+
+**The account-less state is the add-account flow**, not an empty inbox with a hint in it.
+
+**No permission is requested before the action that needs it.** Contacts access is requested when a name
+would first be resolved under [D-41](presentation-layer.md), not at launch; notification permission when
+the first account is added; background residency is asked for explicitly, in FR-25's own terms, rather
+than assumed by a client that intends to keep running after its window closes. The reason is that a
+platform records a refusal persistently and D-41 already accepts that a refused permission means the
+feature is absent — so a prompt asked at the wrong moment is not a bug to fix later, it is a cohort of
+users who will never have that feature.
+
+**First run states that Sift does not send mail**, and what [FR-41](../product/scope.md) does instead. It
+is the product's largest adoption objection and the answer is one sentence; a user who discovers it by
+looking for a reply button has already formed the wrong impression.
+
 **FR-24.** Every action MUST be reachable from the keyboard without a pointer, including a command
 palette. This is a hard requirement, not a power-user affordance — it is also what makes the app testable
 without UI automation.
