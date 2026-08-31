@@ -898,6 +898,10 @@ dependencies = [
 [[package]]
 name = "sift-gmail"
 version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+ "sift-provider",
+]
 
 [[package]]
 name = "sift-governor"
@@ -910,6 +914,10 @@ dependencies = [
 [[package]]
 name = "sift-graph"
 version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+ "sift-provider",
+]
 
 [[package]]
 name = "sift-harness"
@@ -930,6 +938,10 @@ dependencies = [
 [[package]]
 name = "sift-imap"
 version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+ "sift-provider",
+]
 
 [[package]]
 name = "sift-index"
@@ -942,6 +954,10 @@ dependencies = [
 [[package]]
 name = "sift-jmap"
 version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+ "sift-provider",
+]
 
 [[package]]
 name = "sift-lifecycle"
