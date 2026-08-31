@@ -1,6 +1,6 @@
 # Scheduling and wakeups
 
-**Owns:** D-25, NFR-10, NFR-11, NFR-15.
+**Owns:** D-25, FR-43, NFR-10, NFR-11, NFR-15.
 
 ## The enemy is wakeups, not cycles
 
@@ -23,6 +23,16 @@ exception inverts on cellular links and is described in [network conditions](net
 timers. Sift MUST prefer mechanisms that watch many mailboxes over one connection where the provider
 offers them; otherwise it watches only the inbox and refreshes other folders lazily on user navigation.
 See [IMAP](../mail/providers/imap.md).
+
+**FR-43.** The set of watched folders MUST be per account, user-selectable, and persisted as account
+policy. The default is the inbox plus the special-use folders FR-5 resolves; every other folder is
+refreshed lazily on navigation, and FR-12's "not cached" state carries the difference honestly.
+
+The watched-folder count is the multiplier on NFR-11 and NFR-15, both of which are stated per account, so
+leaving it unstated meant every idle target was measured against a configuration nobody had chosen. It is
+also an affordance the set already promised without creating: NFR-29 in
+[IMAP](../mail/providers/imap.md) tells a user on a degraded server that they can act "by narrowing which
+folders are watched", and until now nothing let them.
 
 **Platform integration.** Sift MUST use each platform's coalescing-friendly scheduling facilities rather
 than raw timers, and MUST respect low-power and metered states. The mechanism is D-25 below.

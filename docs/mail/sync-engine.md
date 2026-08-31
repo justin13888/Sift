@@ -2,7 +2,7 @@
 
 How Sift learns that mail changed, and what it fetches when it does.
 
-**Owns:** NFR-18.
+**Owns:** D-53, NFR-18.
 
 ## Planning against capabilities
 
@@ -52,6 +52,46 @@ and it is stored with the envelope, so it survives body eviction under NFR-14 ex
 envelope does. It is bounded by L-16 in [limits](../limits.md) and is truncated rather than rejected, and
 because it is attacker-controlled text destined for a native list row it is normalized under NFR-54 in
 [presentation layer](../architecture/presentation-layer.md) like every other such string.
+
+## D-53 — The first sync is a bounded, resumable, visible backfill
+
+**Chosen:** on adding an account, fetch envelopes newest-first in bounded pages, resumable from a stored
+position, with progress visible to the user, obeying the active
+[policy tier](../runtime/network-conditions.md) like any other traffic. The extent is bounded by
+NFR-52's envelope budget and by nothing else.
+**Rejected:** a fixed time window; a fixed message count per folder.
+
+**Why this needed a decision.** Nothing said how much history a new account fetches, and envelopes are the
+long-lived tier — so this fixes the permanent floor of every store, the size of the search index NFR-5 is
+measured over, and the first thing a user experiences. It is also the first thing that can exhaust an
+FR-36 cap, on a connection the user may not have chosen.
+
+**Why the budget is the only bound.** A time window and a message count are each a second limit that can
+disagree with the first, and each has to be explained to the user in terms of a boundary they cannot see.
+NFR-52 already bounds the envelope tier and already evicts oldest-first; letting it be the single bound
+means the backfill simply runs until the budget binds, and the answer to "why is my old mail not here" is
+the same budget the user can raise. One limit rather than two.
+
+**Newest-first because relevance decays and interruption is normal.** A backfill that begins at the oldest
+message is useless until it finishes; one that begins at the newest is useful immediately and remains
+correct if it never finishes at all — which matters because it MUST be interruptible, and because on a
+large mailbox it will be.
+
+**Visible for the reason NFR-18 already gives.** That requirement demands recovery be automatic *and*
+visible, on the reasoning that automatic-but-silent "produces an app that silently spends an hour of a
+metered connection re-downloading a mailbox". A first backfill is that same operation, arriving at a
+moment when the user has even less context for it, so it takes the same rule. The account's condition
+while it runs is *recovering* in [failure model](../runtime/failure-model.md).
+
+**What it costs:** on a large mailbox the first sync is long, and the product's first impression is a
+progress indicator. It also means two accounts of very different sizes reach usefulness at very different
+times, with nothing to explain that but the progress itself.
+
+**Contestable because:** a smaller default would make first run faster for everyone and would be invisible
+to most users, who never look past a few months of mail. The argument against is that local search is a
+headline feature and its coverage would then silently stop at a boundary nobody chose, pushing queries
+onto FR-21's server-side path without the user understanding why. A reader who thinks first-run speed
+outweighs search coverage should argue for a default window rather than for a different bound.
 
 ## Scheduling
 
