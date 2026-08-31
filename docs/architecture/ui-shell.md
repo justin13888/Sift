@@ -58,7 +58,9 @@ toggleable. How an opened thread is then presented — native rows over a single
 presentational ones.
 
 **FR-22.** A menu-bar or tray presence is the always-on surface, offering at minimum: open, quit, and
-pause sync. See [process model](process-model.md) for the quit semantics it must express.
+pause sync. See [process model](process-model.md) for the quit semantics it must express, and
+[D-58](../runtime/network-conditions.md) for what pausing does — which is defined once, as a policy tier,
+so that this requirement and FR-36's cap three phases later cannot mean different things by one word.
 
 **Windows are plural, and several requirements already assume it.** NFR-42 releases the filter engine when
 the *last* window closes, and L3 in [memory pressure](../runtime/memory-pressure.md) destroys the shell

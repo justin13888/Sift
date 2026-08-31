@@ -1,6 +1,6 @@
 # Network conditions
 
-**Owns:** D-14, FR-35, FR-36, NFR-30 through NFR-39 (NFR-36 struck — see below).
+**Owns:** D-14, D-58, FR-35, FR-36, NFR-30 through NFR-39 (NFR-36 struck — see below).
 
 ## D-14 — Build a small network-conditions abstraction
 
@@ -36,9 +36,48 @@ detection is found wanting.
 | **Minimal** | metered, or constrained mode | inbox envelopes only; longest poll interval; mutations flush — they are bytes; everything else deferred |
 | **Offline — portal** | captive portal | queue everything; one portal probe per 60 seconds; no connection churn |
 | **Offline — no path** | offline, airplane mode, or system sleep | queue everything; **zero connection attempts of any kind, including the portal probe**, until the path returns |
+| **Paused** | the user pausing sync under FR-22, or cumulative usage reaching FR-36's cap | no delta, no push, no prefetch, no list updates; connections torn down under NFR-33; **mutations still flush** |
 
-Mutations flush in every tier above offline. They are tiny, and a triage action that does not take effect
-because the user is on cellular is a broken product.
+Mutations flush in every tier above offline, **including Paused**. They are tiny, and a triage action that
+does not take effect because the user is on cellular is a broken product.
+
+## D-58 — Pause is a policy tier, not a second mechanism
+
+**Chosen:** pause is the sixth row of the table above, and everything that pauses sync resolves to it.
+**Rejected:** a separate pause mechanism beside the tiers; leaving FR-22's pause and FR-36's cap to be
+implemented independently.
+
+**Why this had to be settled rather than left.** Two requirements use the word *pause* and neither defines
+it. [FR-22](../architecture/ui-shell.md) puts "pause sync" on the always-on surface and ships in **P1**;
+FR-36 below says the data cap "pauses sync" and ships in **P4**. Three phases apart, one word, and no
+shared definition — so the default outcome was two behaviours that differ in ways nobody chose, on a
+surface where the difference reads as a bug.
+
+**The contradiction it resolves is in this document.** FR-36's cap pausing sync sat three sections below
+the sentence saying mutations flush in every tier above offline. Read together they point opposite ways,
+and the resolution is the one this document already argued for: **mutations still flush while paused.**
+They are bytes, a cap measured in megabytes is not defended by withholding them, and a triage action that
+silently does not take effect is the broken product that sentence describes. What pause stops is
+*fetching* — which is what consumes an allowance and what the user meant.
+
+**Why a tier rather than a flag.** The tiers already express "what network behaviour is permitted right
+now", they already compose with the offline states, and NFR-33 already defines how connections are torn
+down when the tier changes. A separate mechanism would duplicate all three and would have to be reconciled
+with them at every decision point.
+
+**What it does not do is collapse the reasons.** The tier is one behaviour; *why* an account is in it is
+the account's condition in [failure model](../runtime/failure-model.md), which keeps user-paused and
+cap-paused distinct because they clear differently and only one of them is something the user did.
+
+**What it costs:** the tier table now has a row that is not a network condition, in a document about
+network conditions, and D-14's abstraction reports nothing that produces it. The tier is therefore chosen
+from the network's answer *and* from state Sift holds, which is a slightly wider input than the table
+previously implied.
+
+**Contestable because:** a reader may argue the cap and a user pause are different enough that sharing a
+tier hides something — a capped account resumes on its own when the period rolls over, and a paused one
+never does. The condition model carries that difference; if it proves that users need to see it in
+behaviour rather than in status, the answer is two rows, not two mechanisms.
 
 **Offline is two states, not one, and collapsing them contradicts NFR-38.** A captive portal is a *usable*
 path that lies about its responses, so probing it is the only way to learn that the user has signed in —
@@ -62,7 +101,14 @@ correct without it.
 ## Requirements
 
 **FR-36.** Cumulative data usage MUST be accounted per account per link class, be visible to the user, and
-support an optional user-set hard cap that pauses sync.
+support an optional user-set hard cap that moves the account to the **Paused** tier under D-58.
+
+"Cumulative" needs a period or it is unanswerable, and the period is a **rolling window whose length the
+user sets alongside the cap**, defaulting to thirty days. A calendar month was the alternative and is
+worse for the case the cap exists for: a mobile allowance that renews mid-month leaves a user capped for
+weeks with a counter that will not reset until a date unrelated to their billing. The counter and the
+window are installation-scoped policy — see [data model](../storage/data-model.md), which previously
+carried the budgets and not the accounting they imply.
 
 | ID | Requirement |
 |---|---|
