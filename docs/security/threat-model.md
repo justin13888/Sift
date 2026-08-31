@@ -22,8 +22,35 @@ on it is a URL rather than an arbitrary protocol. That input is untrusted like a
 authorization state parameter in [D-36](../security/credentials.md) is doing real work against a forged
 callback, and it is the reason that requirement calls it more than ceremony.
 
-**Out of scope:** an attacker who already has the user's live session with code execution as that user,
-a malicious provider, and physical attacks against a running machine.
+**Out of scope:** a malicious provider, and physical attacks against a running machine.
+
+### The same-user process is in scope for the disk and out of scope for the address space
+
+Read carelessly, the two paragraphs above contradict each other: a process running as the same user is
+named a secondary adversary, and an attacker with code execution as that user was previously listed as
+out of scope. Both statements are wanted, and the line between them is the one
+[D-42](../storage/encryption.md) already argues from, so it is stated here rather than left to be
+rediscovered by whoever writes the key handling.
+
+**In scope: what a peer process can reach without entering Sift.** The files Sift writes, the registered
+URI scheme, the session bus name on Linux, and anything the OS hands out on request. This is the half
+D-42 exists for — its own text says whole-disk encryption "is transparent to every process once the user
+logs in, so it does nothing about the second half — and the second half is why per-account keys exist at
+all". Against this adversary, per-account keys held in the OS credential store with the platform's own
+access rules are a real boundary: reading the file yields ciphertext, and reaching the key means
+satisfying the credential store rather than satisfying the filesystem.
+
+**Out of scope: what an attacker reaches by entering Sift.** Attaching a debugger, injecting code, or
+otherwise reading the running process's memory. Once that is possible, decrypted pages, credential
+material read out of the store to be used, and the keys themselves are all readable, and no design in
+this set claims otherwise — [privacy](privacy.md) makes the same concession about live credential
+material in memory.
+
+**This is a boundary the platform provides and Sift MUST NOT weaken.** It rests on the hardened runtime
+on macOS and on the kernel's own restriction of debugger attachment on Linux, so an entitlement, a build
+setting, or a packaging choice that re-permits attachment moves a whole class of attack from out of
+scope to in scope silently, without any document here changing. That is the reason this reads as a
+requirement rather than as a definition.
 
 ## Attacker-controlled inputs
 
