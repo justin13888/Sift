@@ -26,7 +26,8 @@ owning document and striking the entry here with a pointer to it.
 
 ## Risks
 
-Ordered by how much of the design they would invalidate.
+Ordered by how much of the design they would invalidate. R-12 is last under that rule and first under any
+other, for the reason its own row gives.
 
 | ID | Risk |
 |---|---|
@@ -41,3 +42,4 @@ Ordered by how much of the design they would invalidate.
 | **R-9** | **The full CSS cascade ([D-27](rendering/dark-mode.md)) may not fit NFR-41.** It is a style system in miniature sharing a 30 ms budget with the sanitizer and the blocker, and its fallback is a visibly worse product rather than a slower one |
 | **R-10** | **Flatpak may not grant what D-14 needs.** Network-condition detection reads NetworkManager over D-Bus; the portal alternative supplies neither the metered flag nor the link class. Credential access has the same shape. See [platforms and distribution](product/platforms-and-distribution.md) |
 | **R-11** | **No urgent-fix path exists.** [D-33](product/platforms-and-distribution.md) gives delivery to platform channels, so a security fix reaches users on App Review's and the distribution system's schedule, in a product whose primary adversary chooses the input |
+| **R-12** | **The bespoke-component count is the risk this documentation set's own format cannot show.** Every decision here is defended against its local alternative and every defence holds on its own page. Summed, they commit to building a spec-conformant HTML tree builder and allowlist policy ([D-26](rendering/sanitizer-invariants.md)), a CSS cascade ([D-27](rendering/dark-mode.md)), an IMAP client ([D-31](mail/providers/imap.md)), a hand-written Graph client ([D-13](mail/provider-model.md)), a timing wheel ([D-25](runtime/scheduling.md)), a page-level database encryption layer ([D-42](storage/encryption.md)), a tagging global allocator ([D-24](runtime/observability.md)), a network-conditions abstraction ([D-14](runtime/network-conditions.md)), an observed and diffed view-model layer ([D-18](architecture/presentation-layer.md)), a soak harness ([NFR-45](runtime/observability.md)), and two full native shells ([D-1](architecture/ui-shell.md)). One decision per page, each with its own counter-argument, is what makes this set trustworthy — and it is also what guarantees no page shows the total. Nothing here sizes a phase, and nothing records a team or a schedule, so the aggregate is the one commitment nobody has explicitly accepted. The three weakest by cost against argument are named on their own pages: D-27, which R-9 says may not fit its budget and whose retreat is a visibly worse product; D-1's second shell, which [D-9](product/platforms-and-distribution.md) concedes is a second full UI rather than a recompile; and D-31, whose own text records that "small subset of IMAP" has defeated better-resourced projects. **This is a delivery risk rather than a design defect, which is the only reason it sits last** |
