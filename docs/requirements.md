@@ -144,6 +144,7 @@ two homes and one of them would go stale.
 | NFR-43 | Filter-list updates never block rendering; stale is acceptable, absent is not | [rendering/content-blocking](rendering/content-blocking.md) |
 | NFR-47 | Dark transform meets the contrast threshold for at least 95% of the corpus | [rendering/dark-mode](rendering/dark-mode.md) |
 | NFR-51 | Presentation-layer formatting, ordering and collation are locale-aware from the first commit | [architecture/presentation-layer](architecture/presentation-layer.md) |
+| NFR-54 | Attacker-controlled strings normalized before they reach native chrome; address shown beside a display name | [architecture/presentation-layer](architecture/presentation-layer.md) |
 
 ## Sanitizer invariants
 

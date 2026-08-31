@@ -26,6 +26,8 @@ a malicious provider, and physical attacks against a running machine.
 | Remote resource URLs | the resource broker | blocked by default; [content blocking](../rendering/content-blocking.md) |
 | Images | the decoder, **in the resident process** | bounded decode; classification cached by content hash. The placement is [an open question](../open-questions.md) |
 | Link targets | the confirmation UI | punycode decoding and bidi stripping — [link handling](../rendering/link-handling.md) |
+| Header text — display names, subject | the **native** list, reader chrome, notifications and the tray | normalized once at the boundary — NFR-54 in [presentation layer](../architecture/presentation-layer.md). No sanitizer invariant sees this path |
+| The `Date` header | list ordering, if it were trusted | it is not: [D-55](../architecture/presentation-layer.md) orders on the server's received time |
 | Filter lists | the filter engine, and generated stylesheets | stale-tolerant; never blocking; fetched over the network policy tier. **Integrity is an open gap** — see below |
 
 ## Trust boundaries

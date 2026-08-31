@@ -2,7 +2,7 @@
 
 The shared Rust layer that makes two native shells affordable.
 
-**Owns:** D-4, D-18, D-41, D-55, FR-7, FR-40, NFR-51.
+**Owns:** D-4, D-18, D-41, D-55, D-56, FR-7, FR-40, NFR-51, NFR-54.
 
 ## Purpose
 
@@ -202,6 +202,69 @@ addressing a user incorrectly rather than merely formatting a value oddly.
 
 Translation of interface strings is a separate concern belonging to each shell. This requirement is about
 the layer beneath them not foreclosing it.
+
+## NFR-54 — Untrusted text is normalized once, here
+
+**NFR-54.** Every attacker-controlled string this layer emits — sender and recipient display names,
+subject, snippet, folder and tag names, attachment names — MUST be normalized before it crosses the
+boundary: bidirectional control characters stripped or isolated, other control characters removed,
+internationalized domains rendered under the same rules as a URL, and length bounded. Where a display name
+is shown, the address MUST be shown alongside it and MUST NOT be replaced by it.
+
+**This closes a hole the set already pointed at and did not fill.** NFR-28 in
+[the pipeline](../rendering/pipeline.md) says bidirectional text in headers is "additionally a *security*
+concern, not only a correctness one" and refers the reader to
+[link handling](../rendering/link-handling.md) — which strips bidi overrides and decodes punycode **for
+URLs only**. There is no rule for headers anywhere. The requirement gestures at a defence that does not
+exist.
+
+The attack is the one link-handling.md already defends against, moved one surface over. A right-to-left
+override in a subject reorders what the list row appears to say. A display name that *is* an address —
+`security@bank.example <attacker@evil.tld>` — reads as the sender in every client that shows the name and
+hides the address. Neither touches the body view, so none of the sanitizer's ten invariants sees it, and
+both are rendered by the native list, the reader chrome, the notification banner and the tray.
+
+**Once, here, is the whole point.** This layer is the single place both shells receive text from, so one
+normalization serves both and neither shell can forget. Doing it per call site means doing it in two
+languages across two toolkits, and the one that is missed will be a surface nobody thought of — the
+notification banner, most likely, which is seen by a user who has no window open and no context.
+
+It is stated as a requirement rather than left to review for the reason NFR-51 gives about locale: it does
+not fail loudly. A subject that renders backwards looks like a subject, and nothing crashes.
+
+## D-56 — The layer returns states, not sentences
+
+**Chosen:** no user-visible string crosses the [shell boundary](shell-boundary.md). This layer emits
+identified, parameterized states; each shell renders and translates them.
+**Rejected:** returning display strings from the layer, translated or otherwise.
+
+**Why this is a boundary rule rather than a translation feature.** NFR-51 above makes every *formatted
+value* locale-aware from the first commit, and then says translating interface strings is "a separate
+concern belonging to each shell". Read together those leave a gap, because this layer demonstrably
+produces user-visible prose: [D-38](../mail/mutations.md)'s notice naming what did not take effect,
+NFR-29's explanation of why an account is degraded, [FR-12](../storage/cache-and-blobs.md)'s distinction
+between not-cached and not-available, [FR-33](../runtime/observability.md)'s blocking reasons,
+[FR-5](../mail/provider-model.md)'s prompt when no special-use folder resolves, and every condition in
+[failure model](../runtime/failure-model.md).
+
+Something has to render those. If it is this layer, then the layer has a locale, the C ABI carries prose,
+and NFR-51's own warning applies — correcting it later "changes the type of every formatted value crossing
+the boundary at once". If it is the shells, the boundary stays narrow and the question of which languages
+ship becomes answerable at any time without touching it.
+
+**It is also what keeps the two shells honest.** A state either has a rendering in both shells or it has
+none; a string returned from the layer would be identical in both by construction, which sounds like
+consistency and is actually the layer quietly deciding presentation — the thing
+[shell boundary](shell-boundary.md) says the ABI must not become "the poorer of two interfaces".
+
+**What it costs:** every condition, error and explanation needs an identifier and a parameter list, and
+adding one means touching both shells rather than one layer. That cost is the mechanism: a state nobody
+has rendered is visibly missing, where an untranslated string is not.
+
+**Contestable because:** it front-loads work for a product that ships in one language, and a small team
+may reasonably prefer English strings from the layer until a second locale is real. The answer is that the
+second consumer arrives before the second locale does — the Linux shell — and this is the same argument
+this document already makes about designing the layer before its second consumer exists.
 
 ## Optimistic state
 
