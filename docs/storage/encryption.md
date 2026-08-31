@@ -110,11 +110,11 @@ released database memory and shrunk the index cache. **NFR-5 MUST be measured wi
 rather than against a plaintext store, or the number it reports is not the number the product has.
 
 **Contestable because:** the retreat is to encrypt only the blob store and leave account databases in the
-clear. That is a real weakening rather than a simplification: envelopes are retained **indefinitely** by
-[cache and blobs](cache-and-blobs.md) while bodies are evicted, so the unencrypted half would be the
-permanent half — every sender, subject, and date the user has ever received, readable by anything running
-as them. A reader who finds page-level encryption too heavy should argue for a different mechanism, not
-for dropping the requirement.
+clear. That is a real weakening rather than a simplification: envelopes are retained under a budget that
+binds **far later** than the body budget does — see NFR-52 in [cache and blobs](cache-and-blobs.md) — so
+the unencrypted half would be the long-lived half: every sender, subject, and date across years of mail,
+readable by anything running as them. A reader who finds page-level encryption too heavy should argue for
+a different mechanism, not for dropping the requirement.
 
 ## D-43 — Content addresses and blob keys are derived under a per-installation secret
 

@@ -17,7 +17,7 @@ the definition here wins.
 | **Location** | *Where* a message is. Cardinality is one, or one-or-more, depending on the provider. See [provider model](mail/provider-model.md) |
 | **Tag** | A many-to-many user label, distinct from Location. Called labels, categories, or keywords by different providers |
 | **Intent** | A provider-agnostic mutation — *archive this thread* — resolved to wire operations inside an adapter. Never a wire operation itself. See [mutations](mail/mutations.md) |
-| **Envelope** | The cheap per-message summary: sender, subject, snippet, date, flags, size, structure. Retained indefinitely; bodies are not |
+| **Envelope** | The cheap per-message summary: sender, subject, snippet, received time, flags, size, structure. Retained under its own budget — NFR-52 in [cache and blobs](storage/cache-and-blobs.md) — which binds far later than the body budget does. The snippet is present only where the account declares a [snippet source](mail/provider-model.md) |
 | **Delta** | The authoritative change feed, resumed from a cursor. Answers *what changed* |
 | **Push** | A notification that *something* changed. A doorbell, not a change feed. See [sync engine](mail/sync-engine.md) |
 | **Cursor** | The provider-specific resumption token for a delta. Its invalidation is a first-class recovery case — NFR-18 |
