@@ -1,6 +1,62 @@
 # Memory pressure
 
-**Owns:** D-20, NFR-8, NFR-9, NFR-12, NFR-13.
+**Owns:** D-20, D-93, NFR-8, NFR-9, NFR-12, NFR-13.
+
+## D-93 — The governor is one serialized task, shedding is issue-and-forget, and restoring waits
+
+**Chosen:** tier transitions are evaluated by a **single serialized task**; a shed is *issued* to each
+owner and never waited on, so NFR-13's deadline is an issue deadline; the governor **holds no lock a shed
+target needs**; and a tier is restored only after the pressure signal has stayed clear for L-19, one step
+at a time.
+**Rejected:** shedding synchronously; evaluating transitions concurrently; restoring the moment pressure
+clears.
+
+**Why serialized.** Pressure signals arrive in bursts, and a governor that handled each concurrently
+could have an L2 shed and an L3 shed in flight against the same caches. Serializing makes "the current
+tier" a value with one writer, and a signal arriving during a transition supersedes rather than
+interleaves — so L3 arriving mid-L2 finishes as L3, which is the outcome anyone would want and not the
+outcome concurrent handling gives.
+
+**Why "issued" and not "completed", which NFR-13 already says and does not explain.** A shed reaches
+caches owned by many subsystems, some mid-use, and at L3 it destroys every window — which under
+[D-67](../architecture/view-protocol.md) is a host callback delivered on the shell's main loop.
+**Waiting for that would mean the governor blocking on a main loop it does not control.** Issue-and-forget
+keeps NFR-13's 500 ms a property of the governor rather than of whichever subsystem is slowest, and the
+actual reclamation is timed separately by [NFR-46](../rendering/webview-isolation.md).
+
+**The deadlock this avoids, and it is a real one.** [D-48](../architecture/view-protocol.md) makes
+cancellation synchronous and called from the main thread, so the main loop can be inside a cancellation
+rendezvous at the moment L3 needs it. If the governor waited for window destruction, and cancellation
+waited for anything the governor held, the two would deadlock — and L3 is precisely the tier that,
+in [D-48](../architecture/view-protocol.md)'s own words, *"generates these races in bulk"*. Two rules
+close it: the governor waits for nothing, and it holds no lock a shed target needs, so a subsystem can
+always complete the work it is in the middle of before dropping a cache.
+
+**Why restoring waits, and shedding does not.** Shedding is urgent and cheap; restoring is neither. With
+no hysteresis, a system oscillating around the pressure threshold reparses the 40 MB filter engine every
+time it crosses — spending the largest allocation in the design repeatedly to satisfy a signal that has
+not settled. **Pressure must stay clear for L-19 before a tier is released, and tiers are released one
+step at a time**, so recovering from L3 passes through L2 and L1 rather than restoring everything at
+once into a system that was under pressure a moment ago.
+
+**This is what fixes the filter engine's permanent absence.**
+[Content blocking](../rendering/content-blocking.md) says the engine returns *"when pressure clears **and** the next window opens"*, which for a user who keeps
+one window open and passes through L1 once means it never returns for that window's life — in the tier
+this document itself calls *"the tier Sift will spend real time in"*. That was a consequence of having no
+hysteresis: without a settling rule, reloading on clearance alone would be the shed undoing itself, which
+that document correctly refuses. With L-19 the two are distinguishable. **The engine returns when pressure
+has been clear for L-19 and a window is open** — not when a *new* window opens — and the no-reload-on-
+demand rule keeps its meaning, because a reload after sustained clearance is not a response to a pressure
+signal.
+
+**What it costs:** a delay between a system recovering and Sift behaving fully again, during which
+[FR-33](observability.md)'s reason for a withheld image still names the shed. That is honest and it is
+slower than it looks to a user watching memory free up.
+
+**Contestable because:** one dwell serves every tier and every cache, and they are not alike — the body
+view is cheap to rebuild and the filter engine is not, so a single number is wrong for at least one of
+them. Per-cache dwells would be better and are not proposed, because the tiers are defined as
+compositions rather than as independent caches and splitting them would undo that.
 
 ## Subscribe to pressure; do not poll for it
 
@@ -116,7 +172,7 @@ as `phys_footprint` on macOS and PSS on Linux, never RSS — see [observability]
 | **NFR-8** | Resident idle footprint with no window open at or under 90 MB at the reference corpus, **excluding the filter engine**, which is not loaded in this state |
 | **NFR-9** | Full application idle — window open, **no reader visible**, filter engine loaded — at or under 150 MB, **inclusive of NFR-42's 40 MB**. The reading peak is a different state, and no requirement budgets it yet — see below |
 | **NFR-12** | Footprint growth at or under 5% over 14 days of continuous uptime: **no ratchet** |
-| **NFR-13** | L2 shedding is **issued** within 500 ms of the signal, L3 within 1 second — see the note on the two clocks below |
+| **NFR-13** | L2 shedding is **issued** within 500 ms of Sift's receipt of the signal, L3 within 1 second — see the note on the two clocks below, and D-93 for what *issued* means and why the governor never waits |
 
 **The filter engine is bound to window lifetime, and NFR-8 and NFR-9 were restated to say so — a
 coherence fix, not a measurement.** At 40 MB under NFR-42 it is the largest declared cache in this
