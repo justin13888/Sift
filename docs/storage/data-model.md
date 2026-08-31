@@ -55,11 +55,11 @@ Per-account, unless noted.
 | Account | provider, display name, declared capabilities | one row; the file *is* the account |
 | Folder | remote identifier, semantic kind | kind is semantic, never a display name — see FR-5 |
 | Folder sync state | per folder: cursor, validity identifier, last successful sync, degradation reason | one row per folder; see below |
-| Message | remote identifier, internet message identifier, fallback identity digest, thread identifier, location, sender, recipients, subject, date, flags, attachment presence, size, MIME structure, body reference | body reference is null when not cached; the digest is computed at ingest under D-44 |
+| Message | remote identifier, internet message identifier, fallback identity digest, thread identifier, location, sender, recipients, subject, date, flags, attachment presence, size, MIME structure, body reference | body reference is null when not cached; the digest is computed at ingest under D-44. Location and flags are the **base** state [D-51](../mail/mutations.md) defines; the pending overlay is held with the queue, not here |
 | Thread | remote thread identifier, normalized subject, last activity, message count | scoped to the account — see [threading](../mail/threading.md) |
 | Tag | tag identity and display name, and its membership | present only where the account declares tag support |
 | Full-text index | subject, body text, sender text, recipient text | see [search](search.md) |
-| Mutation queue | serialized intent, intent schema version, state, attempt count, creation time | durable across process death *and upgrades* — see [mutations](../mail/mutations.md) |
+| Mutation queue | serialized intent, intent schema version, state, attempt count, creation time, per-message sequence, expiry, and the pending overlay the intent contributes | durable across process death *and upgrades* — see [mutations](../mail/mutations.md). The overlay lives here because it is retired with the intent that created it, never independently |
 | Blob reference | content hash, role | the account's claim on a shared blob; refcounts live elsewhere, see below |
 | Authentication result | per message: signing domain, sender-policy and alignment outcomes | feeds the [synthetic origin](../rendering/sender-origin.md) |
 | Account policy | per-sender remote-content allowlist, per-sender dark-mode choice, notification rules per folder | user decisions scoped to this account — see below |
@@ -241,9 +241,9 @@ neither silently. The exposure is also uneven across channels, which is worth kn
 theoretical it is — the Mac App Store offers users no way to downgrade, while Homebrew Cask and Flatpak
 both do. See [platforms and distribution](../product/platforms-and-distribution.md).
 
-**NFR-48.** A schema migration MUST preserve envelopes, cached blobs, queued mutations, unflushed read
-state, and **both scopes of policy state above**, and MUST NOT require a resynchronization from the
-provider. Serialized intents carry their own
+**NFR-48.** A schema migration MUST preserve envelopes, cached blobs, queued mutations together with the
+pending overlays [D-51](../mail/mutations.md) attaches to them, and **both scopes of policy state above**,
+and MUST NOT require a resynchronization from the provider. Serialized intents carry their own
 version so that an intent enqueued by an older build remains executable after upgrade.
 
 **An intent the executing build does not recognise MUST be quarantined and surfaced — never dropped, and

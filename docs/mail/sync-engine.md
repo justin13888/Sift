@@ -49,8 +49,14 @@ Both halves matter. Automatic recovery without visibility produces an app that s
 a metered connection re-downloading a mailbox. Visible recovery without automation produces an app that
 asks the user to fix something they cannot reason about.
 
-Recovery MUST preserve local state that the server cannot reconstruct: queued mutations, cached bodies
-whose content addresses still match, and read state not yet flushed.
+Recovery MUST preserve local state that the server cannot reconstruct: queued mutations, their pending
+overlays under [D-51](mutations.md), and cached bodies whose content addresses still match.
+
+That list previously ended with "read state not yet flushed" as a fourth item, which read as a second,
+separately durable write path. There is none: marking read is an intent under FR-13, every intent is in
+the durable queue under FR-14, and unflushed read state is therefore queued mutations already named. The
+phrase invited an implementer to build a batched side-channel with its own durability and its own
+precedence against a delta, which is the one thing [D-51](mutations.md) exists to prevent.
 
 ## Degradation is explicit
 

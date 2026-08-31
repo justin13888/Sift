@@ -2,7 +2,7 @@
 
 The only writes Sift performs, and the subsystem that performs them.
 
-**Owns:** D-38, D-40, FR-13, FR-14, FR-15, FR-16, FR-17, FR-18, FR-38, FR-39, NFR-16, NFR-17.
+**Owns:** D-38, D-40, D-51, FR-13, FR-14, FR-15, FR-16, FR-17, FR-18, FR-38, FR-39, NFR-16, NFR-17.
 
 Budget for this as a first-class subsystem, not a thin adapter method. It is where "read-only plus triage"
 quietly becomes expensive, and it is the only place in Sift where a bug can lose a user's mail.
@@ -128,7 +128,52 @@ Intents MUST be applied to local state immediately, giving UI feedback before an
 survives process death and offline periods**. Permanent delete is the one exception, for the reason given
 above: an optimistic state that cannot be corrected is not optimism.
 
-The queue is part of the store, not memory. See [data model](../storage/data-model.md).
+The queue is part of the store, not memory. See [data model](../storage/data-model.md). The intent is
+durably enqueued **before** it is applied locally, which [failure model](../runtime/failure-model.md)
+orders and explains.
+
+## D-51 — Optimistic state is an overlay, and a delta applies underneath it
+
+**Chosen:** a message's local state is a **base**, which the authoritative delta writes, plus a **pending
+overlay** contributed by intents that have been enqueued and not yet resolved. Everything the user sees
+reads through the overlay; the delta never writes through it. An overlay entry is retired when its intent
+succeeds, is compensated, or is reconciled under D-38.
+**Rejected:** one materialized state that both the delta and the optimistic apply write to.
+
+**Why this needed deciding at all.** FR-14 applies an intent to local state immediately; the
+[sync engine](sync-engine.md) calls the delta "the authoritative change feed" and says "there is exactly
+one code path that applies change". Both are right, neither yields, and nothing said what happens when
+they meet. They meet constantly: a delta describing the state *before* an archive routinely arrives after
+the archive, because the request that produced it was in flight when the user acted.
+
+The materialized answer is the one an implementer reaches for, and it loses triage. The user archives, the
+row leaves the list, a delta computed before the archive lands, the row returns — and D-38, reading a
+divergence it did not cause, classifies it as **concurrent change** and corrects it *silently*. So the
+archive silently undoes itself. D-38's own text calls that outcome "how a client loses a user's trust in
+exactly the operation it exists to perform"; it would be reached not because the reconciliation policy is
+wrong but because the ordering rule underneath it was missing.
+
+The overlay makes the two writers non-competing. The delta is free to be authoritative about what the
+server says, which is what NFR-18's recovery and every adapter's applier need. The overlay is free to be
+authoritative about what the user did, which is what FR-14 and NFR-7 promise. Divergence becomes a
+comparison between them at a defined moment rather than a race between two writers to the same field.
+
+**It is also what makes D-38 implementable.** That decision requires distinguishing "this changed under
+me" from "my own operation did not land", and records the cost as "the queue must retain enough about each
+intent to distinguish" them. The overlay is where that is retained: an intent whose overlay entry is still
+present when the server reports a conflicting state failed, and one whose entry was already retired
+describes a change made elsewhere.
+
+**What it costs.** The [data model](../storage/data-model.md) has to represent it, and a read of a message
+is a read of two things rather than one — on the path NFR-2's 50 ms folder switch and NFR-6's scrolling
+both run through. Every read path in the [presentation layer](../architecture/presentation-layer.md) reads
+through the overlay, so a path that forgets to is a bug that shows the user the server's opinion instead
+of their own.
+
+**Contestable because:** the overlay is small and short-lived in the ordinary case — most intents resolve
+in under a second — so a reader may reasonably argue that a materialized state plus careful sequencing at
+the applier would do, at less cost on the read path. The answer is that "careful sequencing" is a property
+nothing can test for, and its failure mode is silent and indistinguishable from ordinary reconciliation.
 
 ## FR-15 — Undo
 
