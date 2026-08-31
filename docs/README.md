@@ -97,17 +97,20 @@ contestable. A decision without its counter-argument is an assertion.
 **Open questions are not resolved by deletion.** Answering one means writing the answer into its owning
 document and striking the entry in [open questions](open-questions.md) with a pointer.
 
-**The design is settled *pending* six open questions, three of which are load-bearing. That is a weaker
+**The design is settled *pending* six open questions, four of which are load-bearing. That is a weaker
 claim than settled, and the distinction between the two groups is the useful part.**
 
-The three that can still move the design: Q-8 — the fallback join when the internet message identifier is
+The four that can still move the design: Q-8 — the fallback join when the internet message identifier is
 absent or duplicated — is required by three documents and defined by none, and threading, cross-folder
 dedup and the Graph move join all rest on it. Q-10 leaves every number in this set unfalsifiable until the
 reference rig is recorded. Q-11 is an unclosed injection path into every message body, in a product whose
-central claim is about hostile input.
+central claim is about hostile input. And **Q-12 belongs in this group rather than the next one**: it is
+usually described as two numbers needing measurement, but [its own entry](open-questions.md) and
+[process model](architecture/process-model.md) both say a bad Linux figure reopens D-2 — the process
+model, which is the second document in the reading order and the thing most of the rest hangs from. A
+question that can reverse a settled structural decision is not bounded, whatever its units.
 
-The other three are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
-legal in the meantime. Q-12 needs two memory figures measured together rather than guessed. Q-13 asks
-whether one feature works on one platform. None of them reaches a decision.
+The other two are bounded. Q-9 needs a number per provider and now has a rule that makes its absence legal
+in the meantime. Q-13 asks whether one feature works on one platform. Neither reaches a decision.
 
 Everything not on that list is decided.
