@@ -32,8 +32,9 @@ members = [
     "crates/rendering/sift-block",
     "crates/rendering/sift-broker",
 
-    # Providers — the capability abstraction, and one crate per adapter.
+    # Providers — the capability abstraction, the transport, and one crate per adapter.
     "crates/providers/sift-provider",
+    "crates/providers/sift-http",
     "crates/providers/sift-jmap",
     "crates/providers/sift-graph",
     "crates/providers/sift-gmail",
@@ -116,6 +117,7 @@ sift-css        = { path = "crates/rendering/sift-css" }
 sift-block      = { path = "crates/rendering/sift-block" }
 sift-broker     = { path = "crates/rendering/sift-broker" }
 sift-provider   = { path = "crates/providers/sift-provider" }
+sift-http       = { path = "crates/providers/sift-http" }
 sift-jmap       = { path = "crates/providers/sift-jmap" }
 sift-graph      = { path = "crates/providers/sift-graph" }
 sift-gmail      = { path = "crates/providers/sift-gmail" }

@@ -273,7 +273,7 @@ fn finish_declaration(property: &mut String, value: &mut String, out: &mut Vec<D
 fn append(out: &mut String, token: &Token<'_>) {
     match token {
         Token::Ident(s) => out.push_str(s),
-        // The sigil is part of the token'''s identity, not decoration: without it an at-rule
+        // The sigil is part of the token's identity, not decoration: without it an at-rule
         // prelude is indistinguishable from a type selector, and `@media` becomes a rule
         // matching an element called "media".
         Token::AtKeyword(s) => {

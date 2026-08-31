@@ -15,8 +15,8 @@ workspace = true
 sift-foundation.workspace = true
 sift-sanitize.workspace = true
 # The same argument D-26 makes for the HTML tree builder, applied to CSS: this is
-# attacker-controlled input and the tokenizer has to be the specification'''s rather than a
+# attacker-controlled input and the tokenizer has to be the specification's rather than a
 # reading of it. cssparser is CSS Syntax Level 3, and is the tokenizer the browser engines
-# this pipeline is measured against use. **The cascade over it is Sift'''s**, which is the
+# this pipeline is measured against use. **The cascade over it is Sift's**, which is the
 # half D-27 commits to and the half no crate provides.
 cssparser = "0.37"

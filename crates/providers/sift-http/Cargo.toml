@@ -1,0 +1,19 @@
+[package]
+name = "sift-http"
+description = "The HTTPS transport an adapter reaches a provider over. D-30: the OS trust store."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sift-foundation.workspace = true
+sift-provider.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-platform-verifier = "0.7"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

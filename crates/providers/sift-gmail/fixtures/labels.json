@@ -1,0 +1,11 @@
+{"labels":[
+  {"id":"INBOX","name":"INBOX","type":"system"},
+  {"id":"SENT","name":"SENT","type":"system"},
+  {"id":"TRASH","name":"TRASH","type":"system"},
+  {"id":"SPAM","name":"SPAM","type":"system"},
+  {"id":"UNREAD","name":"UNREAD","type":"system"},
+  {"id":"STARRED","name":"STARRED","type":"system"},
+  {"id":"IMPORTANT","name":"IMPORTANT","type":"system"},
+  {"id":"CATEGORY_UPDATES","name":"CATEGORY_UPDATES","type":"system"},
+  {"id":"Label_11","name":"Receipts","type":"user"}
+]}

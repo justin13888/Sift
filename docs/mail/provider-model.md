@@ -179,9 +179,8 @@ tag support.
 
 ## D-13 — Hand-written client subsets; no additional language runtime
 
-**Chosen:** hand-written request and response types for Microsoft Graph; a generated client for Gmail,
-tracking the published schema. No shim in another language.
-**Rejected:** a Go or other-language sidecar to reuse an official SDK.
+**Chosen:** hand-written request and response types for **every** provider. No shim in another language.
+**Rejected:** a Go or other-language sidecar to reuse an official SDK; a generated client for Gmail.
 
 **Why.** Adding a garbage-collected runtime to an app whose primary requirement is idle footprint costs a
 GC, a floor of tens of megabytes, pause jitter, and either a third process or a foreign-function boundary.
@@ -193,12 +192,31 @@ Between the two Rust paths — generate from schema, or hand-write the subset �
 surface area. A read-and-triage client needs on the order of 12 to 20 endpoints per provider. Graph's
 published schema covers an enormous product surface and must be sliced hard before generation is viable,
 so hand-writing its mail subset is smaller, faster to compile, and easier to audit, and it gives exact
-control over throttling and retry behaviour. Gmail's generated client is already scoped to one API and
-tracks schema revisions, so generation is the cheaper path there.
+control over throttling and retry behaviour.
 
-Where clients are hand-written, CI MUST diff the hand-written types against the current published schema
-and fail on drift. The schema stays the source of truth for correctness even when it is not the source of
-the code.
+**This decision originally excepted Gmail**, whose published schema is already scoped to one API and
+tracks its own revisions, making generation the cheaper path there. Writing the adapter changed the
+answer, on a ground surface area does not reach: **that schema declares 79 methods, two of which send
+mail.** Generating from it would put `messages.send` and `drafts.send` into the shipped binary —
+unreachable, but present — and [scope](../../product/scope.md) states the no-send constraint as
+"there MUST be no SMTP, JMAP submission, or provider `sendMail` code path **anywhere in any shipped
+binary**". That is a structural guarantee rather than a statement about which functions get called, and
+a generated client cannot honour it without a slicing step that is itself the hand-written subset.
+
+Sift uses ten of those 79 methods. The other sixty-nine are drafts, sending, settings, filters,
+forwarding addresses, delegation, push subscriptions and S/MIME — every one of them outside
+[scope](../../product/scope.md), and several of them things this product excludes by design.
+
+Where clients are hand-written — which is now everywhere — CI MUST diff the hand-written types against
+the current published schema and fail on drift. The schema stays the source of truth for correctness even
+when it is not the source of the code.
+
+The diff has two halves, and they run in different tiers because only one of them needs the network. The
+**committed endpoint list** — the hand-written side, pinned with the schema revision it was taken from —
+is checked against what the adapter actually constructs on every change, offline. The **published
+document** is fetched and compared against that list in the per-integration tier, per
+[D-63](../build/ci-and-release.md). An endpoint that no longer exists is drift; an endpoint that appears
+in the list and sends is a defect of a different kind, and is checked for by name.
 
 ## D-30 — Rust TLS, verifying against the operating system's trust store
 

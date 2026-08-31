@@ -9,7 +9,7 @@ language = "C"
 # enum tag *and* a typedef of the same name, and Swift's C importer sees two types called
 # SiftStatus — which it reports, correctly, as ambiguous.
 style = "type"
-# Typedefs only, no separate struct/enum tags. With both, the header declares  *and* a  typedef, and Swift'''s C importer sees two types with one
+# Typedefs only, no separate struct/enum tags. With both, the header declares  *and* a  typedef, and Swift's C importer sees two types with one
 # name — which it reports, correctly, as ambiguous.
 header = """
 /*

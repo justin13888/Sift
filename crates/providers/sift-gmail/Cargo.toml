@@ -1,6 +1,6 @@
 [package]
 name = "sift-gmail"
-description = "The Gmail adapter. D-7: IDLE as a doorbell, delta over the API."
+description = "The Gmail adapter: the capability table it declares, and the protocol it speaks."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,3 +14,16 @@ workspace = true
 [dependencies]
 sift-foundation.workspace = true
 sift-provider.workspace = true
+
+# The provider's wire format is JSON. Parsed with a real parser rather than a hand-rolled
+# one, because every byte of it is attacker-influenced: a subject, a snippet and a display
+# name all arrive through here from whoever sent the mail.
+serde_json = "1"
+# Gmail returns part bodies and attachments in URL-safe base64 without padding.
+base64 = "0.22"
+
+[dev-dependencies]
+# The live half of D-13's schema drift check is an example rather than a test, because it
+# needs the network and D-63 keeps a gate that cannot run on a hosted runner out of the
+# per-change tier.
+sift-http.workspace = true

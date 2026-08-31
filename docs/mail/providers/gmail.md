@@ -13,11 +13,11 @@ Capability notes for the Gmail adapter. The abstraction it implements is in
 | Tag support | read-write — user labels |
 | Archive semantics | remove from inbox |
 | Trash semantics | move to trash |
-| Permanent delete | supported |
+| Permanent delete | **not supported** — see the scope section below |
 | Thread operations | native |
 | Junk reporting | native report — the spam system label, both directions |
 | Delta mechanism | monotonic history cursor |
-| Push mechanism | IDLE as a doorbell, delta over the API — see D-7 below |
+| Push mechanism | **poll only** — see D-7 below |
 | ID stability | stable globally |
 | Server search | full query syntax, including operators Sift's own grammar does not expose |
 | Maximum batch size | **unknown — plans conservatively pending [Q-9](../../open-questions.md)** |
@@ -35,27 +35,62 @@ Envelope fetches MUST request metadata only rather than full messages, and MUST 
 
 ## D-7 — Push mechanism
 
-**Chosen:** use IMAP IDLE purely as a wake signal — a doorbell — and take the actual delta over the API.
-**Rejected:** pure API polling at a short interval.
+**Chosen:** poll the change feed on the coalesced schedule. There is no doorbell.
+**Rejected:** using IMAP IDLE purely as a wake signal, with the delta over the API.
 
-**Why.** Gmail's own push mechanism requires a publicly reachable endpoint, which is impractical for a
-desktop application. IDLE gives sub-second notification without one; the API gives an efficient delta. The
-hybrid is the only way to get both.
+**This decision was amended after the wire protocol was written**, and the thing that changed is a
+fact about the provider's authorization model rather than about its protocols.
 
-**What it costs.** Two authentication paths and two connection lifecycles for one account, permanently.
+**IMAP access over OAuth requires the provider's full-mailbox scope, and that same scope authorizes
+SMTP submission.** There is no read-only or modify-only scope that admits IMAP. So the hybrid is
+reachable only by asking the user, on the consent screen, to grant Sift the ability to send mail as
+them — and [D-88](../../security/credentials.md) forbids exactly that, in terms that leave no room: a
+permanent minimum scope set with **no send or compose scope ever requested**, so that the no-send
+constraint is checkable against an authorization screen. A granted submission capability is an
+outbound message path whether or not any code calls it, and [scope](../../product/scope.md) makes that
+constraint structural rather than a preference about which functions exist.
 
-**Contestable because:** a coalesced poll of the change feed on the order of every 30 seconds may be
-indistinguishable to the user, at half the code and one connection. This decision MUST be re-examined
-against measured perceived latency rather than assumed. Note also that on cellular the hybrid is disabled
-outright — IDLE is dropped in favour of long aligned polls, see
-[network conditions](../../runtime/network-conditions.md) — so the polling path must exist and be good
-regardless.
+The original decision recorded its own contestability — "a coalesced poll of the change feed on the
+order of every 30 seconds may be indistinguishable to the user, at half the code and one connection" —
+and noted that the polling path "must exist and be good regardless" because the hybrid was disabled on
+cellular anyway. That turns out not to have been a preference.
+
+**What it costs.** Notification latency is a poll interval rather than sub-second, on every account
+rather than only on cellular ones. Against that: one authentication path, one connection lifecycle,
+and no connection held open, so this provider spends none of L-23's budget.
+
+**Contestable because:** the provider's own push mechanism would give sub-second notification with no
+IMAP scope at all — but it delivers to a publicly reachable endpoint, which NFR-24 forbids outright.
+If a mechanism ever appears that needs neither a listening socket nor a submission scope, this
+decision is the one to revisit, and the delta path is unchanged either way.
+
+## Permanent delete, and why it is absent rather than approximated
+
+Immediate permanent deletion is behind the same full-mailbox scope, for the same reason. So FR-13's
+ninth intent is **unavailable on this provider**, and the capability table above says so.
+
+This is the capability model working rather than a gap in it. [Mutations](../mutations.md) requires an
+unsupported operation be *absent* rather than approximated — the rule it already applies to junk
+reporting on an account that does not support it — so the affordance does not appear, and nothing
+silently substitutes a move to trash for a request to destroy something.
+
+**What it costs.** A user who wants a message gone rather than trashed must do it in the provider's
+own interface. That is a real loss and it is the second thing this scope decision buys.
 
 ## Client
 
-A generated client tracking the published schema, per [D-13](../provider-model.md).
+A hand-written subset, per [D-13](../provider-model.md) as amended. The published schema declares 79
+methods; Sift uses ten of them, and two of the remaining sixty-nine send mail. The endpoints in use are
+committed beside the adapter with the schema revision they were transcribed from, and both halves of
+D-13's drift check run against that file.
 
 ## Authentication gate
 
 Gmail access requires restricted OAuth scopes, and obtaining them is a **business-level blocker that MUST
 be resolved before the adapter is written**. See [credentials](../../security/credentials.md).
+
+The scope set is exactly one scope — the provider's *modify* scope — and it is permanent. It reads,
+searches, labels, trashes, untrashes and reports junk in both directions. It cannot send, cannot
+compose, and cannot permanently delete. Widening it later would force the entire install base through
+re-consent, which is why [D-88](../../security/credentials.md) calls it a minimum rather than a
+starting point.

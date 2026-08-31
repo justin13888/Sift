@@ -20,8 +20,63 @@ fn approved_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../deps/approved.txt")
 }
 
+/// Crates that carry a root certificate store of their own.
+///
+/// D-30 chooses the platform's trust store and gives the reason: an installation whose
+/// administrator has placed a root in the system store — a corporate inspection proxy, which
+/// is the ordinary case for generic IMAP — expects it to work, and a bundled store silently
+/// breaks every such account with a certificate error the user cannot act on.
+///
+/// The verifier Sift uses declares both of these for platforms Sift does not ship to, so
+/// they appear in the resolve graph. This gate is about the *shipped* targets: neither may
+/// be compiled into a macOS or Linux build, and the check is here rather than in a comment
+/// because a feature flag flipped upstream would move one without any diff saying so.
+const BUNDLED_ROOT_STORES: &[&str] = &["webpki-roots", "webpki-root-certs"];
+
+/// The targets D-46 and `docs/product/platforms-and-distribution.md` name.
+const SHIPPED_TARGETS: &[&str] = &[
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+];
+
+/// D-30, mechanically: no bundled root store reaches a shipped binary.
+fn no_bundled_root_store() -> Result<(), String> {
+    let mut findings = Vec::new();
+    for target in SHIPPED_TARGETS {
+        let output = Command::new("cargo")
+            .args(["tree", "--workspace", "--edges", "normal", "--prefix", "none", "--target", target])
+            .output()
+            .map_err(|e| format!("cargo tree did not run: {e}"))?;
+        if !output.status.success() {
+            // A target whose standard library is not installed cannot be checked here, and
+            // saying so is better than reporting a pass nobody earned.
+            println!("deps: {target} could not be resolved, so D-30 is unchecked there");
+            continue;
+        }
+        let tree = String::from_utf8_lossy(&output.stdout);
+        for line in tree.lines() {
+            let name = line.split_whitespace().next().unwrap_or("");
+            if BUNDLED_ROOT_STORES.contains(&name) {
+                findings.push(format!("  {name} is compiled into the {target} build"));
+            }
+        }
+    }
+    if findings.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "D-30 requires certificate verification against the platform's own trust store, and a \
+         bundled one reached a shipped target:\n{}\n\nA bundled store does not merely differ \
+         from the platform's — it breaks every account behind an inspection proxy, with a \
+         certificate error the user cannot act on.",
+        findings.join("\n")
+    ))
+}
+
 pub(crate) fn run(bless: bool) -> Result<(), String> {
     let current = current_tree()?;
+    no_bundled_root_store()?;
 
     if bless {
         write_approved(&current)?;

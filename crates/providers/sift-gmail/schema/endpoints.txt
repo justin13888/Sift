@@ -1,0 +1,30 @@
+# The endpoints Sift uses, transcribed from the provider's published discovery document.
+#
+# discovery: gmail v1
+# revision: 20260824
+# methods in the published schema: 79
+# methods used here: 10
+#
+# D-13 requires that where a client is hand-written, CI diff the hand-written types against
+# the current published schema and fail on drift. This file is the hand-written side of that
+# diff. `sift-gmail`'s own tests check that every target the adapter can construct matches a
+# template here, and `cargo run -p sift-gmail --example schema-check` checks the other half
+# against the live document — which needs the network, so it belongs to the per-integration
+# tier of D-63 rather than the per-change one.
+#
+# Format: METHOD<space>PATH-TEMPLATE<space>#<space>method-id
+#
+# **Nothing may be added here that sends.** The published schema contains
+# `gmail.users.messages.send` and `gmail.users.drafts.send`; neither appears below, and the
+# test beside this file fails if either ever does.
+
+GET    /gmail/v1/users/{userId}/profile                                       # gmail.users.getProfile
+GET    /gmail/v1/users/{userId}/labels                                        # gmail.users.labels.list
+POST   /gmail/v1/users/{userId}/labels                                        # gmail.users.labels.create
+GET    /gmail/v1/users/{userId}/messages                                      # gmail.users.messages.list
+GET    /gmail/v1/users/{userId}/messages/{id}                                 # gmail.users.messages.get
+GET    /gmail/v1/users/{userId}/messages/{messageId}/attachments/{id}         # gmail.users.messages.attachments.get
+GET    /gmail/v1/users/{userId}/history                                       # gmail.users.history.list
+POST   /gmail/v1/users/{userId}/messages/batchModify                          # gmail.users.messages.batchModify
+POST   /gmail/v1/users/{userId}/messages/{id}/trash                           # gmail.users.messages.trash
+POST   /gmail/v1/users/{userId}/messages/{id}/untrash                         # gmail.users.messages.untrash

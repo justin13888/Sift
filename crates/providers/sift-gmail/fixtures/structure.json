@@ -1,0 +1,7 @@
+{"id":"m1","threadId":"t1","labelIds":["INBOX"],"snippet":"a snippet",
+ "payload":{"partId":"","mimeType":"multipart/mixed","body":{"size":0},
+  "parts":[
+   {"partId":"0","mimeType":"text/plain","body":{"size":5,"data":"aGVsbG8"}},
+   {"partId":"1","mimeType":"text/html","body":{"size":22,"data":"PGh0bWw-PGI-aGk8L2I-PC9odG1sPg"}},
+   {"partId":"2","mimeType":"application/pdf","filename":"statement.pdf","body":{"size":41943040,"attachmentId":"ATT-1"}}
+  ]}}

@@ -1,0 +1,5 @@
+{"history":[
+  {"id":"1001","messagesAdded":[{"message":{"id":"m4","threadId":"t3","labelIds":["INBOX","UNREAD"]}}]},
+  {"id":"1002","labelsRemoved":[{"message":{"id":"m1","threadId":"t1"},"labelIds":["UNREAD"]}]},
+  {"id":"1003","labelsRemoved":[{"message":{"id":"m2","threadId":"t1"},"labelIds":["INBOX"]}]}
+],"historyId":"1003"}

@@ -228,3 +228,62 @@ recording rather than just fixing:
 The rule that a build failing on the floor is a defect rather than an invitation to raise it
 still holds — it is about **Sift's own code**. When a vendored dependency genuinely needs
 more, the floor moves, deliberately, with the reason written down. This is that.
+
+## The TLS stack, and the trust store D-30 requires
+
+`rustls`, `ring`, `rustls-platform-verifier` and the platform crates under them arrived with
+`sift-http`. There is no way to reach a provider without them and the questions the gate asks
+have real answers here rather than shrugs.
+
+**Hostile-input path: yes, entirely.** Everything below `sift-http` parses bytes from
+somebody else's computer. That is why the HTTP layer above them is hand-written and bounded
+by `docs/limits.md` rather than borrowed: a general-purpose client's limits are its own.
+
+**Sockets and threads: one outbound connect, no threads, no timers.** `sift-http` calls
+`TcpStream::connect` and nothing else touches the network stack. NFR-24 is checked by
+`cargo xtask invariants` over the source, and the crate states the property in a `const fn`
+so it is greppable.
+
+**The crypto provider is `ring` rather than `aws-lc-rs`.** The latter needs a C toolchain and
+CMake at build time, which a vendored Flatpak build — no network, per D-33 — cannot rely on.
+
+**`webpki-root-certs` and `jni` appear in the resolve graph and compile into nothing Sift
+ships.** They are target-conditional dependencies of the platform verifier, for Android and
+wasm. The first is a **bundled root store**, which is exactly what D-30 rejects, so its
+absence from the shipped targets is now a gate rather than an observation:
+`cargo xtask deps` resolves the tree for each of D-46's three targets and fails if either
+name appears. Verified to fire by adding `webpki-roots` and watching it.
+
+On macOS the verifier is `security-framework` — the platform's own. On Linux it is
+`rustls-native-certs`, which reads the system store. Both are D-30.
+
+## `flate2` — and why the decompressed length is capped twice
+
+`accept-encoding: gzip` is worth roughly five times on a JSON change feed, which matters
+directly to FR-35 and FR-36 on a metered link. The pure-Rust backend (`miniz_oxide`) is
+selected explicitly: the C one would be a second build-time toolchain requirement for the
+same reason `ring` was chosen over `aws-lc-rs`.
+
+**A client that bounded only the transfer would have admitted a decompression bomb inside
+NFR-39's ceiling.** So `sift-http` caps the decompressed output at L-13 as well as the
+transferred bytes, and there is a test that builds a 4 MB bomb under 64 KB and watches the
+cap refuse it.
+
+## `sha2` and `getrandom` — PKCE, and nothing else
+
+The S256 challenge names its hash in the parameter sent to the provider, so the algorithm is
+not a choice. RustCrypto is the family `aes-gcm` already brought in under D-76, so this adds
+a hash rather than a second cryptographic ecosystem. The implementation is checked against
+RFC 7636's own worked example rather than against itself.
+
+`getrandom` generates the verifier and D-36's state parameter. Where it fails, the flow
+**refuses** rather than substituting anything: D-71 makes an absent security guarantee a
+refusal, and a predictable verifier is a PKCE exchange that proves nothing.
+
+## `serde_json` and `base64` — the Gmail wire format
+
+Every byte a provider returns is attacker-influenced: a subject, a display name and a snippet
+are all written by whoever sent the mail. Parsed with a real parser rather than a hand-rolled
+one, for the same reason D-26 chose a spec-conformant HTML tree builder.
+
+`base64` was already in the tree under `adblock`; this is the first direct use.

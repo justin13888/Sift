@@ -83,13 +83,13 @@ pub trait Adapter {
 
 /// A provider's own folder identifier. An **attribute** of a folder, never its key: D-83
 /// gives every folder a local identity assigned on first discovery.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RemoteFolderId(pub String);
 
 /// A provider's own message identifier. Also an attribute rather than a key — and under
 /// [`IdStability::UnstableOnMove`](crate::capability::IdStability::UnstableOnMove) it does
 /// not even survive a move.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RemoteMessageId(pub String);
 
 /// The semantic kind of a special-use folder — FR-5.
@@ -141,16 +141,50 @@ pub enum Change {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One list row's worth of a message, as the adapter recovered it.
+///
+/// **Everything here is attacker-influenced.** Subject, display name and snippet are written
+/// by whoever sent the mail, so nothing above this type may render one without NFR-54's
+/// normalization and L-25's bound — which is why the layer that stores them and the layer
+/// that shows them share one normalizer in the foundation.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Envelope {
     pub id: RemoteMessageId,
+    /// The provider's own conversation identifier where it has one.
+    ///
+    /// FR-11 prefers it over reconstruction, and D-44 uses it as the **scope** a join is
+    /// performed within — never as the join's key.
+    pub thread_id: Option<String>,
+    /// The `Message-ID` header. D-44: it **narrows and never keys**.
     pub internet_message_id: Option<String>,
+    /// `References` and `In-Reply-To`, in order. D-44's reference chain.
+    pub references: Vec<String>,
+    pub subject: Option<String>,
+    /// The originator address, as D-44's digest needs it.
+    pub from: Option<String>,
+    pub to: Vec<String>,
     /// **The server's received time**, which D-55 makes the authoritative sort key. Not the
     /// `Date` header, which is the sender's and is only ever displayed.
     pub received_at_millis: u64,
     /// The sender's `Date` header. Displayed, never ordered on.
     pub origination_date_millis: Option<u64>,
     pub snippet: Option<String>,
+    /// Every folder this message is in.
+    ///
+    /// A list rather than a field, because [`LocationCardinality`](crate::capability::LocationCardinality)
+    /// is a declared capability: on a provider that says `OneOrMore` a message is in several
+    /// places at once, and a single-valued field would silently pick one.
+    pub folders: Vec<RemoteFolderId>,
+    /// Tags applied to this message, as the provider identifies them — FR-37.
+    ///
+    /// Identifiers rather than names, because the two are not the same thing on every
+    /// provider and only the adapter holds the mapping.
+    pub tags: Vec<String>,
+    pub read: bool,
+    pub flagged: bool,
+    /// What the provider says the whole message would cost to fetch. Advisory: the fetch is
+    /// still bounded by L-13 against the transferred length, because a sender controls both.
+    pub size_estimate: u64,
 }
 
 /// A mutation as the adapter will send it. Resolved from a provider-agnostic intent

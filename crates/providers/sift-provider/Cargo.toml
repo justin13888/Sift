@@ -13,3 +13,11 @@ workspace = true
 
 [dependencies]
 sift-foundation.workspace = true
+
+# PKCE's S256 challenge, and the randomness the verifier and D-36's state parameter need.
+#
+# The hash is not negotiable — it is named in the method sent to the provider — and the
+# RustCrypto family is the one aes-gcm already brought under D-76, so this adds a hash
+# rather than a second cryptographic ecosystem.
+sha2 = "0.10"
+getrandom = "0.4"
