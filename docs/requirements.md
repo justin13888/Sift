@@ -84,7 +84,7 @@ two homes and one of them would go stale.
 | NFR-11 | At most 2 timer wakeups per minute per account at idle | [runtime/scheduling](runtime/scheduling.md) |
 | NFR-12 | Footprint growth at or under 5% over 14 days: no ratchet | [runtime/memory-pressure](runtime/memory-pressure.md) |
 | NFR-13 | L2 shed **issued** within 500 ms of signal, L3 within 1 second; reclaim itself is timed by NFR-46. L3 sheds in-process and terminates nothing | [runtime/memory-pressure](runtime/memory-pressure.md) |
-| NFR-14 | Disk bounded by the configured cache budget, hard-capped | [storage/cache-and-blobs](storage/cache-and-blobs.md) |
+| NFR-14 | Bodies, attachments and blobs bounded by the configured cache budget, hard-capped | [storage/cache-and-blobs](storage/cache-and-blobs.md) |
 | NFR-15 | Network at idle at or under 1 KB per minute per account | [runtime/scheduling](runtime/scheduling.md) |
 | NFR-42 | Filter engine memory at or under 40 MB with standard lists loaded; bound to window lifetime, dropped at L1 | [rendering/content-blocking](rendering/content-blocking.md) |
 | NFR-44 | Allocation-attribution overhead at or under 2% in release | [runtime/observability](runtime/observability.md) |
@@ -92,6 +92,7 @@ two homes and one of them would go stale.
 | NFR-46 | Body view torn down when unused; footprint returns within 1 second | [rendering/webview-isolation](rendering/webview-isolation.md) |
 | NFR-48 | Schema migrations preserve envelopes, blobs, queued mutations, read state and policy state; never require resync | [storage/data-model](storage/data-model.md) |
 | NFR-49 | Attachments written to disk carry the platform's untrusted-source provenance marking | [storage/cache-and-blobs](storage/cache-and-blobs.md) |
+| NFR-52 | Envelopes and their full-text index entries bounded by their own budget, evicted oldest-first together | [storage/cache-and-blobs](storage/cache-and-blobs.md) |
 
 ## Reliability and correctness
 

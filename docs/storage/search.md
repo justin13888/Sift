@@ -53,4 +53,6 @@ Keystroke to results under 100 ms at p95 over 500,000 messages, measured on the
 [reference environment](../product/reference-environment.md) with a dedicated benchmark harness.
 
 The index's memory use is a declared, budgeted cache like any other — see
-[memory pressure](../runtime/memory-pressure.md).
+[memory pressure](../runtime/memory-pressure.md). Its use of **disk** is bounded by NFR-52 in
+[cache and blobs](cache-and-blobs.md), together with the envelopes it indexes; an index entry is evicted
+with its message row and never on its own, which is what preserves D-5's no-drift argument.

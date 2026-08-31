@@ -1,6 +1,6 @@
 # Cache and blobs
 
-**Owns:** D-23, FR-10, FR-12, NFR-14, NFR-49.
+**Owns:** D-23, FR-10, FR-12, NFR-14, NFR-49, NFR-52.
 
 ## The cache is not the source of truth
 
@@ -12,8 +12,12 @@ This framing is what permits aggressive shedding without a correctness argument 
 
 ## Tiering
 
-**Envelopes are kept indefinitely.** They are small, and they are what makes list scrolling instant. An
-envelope-complete account is browsable and searchable offline even with no bodies cached at all.
+**Envelopes are kept for as long as their own budget allows**, which in practice means far longer than any
+body. They are small, and they are what makes list scrolling instant. An account whose envelopes are
+retained is browsable and searchable offline even with no bodies cached at all.
+
+They were previously described as retained *indefinitely*, and that was the one place this documentation
+set contradicted its own hard constraint. See NFR-52.
 
 **Bodies and attachments are bounded.** Default budget: 90 days or 2 GB, whichever binds first, evicted
 least-recently-used. The budget is user-configurable.
@@ -108,10 +112,38 @@ These are different facts and conflating them is a lie of omission. "Not cached"
 when the network returns. "Not available" means the server no longer has it. A user deciding whether to
 find another way to reach a message needs to know which they are looking at.
 
-## NFR-14 — The disk budget is a hard cap
+## NFR-14, NFR-52 — Two budgets, and together they are the whole of disk
 
-Disk use MUST stay within the user-configured cache budget to within 5%, and the cap MUST be **enforced,
-never advisory**. A cache that grows forever is not a cache.
+**NFR-14.** Bodies, attachments and the blob store MUST stay within the user-configured cache budget to
+within 5%, and the cap MUST be **enforced, never advisory**. A cache that grows forever is not a cache.
+
+**NFR-52.** Envelopes, the message rows carrying them, and their
+[full-text index](search.md) entries MUST stay within a second declared, user-configurable budget, evicted
+oldest-first, with an envelope and its index entry evicted together as one unit.
+
+**NFR-14 was false as written, and the repair is a coherence fix rather than a measurement.** It said disk
+was bounded by the cache budget and hard-capped, while this document retained envelopes indefinitely and
+[search](search.md) indexed body text. Neither was inside the budget and nothing else bounded them, so the
+one requirement bounding disk did not reach the two artefacts that grow forever — in a set whose
+[hard constraints](../../AGENTS.md) open with "no unbounded cache". At the 500,000 messages NFR-5 is
+stated over, the index alone is not a rounding error against a 2 GB body budget.
+
+Two budgets rather than one widened cap, because the two tiers are evicted on different principles and
+merging them would let a large attachment evict a year of envelopes. NFR-14's is least-recently-used over
+things the provider will hand back on demand; NFR-52's is oldest-first over the cheap summary that makes
+the client usable offline, and it is the one a user should rarely reach.
+
+**Eviction under NFR-52 takes the index entry with the envelope, and eviction under NFR-14 does not.** A
+body evicted for space leaves its indexed text in place, which is what keeps a message findable after its
+body is gone — the search result is then an ordinary FR-12 "not cached" message that is re-fetched when
+opened. This also preserves [D-5](search.md)'s argument that the index "cannot drift" from the messages,
+because the index entry and the message row are created and destroyed in the same transaction. Only when
+the message row itself goes does its index entry go with it.
 
 Eviction MUST be driven by the budget rather than by a periodic sweep hoping to keep up, and blob
 collection MUST run as part of eviction rather than as a separate hoped-for pass.
+
+**What this costs the user is legibility, and it is owed to them.** An account whose oldest envelopes have
+been evicted is no longer complete, and local search over it no longer covers everything the provider
+holds. That is exactly the confusion [FR-21](search.md)'s labelling by source exists to answer, and this
+is the second thing that makes it load-bearing rather than a nicety.
