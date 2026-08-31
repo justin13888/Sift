@@ -186,3 +186,22 @@ syntax.
 - **Size.** It is the largest single addition to the tree so far. R-12's warning is about
   what Sift *builds*; this is the other side of that ledger, and the count in
   `deps/approved.txt` is the only place it is visible.
+
+---
+
+## `cssparser`
+
+**Reached by:** `sift-css`. The same argument D-26 makes for the HTML tree builder, applied
+to CSS — this is attacker-controlled input, and the tokenizer has to be the specification's
+rather than a reading of it.
+
+- **Why a dependency, given D-27.** D-27 commits to *resolving the cascade* — selector
+  matching, specificity, importance, shorthand expansion, media-query evaluation,
+  inheritance. **None of that is here**; it is `sift-css`, and it is the largest single
+  commitment in the pipeline. What this crate supplies is CSS Syntax Level 3 tokenization,
+  which is the part where hostile input is dangerous and where a hand-rolled reading would
+  differ from the engine rendering the same document beside us.
+- **Unsafe.** Present, in tokenizer fast paths. On the hostile-input path, and in NFR-40
+  method 4's fuzzing scope alongside the HTML builder.
+- **Licence.** `MPL-2.0`, admitted for the reason recorded in `deny.toml`.
+- **Floor, threads, timers, sockets.** None.
