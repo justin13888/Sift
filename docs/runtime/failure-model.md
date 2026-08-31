@@ -100,6 +100,11 @@ status.
 dropped the filter engine MUST say the shed rather than naming a rule, which
 [memory pressure](memory-pressure.md) already requires and which nothing else would have delivered.
 
+**Provider throttling is the largest member of this category**, and it is here rather than in the table
+above for the reason this section gives: there is nothing the user can do about it.
+[D-87](../mail/provider-model.md) owns the handling. It becomes a *degraded* condition only once it
+stops progress, which is the same promotion any sustained transient gets.
+
 ## Durability ordering
 
 **An intent MUST be durably enqueued before it is applied optimistically to local state**, not after.

@@ -2,7 +2,7 @@
 
 The abstraction every provider is reached through.
 
-**Owns:** D-12, D-13, D-30, FR-5, FR-37.
+**Owns:** D-12, D-13, D-30, D-87, FR-5, FR-37.
 
 ## The rule
 
@@ -31,6 +31,7 @@ This is the only way the abstraction survives contact with a fifth provider.
 | ID stability | stable globally; stable per folder; unstable on move | Whether a remote identifier may be used as a join key |
 | Server search | per-provider capability set | What can be delegated to the server — see [search](../storage/search.md) |
 | Maximum batch size | integer, or unknown | Batching limit for bulk operations. Magnitude-valued: unknown means "plan conservatively", never "unsupported" — see the growth rules below |
+| Request budget | integer with a period, or unknown | The rate the provider will accept before throttling. Magnitude-valued, so unknown means "plan conservatively" — see D-87 below and the growth rules |
 | Snippet source | provider-supplied; client-derived; none | Where FR-6's list snippet comes from. Three providers return a preview with the envelope and one does not — see [sync engine](sync-engine.md) |
 
 Adapter responsibilities are: enumerate folders, produce a delta against a cursor, fetch envelopes, fetch
@@ -83,6 +84,62 @@ after a successful contact means the probe failed, and the two MUST NOT be store
 Together these mean a fifth provider lands as a new adapter and new rows, with no migration for accounts
 that already exist. That is the property the whole capability model is for, and it is worth more than any
 individual row in the table.
+
+## D-87 — Throttling is scheduled, not slept, and it is degradation before it is a condition
+
+**Chosen:** a throttling response is a first-class outcome with its own handling: any delay the provider
+states is honoured **through the scheduler's timing wheel**, absent one the backoff is the scheduler's
+existing exponential curve with cap and jitter, and throttling surfaces as *transient degradation* until
+it is sustained enough to stop progress, at which point the account enters the existing **degraded**
+condition with throttling as its stated reason.
+**Rejected:** treating a throttling response as an ordinary transient error; adding a *throttled*
+condition to D-49's set; sleeping for the stated delay.
+
+**Why this needed writing at all.** Nothing in this set mentioned rate limiting. The only trace was one
+sentence in [Microsoft Graph](providers/microsoft-graph.md) — that its throttling *"deserves bespoke
+handling rather than a generic retry policy"* — which says a generic policy is insufficient without
+establishing that one exists. Every provider here throttles, and the behaviour that follows a throttling
+response is the difference between a mail client and one that gets an account suspended.
+
+**Why it goes through the wheel, which is the part an implementer will get wrong.** A provider that
+states a retry delay is handing over a duration, and the reflexive response is to wait for it. That is a
+per-account sleep loop, which [scheduling](../runtime/scheduling.md) prohibits outright as *"the dominant
+cause of idle battery drain"* — and it arrives disguised as protocol compliance rather than as the
+pattern that rule forbids. A stated delay is a deadline; deadlines are the wheel's job, and a throttled
+account contributes no wakeups of its own while it waits.
+
+**Why the delay is a floor rather than an instruction.** The wheel coalesces, so a throttled account
+resumes on the first tick at or after the stated instant, not at the instant itself. Resuming late is
+always safe; resuming early is the thing that compounds a throttle into a suspension.
+
+**Why not a new condition.** [D-49](../runtime/failure-model.md) makes the condition set closed and
+precedence-ordered, and it *"reaches the user through one surface"* — so adding a value costs both
+shells under [D-56](../architecture/presentation-layer.md), permanently. Throttling does not earn that,
+because [failure model](../runtime/failure-model.md)'s own test is whether there is anything the user can
+do: a throttle is a transient the user cannot act on, and its correct expression is the episodic notice
+that document already defines. **Only when a throttle stops progress does it become a condition, and then
+it is the existing *degraded* one with a reason**, which is what that condition is for.
+
+**Throttled traffic still counts.** A throttled request consumed bytes and reached the provider, so it
+counts against [FR-36](../runtime/network-conditions.md)'s accounting like any other. Excluding it would
+make the burn least visible during the period the client is behaving worst.
+
+**The declared budget is a magnitude, and inherits the rule that already exists.** The capability row
+above is magnitude-valued, so **unknown** means plan conservatively rather than "unlimited" — the rule
+this document already states for maximum batch size, applied to the second row it anticipated when it
+said *"a rate limit, a maximum request size"* would inherit it *"without further argument"*. A declared
+budget lets the scheduler pace work before a throttle rather than after it; an unknown one means pacing
+against a conservative default and learning from the throttles that arrive.
+
+**What it costs:** one more magnitude row per adapter that nobody has values for, joining
+[Q-9](../open-questions.md) in that state, and a pacing mechanism in the scheduler that has nothing to do
+with wakeups and lives there anyway because that is where deadlines are.
+
+**Contestable because:** pacing against a declared budget is optimization for a client whose steady-state
+request rate is deliberately tiny — fifteen watched folders, coalesced — so the throttle that matters is
+almost always [D-53](sync-engine.md)'s backfill, which is one burst per account per lifetime. A design
+that only reacted, never paced, would be simpler and would be wrong exactly once per account, at the
+worst possible moment.
 
 ## D-12 — Location and Tags are separate concepts
 
