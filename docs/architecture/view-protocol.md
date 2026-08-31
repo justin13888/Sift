@@ -262,7 +262,7 @@ to grow every time something in the core wants to tell somebody.
 
 **Contestable because:** six entries is enough that a general event channel with an identified payload
 would be a smaller surface than six signatures, and would fold neatly into the
-[state register](../runtime/failure-model.md)'s identified-and-parameterized shape. That design is
+[state register](state-register.md)'s identified-and-parameterized shape. That design is
 better if the set grows and worse while it is small, because it replaces six checked signatures with one
 that carries a discriminant — reintroducing exactly the runtime dispatch D-66 refused.
 
@@ -293,8 +293,9 @@ assumed identity survived every provider operation would hold a key to nothing.
 
 **A failure crossing the boundary is an identified state, never a message.** The layer reports which
 failure occurred and the parameters that distinguish it; the shell decides what to say and in which
-language. The states themselves, and the account conditions they compose into, are owned by
-[failure model](../runtime/failure-model.md).
+language. The states are enumerated in the [state register](state-register.md); the account conditions
+among them are owned by [failure model](../runtime/failure-model.md), which the register refers to rather
+than restates.
 
 ## Related
 

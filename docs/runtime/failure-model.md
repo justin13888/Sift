@@ -75,6 +75,12 @@ whose train went into a tunnel.
 account, it is already a [policy tier](network-conditions.md), and every account shares it. An account
 that is merely offline is not an account with something wrong with it.
 
+**What this document does not own.** The conditions below are the account-scoped set. Every other
+identified state the layer can raise — reconciliation notices, blocking reasons, not-cached versus
+not-available, a quarantined intent, a caught panic — lives in the
+[state register](../architecture/state-register.md) under [D-68](../architecture/state-register.md),
+which refers to this table rather than copying it.
+
 ## Transient degradation is a notice, not a condition
 
 A condition is standing: it persists until something clears it, and the user can act on it. The rest of

@@ -274,6 +274,13 @@ none; a string returned from the layer would be identical in both by constructio
 consistency and is actually the layer quietly deciding presentation — the thing
 [shell boundary](shell-boundary.md) says the ABI must not become "the poorer of two interfaces".
 
+**The states are enumerated in the [state register](state-register.md), which also draws the line
+between this rule and NFR-54.** Read side by side those two look contradictory — nothing user-visible
+crosses, and yet subjects and display names must be normalized *before* they cross. The reconciliation is
+authorship: a **content value** came from the user's mail and crosses as data, normalized and never
+translated; **chrome prose** is a sentence Sift wrote and never crosses at all. [D-68](state-register.md)
+owns that distinction and the parameter rule that follows from it.
+
 **What it costs:** every condition, error and explanation needs an identifier and a parameter list, and
 adding one means touching both shells rather than one layer. That cost is the mechanism: a state nobody
 has rendered is visibly missing, where an untranslated string is not.

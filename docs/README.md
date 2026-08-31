@@ -42,6 +42,7 @@ them.
   [Shell boundary](architecture/shell-boundary.md) · [UI shell](architecture/ui-shell.md) ·
   [Presentation layer](architecture/presentation-layer.md) ·
   [View protocol](architecture/view-protocol.md) ·
+  [State register](architecture/state-register.md) ·
   [Resource broker](architecture/resource-broker.md)
 
 **Mail** — providers, sync, and the only writes Sift performs.
