@@ -78,6 +78,20 @@ pub(crate) struct Layer {
     pub(crate) schedule_context: usize,
     /// Observation handle to the shell's callback for it.
     pub(crate) sinks: Mutex<BTreeMap<u64, Sink>>,
+    /// Open documents, by token.
+    ///
+    /// A rendered body outlives the call that produced it: the shell holds the HTML while it
+    /// renders and resolves resources against the token afterwards. So the strings live here,
+    /// keyed on the token, and closing the document is the one gesture that both revokes the
+    /// token and frees them — one lifetime rather than two that can disagree.
+    pub(crate) documents: Mutex<BTreeMap<String, OpenDocument>>,
+}
+
+/// The layer-owned text behind a [`SiftDocument`](crate::entry::SiftDocument).
+#[derive(Debug)]
+pub(crate) struct OpenDocument {
+    pub(crate) html: String,
+    pub(crate) token: String,
 }
 
 /// Where one observation's batches go.

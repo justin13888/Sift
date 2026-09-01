@@ -23,7 +23,7 @@
 
 use crate::barrier::{guard, guard_out};
 use crate::host::SiftHostCallbacks;
-use crate::layer::{Layer, SiftInit, Sink, Task};
+use crate::layer::{Layer, OpenDocument, SiftInit, Sink, Task};
 use crate::repr::{Generation, SiftId, SiftObservation, SiftRows, SiftStatus, SiftStr};
 use core::ffi::c_void;
 use sift_presentation::action;
@@ -133,6 +133,7 @@ pub unsafe extern "C" fn sift_initialize(
                 schedule: init.schedule,
                 schedule_context: init.schedule_context as usize,
                 sinks: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                documents: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             });
             Ok(Box::into_raw(layer).cast::<SiftApp>())
         })
@@ -491,6 +492,190 @@ pub unsafe extern "C" fn sift_sync_account(
         );
         Ok(())
     })
+}
+
+/// A rendered message body, as the reader receives it.
+///
+/// The strings point into layer-owned storage that lives until the document is closed, which
+/// is longer than a delivery: the body view holds the HTML while it renders, and resolves
+/// resources against the token afterwards.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftDocument<'a> {
+    /// **Post-sanitization.** A raw provider payload never reaches a shell.
+    pub html: SiftStr<'a>,
+    /// D-28's per-document capability token. Every address in `html` is under it.
+    pub token: SiftStr<'a>,
+    /// How many fetching positions were refused. For the reader's **native** chrome — a
+    /// count drawn inside the document is one a sender can counterfeit.
+    pub blocked: u32,
+    /// How many navigation targets the body carries.
+    pub links: u32,
+}
+
+/// Open a message's body: fetch its chosen part and run the seven stages over it.
+///
+/// The document stays open until [`sift_close_document`] revokes its token, because the body
+/// view asks for resources after the HTML has been handed over.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_open_document(
+    app: *mut SiftApp,
+    message: SiftId,
+    dark: u8,
+    out: *mut SiftDocument<'static>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let Some(layer) = layer(app) else {
+                return Err(());
+            };
+            let document = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                session
+                    .app_mut()
+                    .open_document(
+                        sift_foundation::identity::LocalId::from_u128(message.to_u128()),
+                        dark != 0,
+                    )
+                    .map_err(|_| ())?
+            };
+            let blocked = u32::try_from(document.blocked).unwrap_or(u32::MAX);
+            let links = u32::try_from(document.links.len()).unwrap_or(u32::MAX);
+            // The strings outlive the call, so they are held by the layer and keyed on the
+            // token the shell is about to be given. Closing the document is what frees them,
+            // which is the same gesture that revokes the token — one lifetime, not two.
+            let mut open = layer.documents.lock().map_err(|_| ())?;
+            let entry = open
+                .entry(document.token.clone())
+                .or_insert_with(|| OpenDocument {
+                    html: document.html,
+                    token: document.token.clone(),
+                });
+            Ok(SiftDocument {
+                html: SiftStr::new(extend(&entry.html)),
+                token: SiftStr::new(extend(&entry.token)),
+                blocked,
+                links,
+            })
+        })
+    }
+}
+
+/// Close a document: revoke its token and release what was held for it.
+///
+/// D-90 revokes at **navigation**, which is earlier and more often than teardown. Message A's
+/// addresses are dead before message B's document exists, whether or not the view survives —
+/// which is what keeps "two messages share no address space" true across a reused view.
+///
+/// # Safety
+/// `app` must be valid; `token` must point to `token_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_close_document(
+    app: *mut SiftApp,
+    token: *const u8,
+    token_len: usize,
+) -> SiftStatus {
+    guard(|| {
+        if token.is_null() {
+            return Err(());
+        }
+        // SAFETY: the caller's obligation.
+        let bytes = unsafe { core::slice::from_raw_parts(token, token_len) };
+        let name = core::str::from_utf8(bytes).map_err(|_| ())?;
+        // SAFETY: the caller's obligation.
+        let Some(layer) = (unsafe { layer(app) }) else {
+            return Err(());
+        };
+        layer.documents.lock().map_err(|_| ())?.remove(name);
+        let revoked = layer
+            .session
+            .lock()
+            .map_err(|_| ())?
+            .app_mut()
+            .close_document(name);
+        if revoked { Ok(()) } else { Err(()) }
+    })
+}
+
+/// What the broker said about one resource load.
+///
+/// Three answers, kept apart. "Sift refused this" and "this did not arrive" are different
+/// facts, and FR-12 insists such pairs stay distinct — a reader that showed one as the other
+/// would tell a person their mail was being censored, or that it was fine when it was not.
+/// A transparent newtype rather than a C enum, deliberately.
+///
+/// cbindgen emits an enum as *both* a tagged `enum` and a `typedef`, and a Swift importer sees
+/// two things with one name — which is ambiguous at the use site and cannot be disambiguated
+/// without naming the module. A transparent wrapper with associated constants emits one
+/// typedef and a set of `#define`s, which is unambiguous in every consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct SiftResourceAnswer(pub u32);
+
+impl SiftResourceAnswer {
+    /// The bytes are available.
+    pub const BYTES: Self = Self(0);
+    /// Deterministically refused, with a reason the reader can render.
+    pub const BLOCKED: Self = Self(1);
+    /// Could not be produced — a revoked token, a missing blob, a fabricated address.
+    ///
+    /// **Distinct from blocked, and the distinction is load-bearing.** "Sift refused this" and
+    /// "this did not arrive" are different facts, and a fabricated or stale address resolving
+    /// here is a defect being caught rather than a resource being refused.
+    pub const UNAVAILABLE: Self = Self(2);
+}
+
+/// Resolve one address under the internal scheme.
+///
+/// **This is the body view's only channel out**, and it is a decision function rather than an
+/// interception: N-1 leaves the view no network capability at all, so there is nothing to
+/// intercept. A fabricated or stale address resolves to `Unavailable` rather than to nothing,
+/// because a defect being caught and a resource being refused are different facts.
+///
+/// # Safety
+/// `app` and `out` must be valid; `url` must point to `url_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_resolve_resource(
+    app: *mut SiftApp,
+    url: *const u8,
+    url_len: usize,
+    out: *mut SiftResourceAnswer,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            if url.is_null() {
+                return Err(());
+            }
+            let bytes = core::slice::from_raw_parts(url, url_len);
+            let address = core::str::from_utf8(bytes).map_err(|_| ())?;
+            let Some(layer) = layer(app) else {
+                return Err(());
+            };
+            let answer = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                session.app_mut().resolve_resource(address, None)
+            };
+            Ok(match answer {
+                sift_broker::broker::Answer::Bytes { .. } => SiftResourceAnswer::BYTES,
+                sift_broker::broker::Answer::Blocked(_) => SiftResourceAnswer::BLOCKED,
+                sift_broker::broker::Answer::Unavailable(_) => SiftResourceAnswer::UNAVAILABLE,
+            })
+        })
+    }
+}
+
+/// Borrow layer-owned text for as long as the document that owns it is open.
+///
+/// # Safety
+/// The caller must not let the returned reference outlive the entry in `Layer::documents`
+/// that owns it — which is what `sift_close_document` is for.
+unsafe fn extend(s: &str) -> &'static str {
+    // SAFETY: the string lives in the layer's document table and is removed only by
+    // `sift_close_document`, which is also what tells the shell to stop using it.
+    unsafe { &*(std::ptr::from_ref::<str>(s)) }
 }
 
 /// How many actions the register holds.

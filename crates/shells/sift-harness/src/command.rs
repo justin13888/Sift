@@ -27,7 +27,7 @@ pub fn run(session: &mut Session, line: &str) -> Output {
         "do" | "queue" | "flush" | "restart" => Subsystem::Mutations,
         "actions" | "select" | "open" => Subsystem::Presentation,
         "sync" => Subsystem::Sync,
-        "body" => Subsystem::Sanitize,
+        "body" | "resource" | "close" => Subsystem::Sanitize,
         "net" => Subsystem::Network,
         _ => Subsystem::Shell,
     };
@@ -63,6 +63,8 @@ fn dispatch(session: &mut Session, verb: &str, rest: &[&str]) -> Output {
         "watch" => watch(app, &rest),
         "sync" => sync(app, &rest),
         "body" => body(app, &rest),
+        "resource" => resource(app, &rest),
+        "close" => close(app, &rest),
         "net" => net(app, &rest),
         other => Err(format!("unknown command `{other}` — try `help`")),
     }
@@ -80,6 +82,8 @@ fn help() -> Vec<String> {
         "watch <account> <remote-id> <on|off>             FR-43's watched set",
         "sync <account> [max-pages]                       cursor, delta, envelopes, one transaction",
         "body <id|#n>                                     fetch and render through the seven stages",
+        "resource <url|#n>                                answer one load, as the scheme handler does",
+        "close <token|#>                                  revoke a document — D-90's navigation",
         "net [account]                                    bytes on the wire (FR-36)",
         "ingest <account> <subject>...                    ingest a message (delivered)",
         "list [account]                                   the message list, read THROUGH the overlay",
@@ -943,39 +947,48 @@ fn body(app: &mut App, args: &[&str]) -> Output {
         return Err("body <id|#n>".to_owned());
     };
     let id = resolve(app, reference)?;
-    let owner = app
-        .owner_of_stored(id)
-        .ok_or("no account holds this message")?;
-    let account = app.account(&owner)?;
-    let remote: String = account
-        .store
-        .store
-        .query_row(
-            "SELECT remote_id FROM message WHERE id = ?1",
-            rusqlite::params![id.to_bytes().to_vec()],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
-        .ok_or("this message has no remote identifier yet — sync first")?;
-    let adapter = account
-        .adapter
-        .as_ref()
-        .ok_or("this account has no provider behind it")?;
 
-    // **Structure first, and then one part.** The structure costs a few kilobytes; the
-    // attachment beside it costs nothing until somebody asks for it, which is a claim about
-    // *requests* rather than about intentions.
-    let remote_id = sift_provider::adapter::RemoteMessageId(remote);
-    let parts = adapter.structure(&remote_id).map_err(|e| e.to_string())?;
-    // Stage 2, and the same rule a parsed tree goes through: HTML preferred, plain text as
-    // the fallback, and plain text where the HTML exceeds L-1 — which rejects rather than
-    // truncating, and here the rejection has somewhere honest to land.
-    let chosen =
-        sift_mime::select::choose(&parts).ok_or("this message carries no renderable part")?;
-    let bytes = adapter
-        .fetch_part(&remote_id, &chosen.part)
-        .map_err(|e| e.to_string())?;
+    // The fetch borrows the account; the render borrows the application's broker. They are
+    // scoped apart rather than nested, because the broker must **outlive** the render — the
+    // body view asks for a document's resources after the HTML has been handed over, and a
+    // broker created for the render would answer nothing.
+    let (parts_len, chosen, bytes) = {
+        let owner = app
+            .owner_of_stored(id)
+            .ok_or("no account holds this message")?;
+        let account = app.account(&owner)?;
+        let remote: String = account
+            .store
+            .store
+            .query_row(
+                "SELECT remote_id FROM message WHERE id = ?1",
+                rusqlite::params![id.to_bytes().to_vec()],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+            .ok_or("this message has no remote identifier yet — sync first")?;
+        let adapter = account
+            .adapter
+            .as_ref()
+            .ok_or("this account has no provider behind it")?;
+
+        // **Structure first, and then one part.** The structure costs a few kilobytes; the
+        // attachment beside it costs nothing until somebody asks for it, which is a claim
+        // about *requests* rather than about intentions.
+        let remote_id = sift_provider::adapter::RemoteMessageId(remote);
+        let parts = adapter.structure(&remote_id).map_err(|e| e.to_string())?;
+        // Stage 2, and the same rule a parsed tree goes through: HTML preferred, plain text
+        // as the fallback, and plain text where the HTML exceeds L-1 — which rejects rather
+        // than truncating, and here the rejection has somewhere honest to land.
+        let chosen =
+            sift_mime::select::choose(&parts).ok_or("this message carries no renderable part")?;
+        let bytes = adapter
+            .fetch_part(&remote_id, &chosen.part)
+            .map_err(|e| e.to_string())?;
+        (parts.len(), chosen, bytes)
+    };
+
     let text = String::from_utf8_lossy(&bytes).into_owned();
     let selected = sift_pipeline::Selected {
         html: chosen.is_html.then(|| text.clone()),
@@ -983,7 +996,6 @@ fn body(app: &mut App, args: &[&str]) -> Output {
         reason: Some(format!("{:?}", chosen.reason)),
     };
 
-    let mut broker = sift_broker::broker::Broker::new();
     let mut context = sift_pipeline::Context {
         // Nothing has authenticated this message yet, so the origin is null and every
         // resource is third-party under the strictest rules. That is the correct answer
@@ -991,7 +1003,7 @@ fn body(app: &mut App, args: &[&str]) -> Output {
         origin: sift_block::origin::Origin::Null,
         blocker: None,
         dark: false,
-        broker: &mut broker,
+        broker: &mut app.resources,
     };
     let rendered = sift_pipeline::render(&selected, &mut context).map_err(|e| e.to_string())?;
 
@@ -1006,7 +1018,7 @@ fn body(app: &mut App, args: &[&str]) -> Output {
             },
             selected.reason.clone().unwrap_or_default()
         ),
-        format!("{} part(s) described, {} fetched", parts.len(), 1),
+        format!("{parts_len} part(s) described, {} fetched", 1),
         format!("stages: {}", rendered.stages.join(" -> ")),
         format!("token: {}", rendered.token.as_str()),
         format!(
@@ -1035,6 +1047,67 @@ fn body(app: &mut App, args: &[&str]) -> Output {
     }
     out.push(rendered.html);
     Ok(out)
+}
+
+/// Resolve one address under the internal scheme, as the body view's scheme handler does.
+///
+/// This is the channel N-1 leaves open, and the only one. It exists as a command so that the
+/// property can be asserted rather than observed: a fabricated address resolves to nothing, a
+/// revoked one stops resolving, and with no filter engine loaded every remote fetch is
+/// refused because D-10 makes an absent authority **deny** rather than fall through.
+fn resource(app: &mut App, args: &[&str]) -> Output {
+    let [url] = args else {
+        return Err("resource <url|#n>".to_owned());
+    };
+    // `#n` addresses position n of the live document. Tokens are minted per document and are
+    // unguessable by design, so a scripted session cannot name one in advance — which is the
+    // same problem `#n` solves for message identities, and the same answer.
+    let owned;
+    let url = if let Some(index) = url.strip_prefix('#') {
+        let token = app
+            .resources
+            .live_tokens()
+            .first()
+            .map(|t| (*t).to_owned())
+            .ok_or("no document is open — render one with `body` first")?;
+        owned = format!(
+            "{}://{token}/{index}",
+            sift_foundation::identifiers::INTERNAL_SCHEME
+        );
+        owned.as_str()
+    } else {
+        *url
+    };
+    let answer = app.resolve_resource(url, None);
+    Ok(vec![match answer {
+        sift_broker::broker::Answer::Bytes { length } => format!("bytes: {length}"),
+        sift_broker::broker::Answer::Blocked(reason) => format!("blocked: {reason:?}"),
+        sift_broker::broker::Answer::Unavailable(why) => format!("unavailable: {why:?}"),
+    }])
+}
+
+/// Revoke a document's token — D-90's navigation, without a view to navigate.
+fn close(app: &mut App, args: &[&str]) -> Output {
+    let [token] = args else {
+        return Err("close <token|#>".to_owned());
+    };
+    let owned;
+    let token: &str = if *token == "#" {
+        owned = app
+            .resources
+            .live_tokens()
+            .first()
+            .map(|t| (*t).to_owned())
+            .ok_or("no document is open")?;
+        owned.as_str()
+    } else {
+        token
+    };
+    Ok(vec![if app.close_document(token) {
+        format!("revoked {token}")
+    } else {
+        format!("{token} was not open")
+    }])
 }
 
 /// FR-36 counts bytes on the wire.

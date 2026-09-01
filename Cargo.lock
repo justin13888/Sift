@@ -1665,6 +1665,7 @@ name = "sift-abi"
 version = "0.1.0"
 dependencies = [
  "sift-app",
+ "sift-broker",
  "sift-foundation",
  "sift-presentation",
  "sift-session",
@@ -1682,9 +1683,13 @@ name = "sift-app"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "sift-block",
+ "sift-broker",
  "sift-credentials",
  "sift-foundation",
+ "sift-mime",
  "sift-mutations",
+ "sift-pipeline",
  "sift-provider",
  "sift-registry",
  "sift-store",

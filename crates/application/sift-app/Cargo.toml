@@ -21,6 +21,12 @@ sift-store.workspace = true
 sift-sync.workspace = true
 sift-mutations.workspace = true
 sift-credentials.workspace = true
+# The hostile-input path. A body reaches a shell only after all seven stages, and the broker
+# outlives the render because the body view resolves resources against its token afterwards.
+sift-mime.workspace = true
+sift-pipeline.workspace = true
+sift-broker.workspace = true
+sift-block.workspace = true
 # D-21's engine, reached the same way the store reaches it. The application writes through
 # the store's own transactions rather than around them.
 rusqlite = { version = "0.37", features = ["bundled"] }

@@ -761,3 +761,79 @@ fn cancelling_one_observation_leaves_the_other_delivering() {
     assert!(out.contains("observing * as #2"), "{out}");
     assert!(out.contains("-- 2 delivery(ies)"), "both were told: {out}");
 }
+
+// ---------------------------------------------------------------------------
+// N-1: the body view's only channel out, and what it answers.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_remote_resource_is_refused_rather_than_fetched() {
+    // FR-8, at the one place it can actually be enforced. The document was rewritten to
+    // address the pixel through the internal scheme, and when the body view asks for it the
+    // answer is a refusal — not a fetch that fails, and not a fetch at all.
+    let mut cmds = live();
+    cmds.extend(["folders mail", "sync mail", "body #1", "resource #0"]);
+    let out = session(&cmds);
+    assert!(out.contains("blocked:"), "{out}");
+    assert!(
+        !out.contains("bytes:"),
+        "a remote resource was fetched:\n{out}"
+    );
+}
+
+#[test]
+fn a_fabricated_address_resolves_to_nothing() {
+    // D-28's whole point: the internal scheme's addressing is a security boundary rather
+    // than a naming convenience. A guessed token is not a valid one, and the answer is
+    // *unavailable* rather than blocked — because a defect being caught and a resource being
+    // refused are different facts, and conflating them would hide the first.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "body #1",
+        "resource sift-resource://ffffffffffffffffffffffffffffffff/0",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("unavailable:"), "{out}");
+}
+
+#[test]
+fn revoking_a_document_kills_its_address_space() {
+    // D-90: revocation happens at navigation, which is earlier and more often than teardown.
+    // Message A's addresses must be dead before message B's document exists, whether or not
+    // the view survives — that is what keeps "two messages share no address space" true
+    // across a reused body view.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "body #1",
+        "resource #0",
+        "close #",
+        "resource sift-resource://00000000000000000000000000000000/0",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("revoked "), "{out}");
+    let after = out.rsplit("revoked ").next().unwrap_or("");
+    assert!(
+        after.contains("unavailable:"),
+        "an address survived its document:\n{out}"
+    );
+}
+
+#[test]
+fn a_link_is_not_a_fetching_position_and_keeps_its_real_address() {
+    // FR-30 and the link-confirmation sheet together. A link is followed on an explicit
+    // confirmation and never in place, so it is not rewritten — the destination shown to the
+    // user has to be the real one, and Sift must never resolve a wrapper by fetching it,
+    // because following the redirect *is* the tracking event.
+    let mut cmds = live();
+    cmds.extend(["folders mail", "sync mail", "body #1"]);
+    let out = session(&cmds);
+    assert!(out.contains("href=\"https://example.test/read\""), "{out}");
+    assert!(
+        !out.contains("src=\"https://tracker.test"),
+        "a fetching position kept an external scheme:\n{out}"
+    );
+}

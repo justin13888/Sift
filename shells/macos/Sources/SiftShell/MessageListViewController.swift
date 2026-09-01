@@ -109,9 +109,18 @@ final class MessageListViewController: NSViewController {
     private func received(_ incoming: [MessageRow]) {
         guard !incoming.isEmpty else { return }
         let previous = selectedRow()
+        let wasEmpty = rows.isEmpty
         rows.append(contentsOf: incoming)
         table.reloadData()
         restore(previous)
+
+        // The newest message, on first fill. A reader that opens on "nothing selected" makes
+        // a person click before the product does anything, and the top of the list is what
+        // they were going to click. It is safe to do here because opening a message is not
+        // marking it read — D-52 puts a dwell between those, and nothing has dwelled.
+        if wasEmpty, previous == nil, !rows.isEmpty {
+            table.selectRowIndexes([0], byExtendingSelection: false)
+        }
     }
 
     private func selectedRow() -> MessageRow? {

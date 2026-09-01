@@ -348,6 +348,64 @@ typedef void (*SiftRowsCallback)(void *context,
                                  SiftRows_SiftMessageRow rows);
 
 /**
+ * A rendered message body, as the reader receives it.
+ *
+ * The strings point into layer-owned storage that lives until the document is closed, which
+ * is longer than a delivery: the body view holds the HTML while it renders, and resolves
+ * resources against the token afterwards.
+ */
+typedef struct {
+  /**
+   * **Post-sanitization.** A raw provider payload never reaches a shell.
+   */
+  SiftStr html;
+  /**
+   * D-28's per-document capability token. Every address in `html` is under it.
+   */
+  SiftStr token;
+  /**
+   * How many fetching positions were refused. For the reader's **native** chrome — a
+   * count drawn inside the document is one a sender can counterfeit.
+   */
+  uint32_t blocked;
+  /**
+   * How many navigation targets the body carries.
+   */
+  uint32_t links;
+} SiftDocument;
+
+/**
+ * What the broker said about one resource load.
+ *
+ * Three answers, kept apart. "Sift refused this" and "this did not arrive" are different
+ * facts, and FR-12 insists such pairs stay distinct — a reader that showed one as the other
+ * would tell a person their mail was being censored, or that it was fine when it was not.
+ * A transparent newtype rather than a C enum, deliberately.
+ *
+ * cbindgen emits an enum as *both* a tagged `enum` and a `typedef`, and a Swift importer sees
+ * two things with one name — which is ambiguous at the use site and cannot be disambiguated
+ * without naming the module. A transparent wrapper with associated constants emits one
+ * typedef and a set of `#define`s, which is unambiguous in every consumer.
+ */
+typedef uint32_t SiftResourceAnswer;
+/**
+ * The bytes are available.
+ */
+#define SiftResourceAnswer_BYTES 0
+/**
+ * Deterministically refused, with a reason the reader can render.
+ */
+#define SiftResourceAnswer_BLOCKED 1
+/**
+ * Could not be produced — a revoked token, a missing blob, a fabricated address.
+ *
+ * **Distinct from blocked, and the distinction is load-bearing.** "Sift refused this" and
+ * "this did not arrive" are different facts, and a fabricated or stale address resolving
+ * here is a defect being caught rather than a resource being refused.
+ */
+#define SiftResourceAnswer_UNAVAILABLE 2
+
+/**
  * Initialize the layer.
  *
  * The shell supplies its host callbacks **once**, here — D-67's set is process-scoped and
@@ -470,6 +528,45 @@ SiftStatus sift_add_replayed_account(SiftApp *app,
  * `app` must be valid; `label` must point to `label_len` bytes of UTF-8.
  */
 SiftStatus sift_sync_account(SiftApp *app, const uint8_t *label, size_t label_len);
+
+/**
+ * Open a message's body: fetch its chosen part and run the seven stages over it.
+ *
+ * The document stays open until [`sift_close_document`] revokes its token, because the body
+ * view asks for resources after the HTML has been handed over.
+ *
+ * # Safety
+ * `app` and `out` must be valid.
+ */
+SiftStatus sift_open_document(SiftApp *app, SiftId message, uint8_t dark, SiftDocument *out);
+
+/**
+ * Close a document: revoke its token and release what was held for it.
+ *
+ * D-90 revokes at **navigation**, which is earlier and more often than teardown. Message A's
+ * addresses are dead before message B's document exists, whether or not the view survives —
+ * which is what keeps "two messages share no address space" true across a reused view.
+ *
+ * # Safety
+ * `app` must be valid; `token` must point to `token_len` bytes of UTF-8.
+ */
+SiftStatus sift_close_document(SiftApp *app, const uint8_t *token, size_t token_len);
+
+/**
+ * Resolve one address under the internal scheme.
+ *
+ * **This is the body view's only channel out**, and it is a decision function rather than an
+ * interception: N-1 leaves the view no network capability at all, so there is nothing to
+ * intercept. A fabricated or stale address resolves to `Unavailable` rather than to nothing,
+ * because a defect being caught and a resource being refused are different facts.
+ *
+ * # Safety
+ * `app` and `out` must be valid; `url` must point to `url_len` bytes of UTF-8.
+ */
+SiftStatus sift_resolve_resource(SiftApp *app,
+                                 const uint8_t *url,
+                                 size_t url_len,
+                                 SiftResourceAnswer *out);
 
 /**
  * How many actions the register holds.

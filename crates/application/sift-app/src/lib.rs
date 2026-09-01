@@ -17,6 +17,7 @@
 //! It holds no window, no selection and no observation. Those are the presentation layer's,
 //! which sits above this one.
 
+pub mod document;
 pub mod rows;
 
 use sift_foundation::identity::{AccountId, AccountOrdinal, LocalId, LocalIdGenerator};
@@ -186,6 +187,15 @@ pub struct App {
     /// Authorizations begun but not yet returned from, by account name.
     pub pending_authorization: BTreeMap<String, String>,
     /// D-99: a set keyed on identity with an anchor, cleared by a scope change.
+    /// D-28's capability tokens, and the answers behind them.
+    ///
+    /// **It outlives any one render.** The body view asks for a document's resources after
+    /// the HTML has been handed over, so a broker created per render would answer nothing.
+    ///
+    /// Named for what it brokers rather than called `broker`, because the field above is the
+    /// credential broker and two things called the same word in one struct is how the wrong
+    /// one gets passed.
+    pub resources: sift_broker::broker::Broker,
     pub selection: Vec<LocalId>,
     pub open_message: Option<LocalId>,
     pub has_window: bool,
@@ -218,6 +228,7 @@ impl App {
             // file — exactly what the constraint forbids by name.
             broker: sift_credentials::oauth::Broker::new(sift_credentials::store::Platform),
             pending_authorization: BTreeMap::new(),
+            resources: sift_broker::broker::Broker::new(),
             selection: Vec::new(),
             open_message: None,
             has_window: false,
