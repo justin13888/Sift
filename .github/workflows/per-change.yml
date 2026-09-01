@@ -12,6 +12,12 @@
 # image: Keychain behaviour, entitlements and sandbox behaviour on both channels
 # including NFR-49's provenance marking, and login-item residency. They are tracked in
 # #21 and #35 rather than being run here and believed.
+#
+# Every step below runs a `mise run <task>` defined in mise.toml. That is deliberate: a gate's
+# flags are written once, and what a contributor runs locally is the same command a runner
+# runs rather than a transcription of it. mise also owns the toolchain here (the pinned rust
+# in mise.toml, matching rust-toolchain.toml), which is why no job installs one itself —
+# except `toolchain-floor`, whose whole purpose is to use a different one.
 
 name: per-change
 
@@ -32,47 +38,56 @@ jobs:
   # The rules docs/build/workspace.md states as normative, and the ones docs/ states as
   # code-review rules. These run first and are cheap: a wrong crate edge should not wait
   # behind a compile.
+  #
+  # Kept as five steps rather than the one `mise run gates` a contributor would use locally,
+  # because `cargo xtask all` short-circuits on the first failure and a named step is how a
+  # reviewer sees which gate failed without opening the log.
   architecture:
     name: crate graph and invariants
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: jdx/mise-action@v2
       - uses: Swatinem/rust-cache@v2
       - name: D-59 — one-way edges, the ABI a leaf, unsafe in four places
-        run: cargo xtask arch
+        run: mise run arch
       - name: NFR-24, D-12, D-25 — the prohibitions, asserted
-        run: cargo xtask invariants
+        run: mise run invariants
       - name: Gate 3 — new dependency edges reviewed rather than absorbed
-        run: cargo xtask deps
+        run: mise run deps
       - name: D-60 — the committed header matches the ABI crate
-        run: cargo xtask header
+        run: mise run header
       - name: Traceability — every requirement is named in the source
-        run: cargo xtask trace
+        run: mise run trace
 
   # Gates 1 and 2 of the dependency policy. Each fails the build rather than warning.
+  #
+  # cargo-deny runs as a pinned mise tool rather than through cargo-deny-action, so the
+  # command and the version match what `mise run deny` does locally. The cost is that action's
+  # own advisory-database caching, which is worth one definition of the gate.
   dependencies:
     name: advisories and licences
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check advisories licenses bans sources
+      - uses: jdx/mise-action@v2
+      - run: mise run deny
 
   format:
     name: formatting
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --all --check
+      - uses: jdx/mise-action@v2
+      - run: mise run fmt-check
 
   # Both platforms are first-class, and D-46 makes the two macOS architectures produce
   # different numbers rather than the same number twice — so both are built rather than
   # one being inferred from the other.
+  #
+  # The target is passed through CARGO_BUILD_TARGET, which cargo honours natively, so the
+  # `clippy` and `test` tasks are the same ones a contributor runs — no --target argument
+  # threaded through mise.
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -83,45 +98,44 @@ jobs:
           - { name: "linux",              os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { name: "macos apple silicon", os: macos-latest, target: aarch64-apple-darwin }
           - { name: "macos intel",        os: macos-latest,  target: x86_64-apple-darwin }
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          targets: ${{ matrix.target }}
+      - uses: jdx/mise-action@v2
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
-      - run: cargo test --workspace --target ${{ matrix.target }}
+      - run: mise run clippy
+      - run: mise run test
 
   # D-61 inverts the usual relationship on macOS: the platform toolchain owns the bundle and
   # links the Rust core as a static library. That is why "CI needs a macOS host for even a
   # smoke build" is listed as a cost of the decision rather than an inconvenience.
+  #
+  # The task runs all three steps — the static library, the header check, and the Swift
+  # build — because they are one sequence and splitting them here would put the middle one in
+  # two places.
   macos-shell:
     name: the macOS shell builds against the generated header
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: jdx/mise-action@v2
       - uses: Swatinem/rust-cache@v2
-      - name: the static library the bundle links
-        run: cargo build --release -p sift-abi
-      - name: the header has not drifted from it
-        run: cargo xtask header
-      - run: swift build -c release --package-path shells/macos
+      - run: mise run macos
 
   # The floor is a promise, not a preference: "a build failing on the stated floor is a
   # defect rather than an invitation to raise it." Nothing else checks it, so a
   # dependency bump that raises it would otherwise be invisible until a user reported it.
+  #
+  # The task derives the floor from Cargo.toml's `rust-version` and installs that toolchain
+  # itself, which is what makes the floor checkable locally too — it used to exist only as a
+  # shell snippet inside this step.
   toolchain-floor:
     name: builds on the stated minimum toolchain
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - id: floor
-        run: echo "v=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.floor.outputs.v }}
-      - run: cargo check --workspace
+      - uses: jdx/mise-action@v2
+      - run: mise run check-floor

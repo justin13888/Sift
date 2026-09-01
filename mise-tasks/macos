@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#MISE description="Build the macOS shell (D-61 — Swift owns the binary, Rust is the library it links)."
+#USAGE flag "--debug" help="Build the debug profile instead of release"
+#USAGE flag "--run" help="Launch the shell after building"
+#
+# D-61: **the platform's own application toolchain owns the bundle**, and the Rust core is
+# built into a static library it links. The Rust workspace never produces the `.app`, so this
+# is two toolchains in sequence rather than one command — and that is a stated cost of the
+# decision rather than an accident:
+#
+#   - the macOS build is not reproducible from `cargo build` alone
+#   - a contributor needs the platform toolchain
+#   - CI needs a macOS host for even a smoke build
+#
+# The header step in the middle is not optional. Package.swift links `-lsift_abi` against a
+# committed header; if the ABI crate has drifted from it, the link would succeed against a
+# stale declaration rather than failing.
+set -euo pipefail
+
+cd "${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
+
+[[ "$(uname -s)" == "Darwin" ]] || {
+    echo "macos: this task is macOS-only. The Linux shell is \`mise run linux\`," >&2
+    echo "       and \`mise run harness\` drives the application with no window at all." >&2
+    exit 1
+}
+
+profile="release"
+launch=false
+for arg in "$@"; do
+    case "$arg" in
+        --debug) profile="debug" ;;
+        --release) profile="release" ;;
+        --run) launch=true ;;
+        *) echo "macos: unknown argument '$arg' (expected --debug, --release or --run)" >&2; exit 1 ;;
+    esac
+done
+
+if [[ "$profile" == "release" ]]; then
+    cargo build --release -p sift-abi
+    swift_flags=(-c release)
+else
+    cargo build -p sift-abi
+    swift_flags=()
+fi
+
+# D-60 — the committed header matches the ABI crate. `mise run bless-header` regenerates it.
+cargo xtask header
+
+swift build "${swift_flags[@]}" --package-path shells/macos
+
+if [[ "$launch" == true ]]; then
+    # An accessory application: it appears in the menu bar, not the dock, and opens no window
+    # until an account exists — the account-less state *is* the add-account flow, because an
+    # empty inbox tells a new user the product is broken.
+    echo "macos: launching — look for the envelope in the menu bar, not the dock"
+    exec "shells/macos/.build/$profile/SiftShell"
+fi

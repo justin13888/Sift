@@ -1,0 +1,262 @@
+# Every command this project needs, defined once.
+#
+# `mise run <task>` is the single spelling of each command: the dev loop, the five
+# architecture gates, the two blessing paths, both shells, and the live probes. CI calls
+# these same tasks (`.github/workflows/per-change.yml`), and the git hooks call them too
+# (`hk.pkl`), so a gate's flags live here and nowhere else.
+#
+# `mise tasks` lists them all. One-liners live in this file; multi-step recipes are scripts
+# under `mise-tasks/`.
+
+[tools]
+# Pinned to an exact release rather than floating `stable`, so rustc, rustfmt and clippy
+# resolve identically here and on a runner. **This must stay equal to `rust-toolchain.toml`'s
+# channel**: rustup reads that file at every cargo invocation and wins, so a pin here alone
+# would be decorative. Bump both together, deliberately.
+#
+# This is the *development* toolchain and has nothing to do with the floor. The floor is
+# `rust-version` in Cargo.toml, and `mise run check-floor` is what holds it.
+#
+# `profile = "default"` takes rustfmt and clippy from rustup's component set.
+rust = { version = "1.96.0", profile = "default" }
+
+# Gates 1 and 2 of the dependency policy (`mise run deny`), configured in deny.toml. The
+# aqua backend ships prebuilt binaries, so no source build. Pinned so a new advisory-schema
+# release cannot change a gate's verdict without the change being a commit.
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
+
+# Git hooks (pre-commit / commit-msg / pre-push); config in hk.pkl. hk uses its built-in pkl
+# evaluator, so no separate `pkl` CLI is needed. The `postinstall` hook below wires it into
+# .git/hooks after `mise install` — or run `mise run setup`.
+#
+# The version here and the one hk.pkl `amends` must match.
+hk = "1.57.0"
+
+# Conventional-commit linting, via the `commit-msg-check` and `commit-check` tasks. Built
+# from source — convco ships no arch-tagged prebuilt to pin against — but it pins git2 with
+# default-features off, so it vendors libgit2 with no openssl or system deps. mise caches
+# the compiled binary.
+"cargo:convco" = "0.7.1"
+
+[settings]
+# Required for the [hooks] block below; mise gates hooks behind this flag.
+experimental = true
+
+[hooks]
+# After `mise install`, install hk's git hooks. Idempotent, and a cheap no-op once set up.
+# `|| true` keeps a fresh checkout from failing the install when the network is unavailable
+# on the very first run (hk fetches its pkl schema); rerun `mise run setup` once online.
+#
+# `--mise` makes the installed hook run `mise x -- hk …`. Without it the hook is a bare `hk`
+# and git resolves it against whatever PATH the invoking process had — so it works from an
+# interactive shell with mise activated and fails with "hk: command not found" from an editor,
+# a GUI client, or a script. That failure is not benign: it exits non-zero, so the commit is
+# *blocked for the wrong reason*, which looks exactly like a hook that is working.
+postinstall = "hk install --mise || true"
+
+# ── The dev loop ──────────────────────────────────────────────────────────────
+
+[tasks.build]
+description = "Build the whole workspace"
+run = "cargo build --workspace"
+
+[tasks.test]
+description = "Run the tests (whole workspace; matches CI)"
+run = "cargo test --workspace"
+
+[tasks.test-fault]
+description = "Test the store with fault injection on (NFR-16, NFR-17, FR-18)"
+# `fault-injection` is `#[cfg(any(test, feature = ...))]`, so sift-store's *unit* tests get
+# it for free under a plain `cargo test`. This is the only way to reach it from an
+# integration test, and nothing in CI enables it — the feature MUST NOT be compilable into a
+# shipped binary, which is why it is a separate command rather than a default.
+run = "cargo test -p sift-store --features fault-injection"
+
+[tasks.fmt]
+description = "Format all code"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check formatting (CI mode)"
+run = "cargo fmt --all --check"
+
+[tasks.clippy]
+description = "Run clippy lints"
+# CI sets CARGO_BUILD_TARGET per matrix leg; cargo honours it natively, so this one command
+# serves all three targets without the task knowing about any of them.
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.clippy-fix]
+description = "Auto-fix clippy lints"
+run = "cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets -- -D warnings"
+
+[tasks.doc]
+description = "Build the docs and open them"
+run = "cargo doc --no-deps --open"
+
+[tasks.doc-check]
+description = "Check the docs build (no open)"
+run = "cargo doc --no-deps"
+
+# The SwiftPM build tree (shells/macos/.build) is separate from cargo's target/ and nothing
+# else prunes it, so it grows unbounded. `clean-swift` reclaims just that; `clean` is the
+# full reset.
+[tasks.clean-swift]
+description = "Remove the SwiftPM build tree (shells/macos/.build)"
+run = "rm -rf shells/macos/.build"
+
+[tasks.clean]
+description = "Remove all build artifacts (cargo target/ + SwiftPM .build)"
+depends = ["clean-swift"]
+run = "cargo clean"
+
+# ── The gates ─────────────────────────────────────────────────────────────────
+#
+# One task per `cargo xtask` subcommand, so the gate set is discoverable through
+# `mise tasks` rather than by remembering which names xtask accepts. xtask parses only
+# argv[1] plus a globally-scanned `--bless`; these spellings are the whole vocabulary.
+
+[tasks.arch]
+description = "D-59 — one-way crate edges, the ABI a leaf, unsafe in four places"
+run = "cargo xtask arch"
+
+[tasks.invariants]
+description = "NFR-24, D-12, D-25 — the prohibitions, asserted against the source"
+run = "cargo xtask invariants"
+
+[tasks.deps]
+description = "Gate 3 — new dependency edges reviewed rather than absorbed, plus D-30"
+run = "cargo xtask deps"
+
+[tasks.header]
+description = "D-60 — the committed C header matches the ABI crate"
+run = "cargo xtask header"
+
+[tasks.trace]
+description = "Traceability — every requirement is named somewhere in the source"
+run = "cargo xtask trace"
+
+[tasks.gates]
+description = "All five architecture gates in one process (short-circuits on the first)"
+# CI keeps them as five separate steps so a failure names the gate; this is the local
+# convenience, and it is one process rather than five cargo invocations.
+run = "cargo xtask all"
+
+[tasks.rule-coverage]
+description = "Report how many crates each invariant rule covers (never fails)"
+run = "cargo xtask coverage"
+
+[tasks.deny]
+description = "Gates 1 and 2 — advisories, licences, bans and sources"
+run = "cargo deny check advisories licenses bans sources"
+
+# `check-floor` is a script rather than a line — it derives the floor from Cargo.toml's
+# `rust-version` so the number lives in exactly one place — and so lives in mise-tasks/,
+# which mise discovers by filename.
+
+# ── Regeneration ──────────────────────────────────────────────────────────────
+
+[tasks.bless-deps]
+description = "Rewrite deps/approved.txt from the current dependency graph"
+run = "cargo xtask deps --bless"
+
+[tasks.bless-header]
+description = "Regenerate crates/abi/include/sift.h from the ABI crate"
+run = "cargo xtask header --bless"
+
+[tasks.bless]
+description = "Regenerate both committed artefacts (the approved deps and the C header)"
+depends = ["bless-deps", "bless-header"]
+
+[tasks.bless-crypto]
+description = "Regenerate the page-format fixture — ALMOST NEVER the right response to a failing test"
+# Deliberately outside `bless`. Its own doc comment says regeneration is right only for
+# first creation or a deliberate format version bump; a failing fixture test otherwise means
+# the format changed, which is the thing the fixture exists to catch.
+run = "cargo run -p sift-crypto --example bless-fixtures"
+
+# ── Aggregates ────────────────────────────────────────────────────────────────
+
+[tasks.check]
+description = "The fast local sweep: formatting, lints, tests, and the architecture gates"
+depends = ["fmt-check", "clippy", "test", "gates"]
+
+[tasks.ci]
+description = "Everything per-change.yml runs, locally"
+depends = [
+  "fmt-check",
+  "clippy",
+  "test",
+  "arch",
+  "invariants",
+  "deps",
+  "header",
+  "trace",
+  "deny",
+  "check-floor",
+]
+# The macOS shell leg is the one part that cannot run everywhere — D-61 gives the bundle to
+# the platform toolchain, and "CI needs a macOS host for even a smoke build" is a stated cost
+# of that decision rather than an inconvenience. Skipped with a word rather than silently.
+run = '''
+if [ "$(uname -s)" = "Darwin" ]; then
+    mise run macos
+else
+    echo "ci: skipping the macOS shell leg (D-61 — it needs a macOS host)"
+fi
+'''
+
+# ── The shells ────────────────────────────────────────────────────────────────
+
+# `macos` is three steps and a platform guard, so it lives in mise-tasks/ too.
+# `mise run macos -- --run` builds and then launches it.
+
+[tasks.linux]
+description = "Build the Linux shell with the toolkit (D-61 — Cargo owns this binary)"
+# The only place outside the Flatpak manifest that turns the feature on. Off by default so
+# `cargo test --workspace` works on a machine with no GTK development libraries.
+run = "cargo build --release -p sift-gtk --features toolkit"
+
+[tasks.linux-run]
+description = "Run the Linux shell with the toolkit"
+run = "cargo run -p sift-gtk --features toolkit"
+
+[tasks.harness]
+description = "Drive the application with no window (D-65). Args are harness commands."
+# e.g. mise run harness -- "account add work rich" "list"
+run = "cargo run -q -p sift-harness --"
+
+[tasks.demo]
+description = "The documented walkthrough: add, sync, read, mutate and flush a replayed account"
+# The fixture corpus needs no network and no credentials. This is README.md's session, so
+# that the thing the README claims can be done is one word rather than eight quoted arguments.
+run = '''
+cargo run -q -p sift-harness -- \
+    "account add-replayed mail" "folders mail" "sync mail" \
+    "list mail" "body #1" "select #1" "do message.archive" "flush mail"
+'''
+
+# ── Live probes ───────────────────────────────────────────────────────────────
+#
+# These reach the real network. D-63 puts network-needing gates in the per-integration tier,
+# so none of them runs in CI — they are examples rather than tests for exactly that reason.
+
+[tasks.gmail-reach]
+description = "Reach the live Gmail API (honours SIFT_ACCESS_TOKEN; expects rejection without one)"
+run = "cargo run -p sift-gmail --example reach"
+
+[tasks.gmail-schema]
+description = "D-13 — check the committed endpoint list against the live discovery document"
+run = "cargo run -p sift-gmail --example schema-check"
+
+[tasks.http-probe]
+description = "Probe a host and path over the HTTP client (defaults to the Gmail discovery document)"
+run = "cargo run -p sift-http --example probe --"
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
+
+[tasks.setup]
+description = "Install hk's git hooks (strict fallback for the postinstall hook)"
+# Same step as the postinstall hook, but without the `|| true`: when invoked explicitly,
+# fail loudly so a setup problem is not silently swallowed.
+run = "hk install --mise"

@@ -30,11 +30,16 @@ Platform scope is **macOS first, Linux second**. Windows is out of scope.
 
 ## Building
 
+Commands are [`mise`](https://mise.jdx.org) tasks, defined once in
+[`mise.toml`](mise.toml) and run by CI and the git hooks as well as by hand. `mise install`
+fetches the pinned toolchain and tools and installs the hooks; `mise tasks` lists everything.
+
 ```
-cargo test --workspace     # the whole core
-cargo xtask all            # the crate graph, the prohibitions, the dependency gates,
-                           # the generated header, and requirement traceability
-cargo run -p sift-harness  # drive the application with no window (D-65)
+mise run test      # the whole core
+mise run gates     # the crate graph, the prohibitions, the dependency gates,
+                   # the generated header, and requirement traceability
+mise run check     # the above plus formatting and lints — the pre-push sweep
+mise run harness   # drive the application with no window (D-65)
 ```
 
 The harness is a shell rather than a script: it links the same presentation layer a native
@@ -42,18 +47,19 @@ shell links and invokes the same actions by the same identifiers, which is what 
 FR-24's testability claim real.
 
 ```
-sift-harness "account add work rich" "ingest work Newsletter" \
-             "select #1" "do message.archive" "list" "queue"
+mise run harness -- "account add work rich" "ingest work Newsletter" \
+                    "select #1" "do message.archive" "list" "queue"
 ```
 
 ### Driving a real account
 
 An account can be added, synced, read, mutated and flushed without a window and without a
-pointer. Against the fixture corpus, which needs no network and no credentials:
+pointer. Against the fixture corpus, which needs no network and no credentials — this
+session is `mise run demo`:
 
 ```
-sift-harness "account add-replayed mail" "folders mail" "sync mail" \
-             "list mail" "body #1" "select #1" "do message.archive" "flush mail"
+mise run harness -- "account add-replayed mail" "folders mail" "sync mail" \
+                    "list mail" "body #1" "select #1" "do message.archive" "flush mail"
 ```
 
 Against a real Gmail account, which needs an OAuth client identifier and a bundle that has
@@ -61,8 +67,8 @@ registered the callback scheme — this binary is not one, so it says so rather 
 browser you would return from to nothing:
 
 ```
-sift-harness "account authorize work <client-id>"
-sift-harness "account callback work net.justinchung.sift:/oauth2/callback?state=...&code=..."
+mise run harness -- "account authorize work <client-id>"
+mise run harness -- "account callback work net.justinchung.sift:/oauth2/callback?state=...&code=..."
 ```
 
 The callback returns through a **registered URI scheme**, never a loopback address: NFR-24
@@ -71,8 +77,10 @@ it cannot send — which is the no-send constraint expressed where you can check
 consent screen you are looking at.
 
 The two native shells are [`crates/shells/sift-gtk`](crates/shells/sift-gtk) and
-[`shells/macos`](shells/macos/README.md). D-61 puts the Linux binary under Cargo and gives
-the macOS bundle to the platform toolchain, which links the Rust core as a static library.
+[`shells/macos`](shells/macos/README.md), built by `mise run linux` and `mise run macos`.
+D-61 puts the Linux binary under Cargo and gives the macOS bundle to the platform toolchain,
+which links the Rust core as a static library — which is why those are two tasks rather than
+one, and why only one of them is a plain `cargo build`.
 
 ## Documentation
 

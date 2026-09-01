@@ -1,0 +1,94 @@
+amends "package://github.com/jdx/hk/releases/download/v1.57.0/hk@1.57.0#/Config.pkl"
+
+// Git hooks for Sift.
+//
+// Every step shells out to a mise task (`mise run fmt` / `clippy` / `gates` / …), so the
+// cargo flags live in exactly ONE place — mise.toml — and the local hooks, the `mise run`
+// CLI, and CI all run identical commands.
+//
+// On pre-commit, `fix = true` + `stash = "git"` makes hk stash unstaged work, run the
+// fixers, re-stage the touched *.rs, then restore the stash — so auto-fixes land in the
+// commit rather than needing a second one.
+//
+// `cargo fmt` and `cargo clippy` already span the whole workspace, so no {{files}} is
+// passed; the glob only gates WHETHER a step runs and which files are re-staged after a fix.
+
+hooks {
+    ["commit-msg"] {
+        steps = new Mapping<String, Step> {
+            ["convco"] {
+                // hk passes the message file as {{commit_msg_file}}; the task skips merge
+                // messages and strips git's comment lines.
+                check = "mise run commit-msg-check {{commit_msg_file}}"
+            }
+        }
+    }
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps = new Mapping<String, Step> {
+            ["cargo-fmt"] {
+                glob = List("*.rs")
+                check = "mise run fmt-check"
+                fix = "mise run fmt"
+                stage = List("*.rs")
+            }
+            ["cargo-clippy"] {
+                glob = List("*.rs")
+                check = "mise run clippy"
+                fix = "mise run clippy-fix"
+                stage = List("*.rs")
+                depends = List("cargo-fmt")
+            }
+        }
+    }
+    ["pre-push"] {
+        steps = new Mapping<String, Step> {
+            // No glob: lint the pushed commits regardless of which files changed.
+            ["convco"] {
+                check = "mise run commit-check"
+            }
+            ["cargo-fmt"] {
+                glob = List("*.rs")
+                check = "mise run fmt-check"
+            }
+            ["cargo-clippy"] {
+                glob = List("*.rs")
+                check = "mise run clippy"
+                depends = List("cargo-fmt")
+            }
+            // The architecture gates are cheap source scans over the crate graph — a wrong
+            // crate edge, a re-introduced prohibition, or a drifted header should not wait
+            // behind a compile in CI when it can be caught here in seconds. This is the one
+            // step that is Sift-specific rather than the usual Rust trio.
+            //
+            // No glob: `trace` reads docs/requirements.md and `deps` reads Cargo.lock, so a
+            // change with no *.rs in it can still break a gate.
+            ["xtask-gates"] {
+                check = "mise run gates"
+            }
+            ["cargo-test"] {
+                glob = List("*.rs")
+                check = "mise run test"
+                exclusive = true // run after the linters, not concurrently
+            }
+        }
+    }
+    // `hk check` / `hk check --all` parity path (read-only).
+    ["check"] {
+        steps = new Mapping<String, Step> {
+            ["cargo-fmt"] {
+                glob = List("*.rs")
+                check = "mise run fmt-check"
+            }
+            ["cargo-clippy"] {
+                glob = List("*.rs")
+                check = "mise run clippy"
+                depends = List("cargo-fmt")
+            }
+            ["xtask-gates"] {
+                check = "mise run gates"
+            }
+        }
+    }
+}

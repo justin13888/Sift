@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#MISE description="Build on the stated minimum toolchain — the floor is a promise, not a preference."
+#
+# "A build failing on this floor is a defect in Sift's own code rather than an invitation to
+# raise it." Nothing else checks that, so a dependency bump that raises the floor would
+# otherwise be invisible until a contributor on an older toolchain reported it — which is
+# exactly how the 1.85 → 1.88 raise was noticed when `adblock` was vendored.
+#
+# The floor is derived from Cargo.toml rather than repeated here, so `rust-version` stays the
+# one place it is written. This is the same derivation the CI job used to do inline; lifting
+# it into a task is what makes the floor checkable locally at all.
+set -euo pipefail
+
+cd "${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
+
+floor=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+[[ -n "$floor" ]] || {
+    echo "check-floor: no rust-version found in Cargo.toml's [workspace.package]" >&2
+    exit 1
+}
+
+echo "check-floor: the stated floor is $floor"
+
+# Idempotent: a no-op once the toolchain is present. --profile minimal because this only
+# ever runs `cargo check` — it needs no rustfmt, no clippy, no docs.
+rustup toolchain install --profile minimal "$floor"
+
+# `+$floor` overrides rust-toolchain.toml's pinned channel for this invocation only, which is
+# the whole point: the development toolchain and the floor are different promises.
+exec cargo "+$floor" check --workspace

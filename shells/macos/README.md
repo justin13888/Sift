@@ -4,10 +4,20 @@ D-61: **the platform's own application toolchain owns the bundle**, and the Rust
 built into a static library it links. The Rust workspace never produces the `.app`.
 
 ```
+mise run macos           # build it
+mise run macos -- --run  # build it and launch it
+```
+
+That task is three commands in two toolchains, and the shape of it *is* D-61:
+
+```
 cargo build --release -p sift-abi        # produces libsift_abi.a
 cargo xtask header                       # asserts the committed header matches the ABI
 swift build -c release --package-path shells/macos
 ```
+
+The middle step is not ceremony. `Package.swift` links `-lsift_abi` against a committed
+header, so without it a drifted ABI links successfully against a stale declaration.
 
 ## What this costs, from D-61
 
@@ -42,5 +52,5 @@ its usage description**, without which FR-40 is silently absent rather than degr
 
 ## Not built here
 
-`sift-harness` drives the whole application with no window at all (D-65), and the Linux shell
-is an ordinary Cargo binary (`crates/shells/sift-gtk`).
+`mise run harness` drives the whole application with no window at all (D-65), and the Linux
+shell is an ordinary Cargo binary — `mise run linux` (`crates/shells/sift-gtk`).

@@ -1,0 +1,16 @@
+# convco configuration. convco auto-discovers this file from the repo root, and both the hk
+# commit-msg hook and the `commit-check` pre-push task run `convco check` against it. This
+# governs commit *validation* only.
+#
+# Sole override: relax the scope regex so it accepts the comma-separated multi-scopes this
+# repository already uses, and used before this file existed — `feat(mime,provider)`,
+# `feat(sync,credentials)`, `feat(abi,shells)`, `feat(observe,runtime,packaging)`. convco's
+# default (`^[[:alnum:]]+(?:[-_/][[:alnum:]]+)*$`) rejects the comma; it is added to the
+# separator class and nothing else is changed.
+#
+# The multi-scope is worth keeping rather than linting away: a change that crosses the ABI
+# names both sides of it, which is the same reason docs/decisions.md rows name every document
+# they touch. Without this, 9 of the 33 commits on the current branch would fail.
+#
+# NB: convco config keys are camelCase (`scopeRegex`, not `scope_regex`).
+scopeRegex: "^[[:alnum:]]+(?:[-_/,][[:alnum:]]+)*$"

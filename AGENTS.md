@@ -69,3 +69,7 @@ the entry in [`docs/open-questions.md`](docs/open-questions.md) with a pointer t
 not adjust one to match a measurement without saying that is what happened.
 
 **Reference requirements by identifier** in commits, reviews, and tests. That is what they are for.
+
+**Every command is a `mise` task.** `mise tasks` is the list; [`mise.toml`](mise.toml) is the definition.
+CI and the git hooks call the same tasks, so a gate's flags are written once — adding a command means
+adding a task, not a line in a workflow or a README. `mise run check` is the sweep to run before pushing.

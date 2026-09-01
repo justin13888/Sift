@@ -1,8 +1,15 @@
 # The toolchain contributors and CI use. The *floor* — the minimum Sift supports — is
 # `rust-version` in the workspace manifest, and the two are deliberately different
 # things: a build failing on the floor is a defect rather than an invitation to raise it.
+# `mise run check-floor` is what holds the floor; this file has nothing to do with it.
+#
+# **This channel and mise.toml's pinned `rust` must stay equal.** rustup reads this file at
+# every cargo invocation and it wins, so the two disagreeing means the mise pin is decorative.
+# An exact version rather than `stable` so that rustc, rustfmt and clippy resolve identically
+# here and on a runner — a floating channel makes a lint that appears on a new stable release
+# indistinguishable from one a change introduced. Bump both together, deliberately.
 [toolchain]
-channel = "stable"
+channel = "1.96.0"
 components = ["rustfmt", "clippy"]
 # D-46 requires a universal macOS binary, so both architectures are built rather than
 # one being inferred from the other.
