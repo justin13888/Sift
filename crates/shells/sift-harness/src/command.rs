@@ -74,6 +74,7 @@ fn help() -> Vec<String> {
     [
         "account add <name> <rich|minimal|unstable-ids>   add an account of a capability shape",
         "account add-replayed <name>                      an account backed by D-65's fixture corpus",
+        "account writes <name> <on|off>                   authorize writes to a mailbox, or withdraw it",
         "account authorize <name> <client-id>             begin a real authorization; prints the address",
         "account callback <name> <url>                    finish one, from what the scheme handed back",
         "account forget <name>                            FR-4: erase every credential, by enumeration",
@@ -158,6 +159,22 @@ fn account(app: &mut App, args: &[&str]) -> Output {
             app.pending_authorization.remove(*name);
             let id = app.add_provider_account(name, adapter)?;
             Ok(vec![format!("added `{name}`  id={id}")])
+        }
+        ["writes", name, state] => {
+            let enabled = match *state {
+                "on" => true,
+                "off" => false,
+                _ => return Err("account writes <name> <on|off>".to_owned()),
+            };
+            app.set_writes_enabled(name, enabled)?;
+            Ok(vec![if enabled {
+                format!(
+                    "`{name}` may now be changed: archive, move, flag, label, mark read, \
+                     report junk, and move to the provider's own Trash."
+                )
+            } else {
+                format!("`{name}` is watched only. Triage is recorded here and held.")
+            }])
         }
         ["forget", name] => {
             let id = app.account(name)?.id;
@@ -603,6 +620,21 @@ fn flush(app: &mut App, args: &[&str]) -> Output {
         [name, "--leave-in-flight"] => ((*name).to_owned(), true),
         _ => return Err("flush <account> [--leave-in-flight]".to_owned()),
     };
+    // The read-only posture, checked **before** anything is issued and before the adapter is
+    // even taken. Everything up to here already happened: the intents were built, checked
+    // against declared capabilities, written durably and applied optimistically. This is the
+    // one step that cannot be taken back, and it is the one step an unauthorized account
+    // does not take.
+    if !app.may_issue(&name) {
+        let held = app.held(&name);
+        return Ok(vec![
+            format!("0 issued — writes are not authorized for `{name}`"),
+            format!(
+                "{held} intent(s) held. Nothing has been sent to the provider, and nothing \
+                 will be until `account writes {name} on`."
+            ),
+        ]);
+    }
     let account = app.account(&name)?;
 
     // An account with no provider behind it: the queue's own state machine, driven without a

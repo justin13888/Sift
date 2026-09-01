@@ -163,6 +163,22 @@ pub struct OpenAccount {
     /// when the user adds it, and after that every command plans against what the account
     /// declares.
     pub adapter: Option<Live>,
+    /// Whether Sift may issue this account's mutations to the provider — the read-only
+    /// posture.
+    ///
+    /// **A new account starts `false`.** Triage still works in every respect a person can
+    /// see: intents are built, checked against declared capabilities, given their D-85 undo
+    /// group, written durably to the journal and applied optimistically to the view. What
+    /// does not happen is the one thing that cannot be taken back — the request leaving the
+    /// process.
+    ///
+    /// The point is that a mailbox can be connected, synced, read and triaged *before*
+    /// anything is authorized to change it, and the person can look at what Sift intends to
+    /// do before it does any of it. It is not a D-49 condition: the conditions table has
+    /// *paused by the user*, which means sync stopped, and this is not that — consuming the
+    /// account's one condition slot with a posture the user chose would hide a real fault
+    /// behind it.
+    pub writes_enabled: bool,
     /// The subject of each ingested message, so the harness can print something a person
     /// recognises. A shell would read this from the store; keeping it here keeps the
     /// harness's own printing out of the store's query paths.
@@ -350,6 +366,10 @@ impl App {
                 queue: Queue::new(),
                 ids: LocalIdGenerator::new(ordinal),
                 adapter: None,
+                // Read-only until somebody says otherwise. The safe state is the default,
+                // and it is the default at construction rather than at a call site that
+                // could be forgotten.
+                writes_enabled: false,
                 subjects: BTreeMap::new(),
             },
         );
@@ -610,6 +630,50 @@ impl App {
         // is an account in a condition, not one that can never be reached again.
         account.adapter = Some(adapter);
         outcome.map_err(|e| e.to_string())
+    }
+}
+
+/// The read-only posture: what it gates, and what it does not.
+impl App {
+    /// Whether this account's mutations may leave the process.
+    ///
+    /// **The gate is here and nowhere else.** Not inside `flush_once`, which is a pure
+    /// application function that should stay ignorant of policy, and not inside an adapter,
+    /// where refusing would be per-provider policy D-12 forbids. An intent that reaches the
+    /// flush has passed this, and that is the invariant worth testing.
+    #[must_use]
+    pub fn may_issue(&self, name: &str) -> bool {
+        self.accounts.get(name).is_some_and(|a| a.writes_enabled)
+    }
+
+    /// Authorize, or withdraw authorization for, writes to one account.
+    ///
+    /// Withdrawing takes effect immediately for anything not yet issued. Intents already on
+    /// the wire are not recalled — they settle or move to *Reconciling* like any other,
+    /// because a request that has left cannot be unsent and pretending otherwise would be
+    /// the one lie a mutation queue must not tell.
+    ///
+    /// # Errors
+    /// No such account.
+    pub fn set_writes_enabled(&mut self, name: &str, enabled: bool) -> Result<(), String> {
+        let account = self
+            .accounts
+            .get_mut(name)
+            .ok_or_else(|| format!("no account named `{name}`"))?;
+        account.writes_enabled = enabled;
+        Ok(())
+    }
+
+    /// How many intents are being held because writes are not authorized.
+    ///
+    /// Surfaced rather than silent: a queue that grows while nothing leaves is a state the
+    /// user chose, and one they have to be able to see they chose.
+    #[must_use]
+    pub fn held(&self, name: &str) -> usize {
+        self.accounts
+            .get(name)
+            .filter(|a| !a.writes_enabled)
+            .map_or(0, |a| a.queue.len())
     }
 }
 

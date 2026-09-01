@@ -116,6 +116,7 @@ fn a_crash_between_issuing_and_answering_leaves_intents_reconciling() {
     // cannot be done correctly, which is what the durable marker is paying for.
     let mut cmds = base();
     cmds.extend([
+        "account writes work on",
         "ingest work A",
         "ingest work B",
         "select #1 #2",
@@ -469,6 +470,9 @@ fn a_mutation_goes_out_over_the_wire_and_settles() {
     let mut cmds = live();
     cmds.extend([
         "sync mail",
+        // Writes are authorized explicitly, because a new account is watched-only. Every
+        // test that reaches the wire says so out loud, which is the point of the default.
+        "account writes mail on",
         "select #1",
         "do message.archive",
         "queue mail",
@@ -565,6 +569,7 @@ fn an_account_with_no_provider_behind_it_still_drives_the_queue() {
     // a real queue with nothing behind them, which is what the planner tests need.
     let out = session(&[
         "account add shape rich",
+        "account writes shape on",
         "ingest shape A message",
         "select #1",
         "do message.archive",
@@ -835,5 +840,115 @@ fn a_link_is_not_a_fetching_position_and_keeps_its_real_address() {
     assert!(
         !out.contains("src=\"https://tracker.test"),
         "a fetching position kept an external scheme:\n{out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The read-only posture: a mailbox can be connected, synced, read and triaged
+// before anything is authorized to change it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_new_account_is_watched_and_not_written_to() {
+    // The default, and the reason for it: connecting a real mailbox should not, by itself,
+    // authorize anything to alter it. Everything a person can see still works — this is not
+    // a read-only *mode* that disables triage, it is a queue that is not yet allowed to
+    // drain.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "select #1",
+        "do message.archive",
+        "flush mail",
+    ]);
+    let out = session(&cmds);
+    assert!(
+        out.contains("optimistic: yes"),
+        "the gesture still applied: {out}"
+    );
+    assert!(out.contains("0 issued"), "{out}");
+    assert!(out.contains("held"), "{out}");
+    assert!(
+        !out.contains("1 applied"),
+        "a write reached the provider without authorization:\n{out}"
+    );
+}
+
+#[test]
+fn a_held_intent_is_kept_rather_than_dropped() {
+    // The queue is the thing that must not lose a gesture. Holding is not discarding, and a
+    // held intent stays visible and stays in the order it was made.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "select #1",
+        "do message.archive",
+        "flush mail",
+        "queue mail",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("archive  Pending"), "{out}");
+}
+
+#[test]
+fn authorizing_writes_lets_the_held_queue_drain() {
+    // And the other half: the authorization is what releases it, and what was held goes out
+    // in the order it was made rather than being re-derived from current state.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "select #1",
+        "do message.archive",
+        "flush mail",
+        "account writes mail on",
+        "flush mail",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("0 issued"), "{out}");
+    let after = out.rsplit("may now be changed").next().unwrap_or("");
+    assert!(after.contains("1 issued: 1 applied"), "{out}");
+}
+
+#[test]
+fn withdrawing_authorization_stops_the_next_flush() {
+    // A person who turns it back off must see it take effect on anything not yet issued.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "account writes mail on",
+        "account writes mail off",
+        "select #1",
+        "do message.archive",
+        "flush mail",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("0 issued"), "{out}");
+    assert!(out.contains("watched only"), "{out}");
+}
+
+#[test]
+fn what_authorization_grants_is_stated_in_the_terms_it_grants_it_in() {
+    // FR-4 requires removal to say what is lost "in those terms"; the same standard applies
+    // to the gesture that authorizes writing to somebody's mail. Naming the operations is
+    // what makes the consent informed, and permanent deletion is not among them.
+    let out = session(&["account add-replayed mail", "account writes mail on"]);
+    for granted in [
+        "archive",
+        "move",
+        "flag",
+        "label",
+        "mark read",
+        "report junk",
+        "Trash",
+    ] {
+        assert!(out.contains(granted), "`{granted}` was not stated:\n{out}");
+    }
+    assert!(
+        !out.to_lowercase().contains("permanently delete"),
+        "authorization claimed a power the provider does not give it:\n{out}"
     );
 }

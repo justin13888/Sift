@@ -226,6 +226,18 @@ impl Queue {
     /// Returns what expired, so the account can enter *attention* and the user can be told
     /// which intent stopped. **Neither dropped nor retried forever**: the row stays in the
     /// queue and stays visible under FR-34.
+    ///
+    /// # Not to be called for an account whose writes are not authorized
+    ///
+    /// Nothing in the product calls this yet — the periodic sweep that will belongs on D-25's
+    /// wheel. When it is wired, it MUST skip an account whose writes are unauthorized, and
+    /// the reason is specific rather than general: an intent held by that posture has not
+    /// failed and is not being retried, it is waiting for a person. A user triaging for a
+    /// week before authorizing writes would otherwise watch every gesture they made silently
+    /// expire — which is the one failure the durable queue exists to prevent, arriving
+    /// through the door that was meant to bound it.
+    ///
+    /// The expiry clock for such an intent starts when writes are authorized.
     pub fn expire(&mut self, now_millis: u64) -> Vec<u128> {
         let mut expired = Vec::new();
         for q in &mut self.entries {
