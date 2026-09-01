@@ -17,6 +17,7 @@
 //! It holds no window, no selection and no observation. Those are the presentation layer's,
 //! which sits above this one.
 
+pub mod attachment;
 pub mod document;
 pub mod rows;
 

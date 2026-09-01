@@ -27,7 +27,7 @@ pub fn run(session: &mut Session, line: &str) -> Output {
         "do" | "queue" | "flush" | "restart" => Subsystem::Mutations,
         "actions" | "select" | "open" => Subsystem::Presentation,
         "sync" => Subsystem::Sync,
-        "body" | "resource" | "close" => Subsystem::Sanitize,
+        "body" | "resource" | "close" | "blocked" | "links" => Subsystem::Sanitize,
         "net" => Subsystem::Network,
         _ => Subsystem::Shell,
     };
@@ -63,6 +63,10 @@ fn dispatch(session: &mut Session, verb: &str, rest: &[&str]) -> Output {
         "watch" => watch(app, &rest),
         "sync" => sync(app, &rest),
         "body" => body(app, &rest),
+        "blocked" => blocked(app, &rest),
+        "links" => links(app, &rest),
+        "attachments" => attachments(app, &rest),
+        "save" => save(app, &rest),
         "resource" => resource(app, &rest),
         "close" => close(app, &rest),
         "net" => net(app, &rest),
@@ -83,6 +87,10 @@ fn help() -> Vec<String> {
         "watch <account> <remote-id> <on|off>             FR-43's watched set",
         "sync <account> [max-pages]                       cursor, delta, envelopes, one transaction",
         "body <id|#n>                                     fetch and render through the seven stages",
+        "blocked <id|#n>                                  FR-29: what was withheld, and the rule",
+        "links <id|#n>                                    FR-30/FR-42: where each link really goes",
+        "attachments <id|#n>                              FR-10: what is carried, fetching none of it",
+        "save <id|#n> <part> <dir> [write]                NFR-53: the final path, shown before the write",
         "resource <url|#n>                                answer one load, as the scheme handler does",
         "close <token|#>                                  revoke a document — D-90's navigation",
         "net [account]                                    bytes on the wire (FR-36)",
@@ -974,110 +982,180 @@ fn refresh_credential(
 }
 
 /// Fetch a message's body and run it through the seven stages.
+/// Render a message, and print everything the reader's chrome is drawn from.
+///
+/// **This calls the same [`App::open_document`] the macOS shell calls**, rather than repeating
+/// the seven stages beside it. D-65's claim is that the harness drives the application through
+/// the entry points a shell uses; a second render here would make that claim false in the one
+/// place it is most worth being true.
 fn body(app: &mut App, args: &[&str]) -> Output {
     let [reference] = args else {
         return Err("body <id|#n>".to_owned());
     };
     let id = resolve(app, reference)?;
-
-    // The fetch borrows the account; the render borrows the application's broker. They are
-    // scoped apart rather than nested, because the broker must **outlive** the render — the
-    // body view asks for a document's resources after the HTML has been handed over, and a
-    // broker created for the render would answer nothing.
-    let (parts_len, chosen, bytes) = {
-        let owner = app
-            .owner_of_stored(id)
-            .ok_or("no account holds this message")?;
-        let account = app.account(&owner)?;
-        let remote: String = account
-            .store
-            .store
-            .query_row(
-                "SELECT remote_id FROM message WHERE id = ?1",
-                rusqlite::params![id.to_bytes().to_vec()],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten()
-            .ok_or("this message has no remote identifier yet — sync first")?;
-        let adapter = account
-            .adapter
-            .as_ref()
-            .ok_or("this account has no provider behind it")?;
-
-        // **Structure first, and then one part.** The structure costs a few kilobytes; the
-        // attachment beside it costs nothing until somebody asks for it, which is a claim
-        // about *requests* rather than about intentions.
-        let remote_id = sift_provider::adapter::RemoteMessageId(remote);
-        let parts = adapter.structure(&remote_id).map_err(|e| e.to_string())?;
-        // Stage 2, and the same rule a parsed tree goes through: HTML preferred, plain text
-        // as the fallback, and plain text where the HTML exceeds L-1 — which rejects rather
-        // than truncating, and here the rejection has somewhere honest to land.
-        let chosen =
-            sift_mime::select::choose(&parts).ok_or("this message carries no renderable part")?;
-        let bytes = adapter
-            .fetch_part(&remote_id, &chosen.part)
-            .map_err(|e| e.to_string())?;
-        (parts.len(), chosen, bytes)
-    };
-
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    let selected = sift_pipeline::Selected {
-        html: chosen.is_html.then(|| text.clone()),
-        text: (!chosen.is_html).then_some(text),
-        reason: Some(format!("{:?}", chosen.reason)),
-    };
-
-    let mut context = sift_pipeline::Context {
-        // Nothing has authenticated this message yet, so the origin is null and every
-        // resource is third-party under the strictest rules. That is the correct answer
-        // rather than a placeholder: D-11's fourth priority is exactly this case.
-        origin: sift_block::origin::Origin::Null,
-        blocker: None,
-        dark: false,
-        broker: &mut app.resources,
-    };
-    let rendered = sift_pipeline::render(&selected, &mut context).map_err(|e| e.to_string())?;
+    let document = app.open_document(id, false)?;
 
     let mut out = vec![
+        format!("stages: {}", document.stages.join(" -> ")),
+        format!("token: {}", document.token),
         format!(
-            "part {} ({}) — {}",
-            chosen.part,
-            if chosen.is_html {
-                "text/html"
-            } else {
-                "text/plain"
-            },
-            selected.reason.clone().unwrap_or_default()
-        ),
-        format!("{parts_len} part(s) described, {} fetched", 1),
-        format!("stages: {}", rendered.stages.join(" -> ")),
-        format!("token: {}", rendered.token.as_str()),
-        format!(
-            "{} fetching position(s), {} link(s), {} removal(s)",
-            rendered.positions.len(),
-            rendered.links.len(),
-            rendered.removals.len()
+            "{} fetching position(s), {} withheld, {} link(s)",
+            document.fetching_positions,
+            document.blocked,
+            document.links.len()
         ),
     ];
-    for (position, verdict) in rendered.positions.iter().zip(rendered.verdicts.iter()) {
-        out.push(format!(
-            "  [{}] {}@{}  {}  -> {}",
-            position.index,
-            position.element,
-            position.attribute,
-            position.original,
-            if verdict.permits_fetch() {
-                "allowed"
-            } else {
-                "blocked"
+    out.extend(withheld_lines(&document));
+    out.extend(link_lines(&document));
+    out.push(document.html);
+    Ok(out)
+}
+
+/// FR-29's chrome as text: the count, then each refusal and the rule behind it.
+///
+/// The count leads because that is what the reader leads with, and the list follows because a
+/// count with nothing behind it tells a user something happened without telling them what.
+fn blocked(app: &mut App, args: &[&str]) -> Output {
+    let [reference] = args else {
+        return Err("blocked <id|#n>".to_owned());
+    };
+    let id = resolve(app, reference)?;
+    let document = app.open_document(id, false)?;
+    let mut out = vec![match document.blocked {
+        0 => "nothing was withheld".to_owned(),
+        1 => "1 remote resource not loaded".to_owned(),
+        n => format!("{n} remote resources not loaded"),
+    }];
+    out.extend(withheld_lines(&document));
+    out.push(if document.may_always_allow {
+        "`always load from this sender` is offered".to_owned()
+    } else {
+        "`always load from this sender` is absent — nothing authenticated this message, so \
+         there is no origin to key a durable allowance on"
+            .to_owned()
+    });
+    Ok(out)
+}
+
+/// FR-30 and FR-42 — where each link goes, and where the unsubscribe destination does.
+fn links(app: &mut App, args: &[&str]) -> Output {
+    let [reference] = args else {
+        return Err("links <id|#n>".to_owned());
+    };
+    let id = resolve(app, reference)?;
+    let document = app.open_document(id, false)?;
+    let mut out = vec![format!("{} link(s)", document.links.len())];
+    out.extend(link_lines(&document));
+    out.push(match &document.unsubscribe {
+        None => "no unsubscribe destination is declared".to_owned(),
+        Some(link) if link.needs_a_mail_handler => format!(
+            "unsubscribe: {} — requires a mail handler; Sift will not send it",
+            link.displayed
+        ),
+        Some(link) => format!(
+            "unsubscribe: {} — opens in the browser on confirmation; Sift never requests it",
+            link.displayed
+        ),
+    });
+    Ok(out)
+}
+
+fn withheld_lines(document: &sift_app::document::Document) -> Vec<String> {
+    document
+        .withheld
+        .iter()
+        .map(|w| {
+            format!(
+                "  withheld {}@{}  {}  — {}",
+                w.element, w.attribute, w.displayed, w.rule
+            )
+        })
+        .collect()
+}
+
+fn link_lines(document: &sift_app::document::Document) -> Vec<String> {
+    document
+        .links
+        .iter()
+        .map(|l| {
+            let mut line = format!("  link {}", l.displayed);
+            if l.displayed != l.target {
+                line.push_str(&format!("  -> {}", l.target));
             }
+            if let Some(wrapper) = &l.wrapper {
+                line.push_str(&format!("  (wrapped by {wrapper})"));
+            }
+            if l.needs_a_mail_handler {
+                line.push_str("  [needs a mail handler]");
+            }
+            line
+        })
+        .collect()
+}
+
+/// FR-10 — what a message carries, without fetching any of it.
+fn attachments(app: &mut App, args: &[&str]) -> Output {
+    let [reference] = args else {
+        return Err("attachments <id|#n>".to_owned());
+    };
+    let id = resolve(app, reference)?;
+    let listed = app.attachments(id)?;
+    if listed.is_empty() {
+        return Ok(vec!["no attachments".to_owned()]);
+    }
+    let mut out = vec![format!("{} attachment(s), none fetched", listed.len())];
+    for a in &listed {
+        out.push(format!(
+            "  {}  {}  {} B  as `{}`",
+            a.part, a.media_type, a.declared_size, a.file_name
         ));
+        if a.warning.required() {
+            let mut why = Vec::new();
+            if a.warning.declared {
+                why.push("the declared type is executable");
+            }
+            if a.warning.extension {
+                why.push("the name ends in an executable extension");
+            }
+            if a.warning.disagrees {
+                why.push("the declared type and the name disagree");
+            }
+            out.push(format!("    warn before opening: {}", why.join("; ")));
+        }
     }
-    for removal in &rendered.removals {
-        out.push(format!("  removed {} — {}", removal.what, removal.rule));
+    Ok(out)
+}
+
+/// NFR-53 — resolve the exact final path, show it, and only then write.
+///
+/// Two verbs rather than one, because the requirement is that the path be shown **before** the
+/// write. A single call that saved and then reported would satisfy every test and none of the
+/// requirement.
+fn save(app: &mut App, args: &[&str]) -> Output {
+    let (reference, part, directory, commit) = match args {
+        [reference, part, directory] => (reference, part, directory, false),
+        [reference, part, directory, "write"] => (reference, part, directory, true),
+        _ => return Err("save <id|#n> <part> <directory> [write]".to_owned()),
+    };
+    let id = resolve(app, reference)?;
+    let plan = app.plan_attachment_save(id, part, std::path::Path::new(directory))?;
+
+    let mut out = vec![format!("would write: {}", plan.final_path.display())];
+    if plan.renamed {
+        out.push("  the name was derived — a sender-supplied name never becomes a path".to_owned());
     }
-    out.push(rendered.html);
+    if !commit {
+        out.push("nothing written — repeat with `write` to confirm".to_owned());
+        return Ok(out);
+    }
+    let (written, warning) = app.write_attachment(&plan)?;
+    out.push(format!(
+        "wrote {written} B to {}",
+        plan.final_path.display()
+    ));
+    if warning.required() {
+        out.push("  opening this needs a warning first (FR-10)".to_owned());
+    }
     Ok(out)
 }
 

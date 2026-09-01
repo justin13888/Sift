@@ -86,6 +86,18 @@ pub fn gmail() -> Replay {
     // thing this fixture is checking. An adapter that believed an answer it did not request
     // would insert messages the delta never listed, with a provenance nothing assigned them.
     r.respond("POST", &wire::batch_target(), batch(envelopes));
+    // The hostile attachment's bytes: a PE header under a name that renders as a document and
+    // a type that declares one. All three of FR-10's sources disagree, which is the case the
+    // requirement calls suspicious in its own right.
+    r.on(
+        "GET",
+        &wire::attachment_target(&RemoteMessageId("m1".into()), "ATT-m1"),
+        format!(
+            r#"{{"size":8,"data":"{}"}}"#,
+            sift_provider::oauth::base64url(b"MZ\x90\x00\x03\x00\x00\x00")
+        )
+        .as_bytes(),
+    );
     // Mutations. A label change answers 204, and trashing answers with the message.
     r.respond(
         "POST",
@@ -112,7 +124,14 @@ pub fn gmail() -> Replay {
 
 /// A message's MIME structure: a plain alternative, an HTML body, and an attachment that is
 /// **not** fetched to render it.
+///
+/// `m1` is deliberately hostile. Every other fixture here is a well-behaved message, and a
+/// corpus of only well-behaved messages tests the happy path of a product whose entire reason
+/// for existing is the other one. What it carries is in [`hostile`].
 fn structure(id: &str) -> String {
+    if id == "m1" {
+        return hostile();
+    }
     let html = "<style>p{color:#111111;background-color:#ffffff}</style>\
                 <p>Hello from a fixture. <img src=\"https://tracker.test/pixel.gif\" width=\"1\" height=\"1\"> \
                 <a href=\"https://example.test/read\">read more</a></p>";
@@ -124,6 +143,47 @@ fn structure(id: &str) -> String {
           {{"partId":"1","mimeType":"text/html","body":{{"size":{},"data":"{encoded}"}}}},
           {{"partId":"2","mimeType":"application/pdf","filename":"statement.pdf",
             "body":{{"size":41943040,"attachmentId":"ATT-{id}"}}}}
+        ]}}}}"#,
+        html.len()
+    )
+}
+
+/// The message a marketer sends and an attacker copies, in one document — a receipt, which is
+/// the shape a fake invoice arrives in more often than any other.
+///
+/// Four separate defences meet here, and each one is defeated by a different half of it:
+///
+/// - a **click wrapper**, whose destination FR-30 recovers from the wrapper's own text rather
+///   than by following it, because following it *is* the tracking event;
+/// - a **second wrapper carrying nothing recoverable**, which is the falsifier for the one
+///   above: a Sift that resolved wrappers by fetching them would resolve this one too, and
+///   the only honest answer to it is the wrapper's own address;
+/// - a **homograph host**, whose punycode label renders as Latin and resolves elsewhere;
+/// - a **`mailto:` unsubscribe**, which FR-42 shows and reports as needing a mail handler
+///   rather than omitting, and which Sift will not send under any circumstance;
+/// - an attachment named with a **right-to-left override**, which renders as `invoice.pdf` and
+///   executes as `invoice.exe`, declared `application/pdf` so that no type check sees it.
+///
+/// The last one is the case FR-10 wrote its three-source rule for and the case NFR-53 names in
+/// its own words, and it is here so that both are tested against a message rather than against
+/// a string somebody remembered to write a unit test for.
+fn hostile() -> String {
+    let html = "<p>Your statement is ready. \
+        <a href=\"https://click.tracker.test/c?u=https%3A%2F%2Fexample.test%2Foffer&amp;rcpt=7f3a91\">View it</a> \
+        <a href=\"https://xn--80ak6aa92e.test/login\">Sign in</a> \
+        <a href=\"https://click.tracker.test/x/9f2c41\">Track my parcel</a><br>\
+        <img src=\"https://beacon.tracker.test/open.gif?rcpt=7f3a91\" width=\"1\" height=\"1\">\
+        <a href=\"mailto:unsubscribe@list.test?subject=stop\">Unsubscribe</a></p>";
+    let encoded = sift_provider::oauth::base64url(html.as_bytes());
+    // U+202E between the stem and `fdp.exe`, so the name renders `invoice.pdf` and the
+    // extension the platform acts on is `.exe`.
+    let disguised = "invoice\u{202E}fdp.exe";
+    format!(
+        r#"{{"id":"m1","payload":{{"partId":"","mimeType":"multipart/mixed","body":{{"size":0}},
+        "parts":[
+          {{"partId":"1","mimeType":"text/html","body":{{"size":{},"data":"{encoded}"}}}},
+          {{"partId":"2","mimeType":"application/pdf","filename":"{disguised}",
+            "body":{{"size":8,"attachmentId":"ATT-m1"}}}}
         ]}}}}"#,
         html.len()
     )

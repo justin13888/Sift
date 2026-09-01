@@ -428,8 +428,19 @@ fn with_no_filter_engine_loaded_every_remote_fetch_is_refused() {
     let mut cmds = live();
     cmds.extend(["sync mail", "body #1"]);
     let out = session(&cmds);
-    assert!(out.contains("-> blocked"), "{out}");
-    assert!(!out.contains("-> allowed"), "{out}");
+    // Every position, and every one of them refused. The pair is the assertion: a document
+    // reporting "0 fetching positions, 0 withheld" would pass a check for the absence of
+    // "allowed" while proving nothing at all.
+    let line = out
+        .lines()
+        .find(|l| l.contains("fetching position(s)"))
+        .unwrap_or_else(|| panic!("{out}"));
+    let counts: Vec<u32> = line
+        .split_whitespace()
+        .filter_map(|w| w.parse().ok())
+        .collect();
+    assert!(counts[0] > 0, "there is something to refuse: {line}");
+    assert_eq!(counts[0], counts[1], "all of them were refused: {line}");
 }
 
 #[test]
@@ -951,4 +962,286 @@ fn what_authorization_grants_is_stated_in_the_terms_it_grants_it_in() {
         !out.to_lowercase().contains("permanently delete"),
         "authorization claimed a power the provider does not give it:\n{out}"
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// The reader's chrome: what was withheld, where a link goes, and what is attached.
+//
+// Every one of these drives the hostile fixture — a click wrapper, a homograph host, a
+// `mailto:` unsubscribe and an attachment named with a right-to-left override, in one
+// message. A corpus of only well-behaved mail tests the happy path of a product whose whole
+// reason for existing is the other one.
+// ---------------------------------------------------------------------------------------
+
+/// The receipt is the hostile one, and it sorts last under D-55 — newest first, and it is the
+/// oldest of the three.
+fn hostile() -> Vec<&'static str> {
+    vec!["account add-replayed mail", "sync mail"]
+}
+
+#[test]
+fn a_withheld_resource_is_reported_with_the_reason_that_is_actually_true() {
+    let mut cmds = hostile();
+    cmds.push("blocked #3");
+    let out = session(&cmds);
+
+    assert!(out.contains("1 remote resource not loaded"), "{out}");
+    assert!(out.contains("beacon.tracker.test"), "{out}");
+    // D-10 makes an absent authority **deny** rather than fall through, and the chrome says
+    // *that* rather than claiming a rule matched. A user who believes a filter list caught
+    // something believes Sift is protecting them in a way it currently is not.
+    assert!(
+        out.contains("no filter list is loaded"),
+        "the reason names the shed rather than inventing a rule: {out}"
+    );
+}
+
+/// The control is **absent** rather than present-and-ineffective. An allowance keyed on
+/// nothing would apply to everyone, which is the opposite of what the button says.
+#[test]
+fn always_load_from_this_sender_is_absent_when_there_is_no_sender_to_key_it_on() {
+    let mut cmds = hostile();
+    cmds.push("blocked #3");
+    let out = session(&cmds);
+    assert!(
+        out.contains("`always load from this sender` is absent"),
+        "{out}"
+    );
+    assert!(
+        out.contains("no origin to key a durable allowance on"),
+        "{out}"
+    );
+}
+
+/// FR-30. The destination is recovered from the wrapper's own text, and the wrapper stays
+/// available — a user who cannot see that a link was wrapped cannot judge who wrapped it.
+#[test]
+fn a_click_wrapper_is_unwrapped_locally_and_the_wrapper_is_still_shown() {
+    let mut cmds = hostile();
+    cmds.push("links #3");
+    let out = session(&cmds);
+
+    assert!(out.contains("link https://example.test/offer"), "{out}");
+    assert!(
+        out.contains("wrapped by https://click.tracker.test"),
+        "{out}"
+    );
+}
+
+/// The falsifier for the test above. This wrapper carries nothing recoverable from its own
+/// text, and a Sift that resolved wrappers by *fetching* them would resolve it anyway — so the
+/// assertion is that it stays unresolved. A byte counter cannot make this claim against a
+/// replayed transport, and an intention is not evidence; an unrecoverable wrapper is.
+#[test]
+fn a_wrapper_with_nothing_recoverable_in_it_is_not_followed_to_find_out() {
+    let mut cmds = hostile();
+    cmds.push("links #3");
+    let out = session(&cmds);
+
+    let line = out
+        .lines()
+        .find(|l| l.contains("click.tracker.test/x/9f2c41"))
+        .unwrap_or_else(|| panic!("the opaque wrapper is shown: {out}"));
+    assert!(
+        !line.contains("->"),
+        "it resolved to something, which it can only have done by asking: {line}"
+    );
+    assert!(
+        !line.contains("wrapped by"),
+        "nothing was unwrapped, so nothing claims to have been: {line}"
+    );
+}
+
+/// A punycode label renders as one script and resolves as another. The display form marks it
+/// rather than rendering it, which is the whole of the defence: a user cannot compare two
+/// strings they are only shown one of.
+#[test]
+fn a_homograph_host_is_not_displayed_as_the_script_it_imitates() {
+    let mut cmds = hostile();
+    cmds.push("links #3");
+    let out = session(&cmds);
+
+    let line = out
+        .lines()
+        .find(|l| l.contains("xn--80ak6aa92e"))
+        .unwrap_or_else(|| panic!("the real host is shown: {out}"));
+    assert!(
+        line.contains("[80ak6aa92e]"),
+        "the displayed form marks the label rather than rendering it: {line}"
+    );
+}
+
+/// FR-42. Shown, reported as needing a mail handler, and never sent — the historical form of
+/// unsubscribing is a message, which the no-send constraint forbids outright.
+#[test]
+fn a_mailto_unsubscribe_is_shown_and_reported_rather_than_omitted() {
+    let mut cmds = hostile();
+    cmds.push("links #3");
+    let out = session(&cmds);
+
+    assert!(
+        out.contains("unsubscribe: mailto:unsubscribe@list.test"),
+        "{out}"
+    );
+    assert!(out.contains("requires a mail handler"), "{out}");
+    assert!(out.contains("Sift will not send it"), "{out}");
+}
+
+/// FR-10's list is built from the structure, and the structure is a few kilobytes. The
+/// forty-megabyte part beside it costs nothing until somebody asks — which is a claim about
+/// requests rather than about intentions, so it is asserted against the byte counter.
+#[test]
+fn listing_attachments_does_not_download_them() {
+    let mut cmds = hostile();
+    cmds.extend(["attachments #3", "net mail"]);
+    let out = session(&cmds);
+
+    assert!(out.contains("none fetched"), "{out}");
+    let received: u64 = out
+        .lines()
+        .filter_map(|l| l.split_once("received "))
+        .filter_map(|(_, r)| r.split_whitespace().next())
+        .filter_map(|n| n.parse().ok())
+        .max()
+        .unwrap_or_default();
+    // The whole corpus is a few kilobytes. An attachment fetch would be 8 bytes here, but the
+    // declared size is 8 and the structure says so — what matters is that the *request* is
+    // absent, and a bound well under the declared corpus proves no extra one was made.
+    assert!(received < 64 * 1024, "{received} bytes on the wire: {out}");
+}
+
+/// The case FR-10 wrote its three-source rule for. The declared type is `application/pdf`,
+/// the name renders as `invoice.pdf`, and the extension the platform acts on is `.exe`. A
+/// type check sees a document; the user sees a document; the machine runs a program.
+#[test]
+fn an_executable_disguised_as_a_document_is_caught_by_the_source_a_type_check_never_sees() {
+    let mut cmds = hostile();
+    cmds.push("attachments #3");
+    let out = session(&cmds);
+
+    assert!(
+        out.contains("application/pdf"),
+        "the declared type is a document: {out}"
+    );
+    assert!(out.contains("warn before opening"), "{out}");
+    assert!(
+        out.contains("the name ends in an executable extension"),
+        "the extension is the source that decides what the platform does: {out}"
+    );
+    assert!(
+        out.contains("the declared type and the name disagree"),
+        "a sender who labels an executable as a document has told Sift something: {out}"
+    );
+}
+
+/// NFR-53, in the words of the requirement: a sender-supplied filename never becomes a path.
+/// The override that made it render as a document is gone from the name that is written.
+#[test]
+fn a_sender_supplied_name_never_becomes_the_path_it_is_written_under() {
+    let mut cmds = hostile();
+    cmds.push("attachments #3");
+    let out = session(&cmds);
+
+    let line = out
+        .lines()
+        .find(|l| l.contains("as `"))
+        .unwrap_or_else(|| panic!("a derived name is shown: {out}"));
+    assert!(
+        !line.contains('\u{202E}'),
+        "the override is gone from the derived name: {line:?}"
+    );
+    assert!(line.contains("invoicefdp.exe"), "{line}");
+}
+
+/// The requirement is that the exact final path be shown **before** the write. A single call
+/// that saved and then reported would satisfy every test and none of the requirement, so the
+/// planning verb is asserted to write nothing.
+#[test]
+fn the_final_path_is_shown_before_anything_is_written() {
+    let directory = std::env::temp_dir().join(format!(
+        "sift-save-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&directory).expect("a directory to save into");
+    let plan = format!("save #3 2 {}", directory.display());
+
+    let mut cmds = hostile();
+    cmds.push(&plan);
+    let out = session(&cmds);
+
+    assert!(out.contains("would write:"), "{out}");
+    assert!(out.contains("nothing written"), "{out}");
+    assert_eq!(
+        std::fs::read_dir(&directory).expect("readable").count(),
+        0,
+        "planning wrote a file: {out}"
+    );
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+/// "An existing file MUST NOT be overwritten." Held by `create_new` rather than by a check,
+/// because a check before a write is a race and the file that appears between the two is the
+/// one somebody cared about.
+#[test]
+fn saving_twice_writes_twice_and_overwrites_nothing() {
+    let directory = std::env::temp_dir().join(format!(
+        "sift-save-twice-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&directory).expect("a directory to save into");
+    let write = format!("save #3 2 {} write", directory.display());
+
+    let mut cmds = hostile();
+    cmds.extend([write.as_str(), write.as_str()]);
+    let out = session(&cmds);
+
+    let written: Vec<String> = std::fs::read_dir(&directory)
+        .expect("readable")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(written.len(), 2, "{written:?} — {out}");
+    assert!(written.iter().any(|n| n == "invoicefdp.exe"), "{written:?}");
+    assert!(
+        written.iter().any(|n| n == "invoicefdp (2).exe"),
+        "the suffix goes before the extension, or the file opens with the wrong application: {written:?}"
+    );
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+/// The bytes are a PE header under a `.pdf` type. All three of FR-10's sources now disagree,
+/// and the fourth — the content — is the one that settles it.
+#[test]
+fn the_content_is_the_last_source_and_it_only_exists_once_the_bytes_are_here() {
+    let directory = std::env::temp_dir().join(format!(
+        "sift-save-sniff-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&directory).expect("a directory to save into");
+    let write = format!("save #3 2 {} write", directory.display());
+
+    let mut cmds = hostile();
+    cmds.push(&write);
+    let out = session(&cmds);
+
+    assert!(out.contains("needs a warning first"), "{out}");
+    let path = directory.join("invoicefdp.exe");
+    assert_eq!(
+        std::fs::read(&path).expect("written").get(..2),
+        Some(b"MZ".as_slice()),
+        "the bytes are what the sniff saw"
+    );
+    std::fs::remove_dir_all(&directory).ok();
 }

@@ -29,22 +29,75 @@ pub struct Document {
     pub html: String,
     /// D-28's per-document capability token. Unguessable, and revoked at navigation.
     pub token: String,
-    /// How many fetching positions were refused, and why, for the reader's own chrome.
+    /// Every position in the document that would fetch something, refused or not.
+    ///
+    /// Carried beside the refusals rather than inferred from them, because "three images, all
+    /// three withheld" and "three images, one withheld" are different sentences and only the
+    /// pair distinguishes them. FR-33's debug view is a view of this.
+    pub fetching_positions: usize,
+    /// How many of those were refused. `withheld.len()`, kept because a count is what the
+    /// chrome leads with and a shell should not have to compute one.
     pub blocked: usize,
-    /// Links, as the confirmation sheet must show them: what to display, and the real target.
+    /// Each refusal, with the rule that caused it. The disclosure behind the count.
+    pub withheld: Vec<Withheld>,
+    /// Whether "always load from this sender" has anything to key a durable allowance on.
+    ///
+    /// False where the synthetic origin is null — which is every unauthenticated message, and
+    /// therefore most of them until D-11's authentication inputs are wired. The control is
+    /// **absent** rather than disabled in that case, because an allowance keyed on nothing
+    /// would apply to everyone.
+    pub may_always_allow: bool,
+    /// Links, as the confirmation sheet must show them.
     pub links: Vec<Link>,
+    /// FR-42's destination, where the message declares one.
+    ///
+    /// Surfaced under the same display rules as any other link, and **never requested**: the
+    /// historical form is a message, which the no-send constraint forbids outright, and the
+    /// modern form is an HTTP request carrying a per-recipient token — which is precisely what
+    /// FR-29 treats as evidence that a resource is tracking the reader.
+    pub unsubscribe: Option<Link>,
     /// Which stages ran. FR-33's debug view is a view of this.
     pub stages: Vec<String>,
 }
 
-/// One link in a body.
+/// One link in a body, as FR-30 requires it be shown.
 #[derive(Debug, Clone)]
 pub struct Link {
-    /// What the document said.
+    /// The form a person reads: punycode-decoded and bidi-**stripped**.
+    ///
+    /// Stripped rather than isolated, which is the opposite of what NFR-54 does to a display
+    /// name — and the difference is the whole defence. A display name is prose, where a
+    /// right-to-left run is legitimate content. A URL is a structured identifier whose
+    /// component order carries meaning, and a control that reverses it has no honest use.
     pub displayed: String,
-    /// Where it actually goes. Shown to the user before anything opens — never followed to
-    /// find out, because following a wrapper *is* the tracking event FR-30 refuses to cause.
+    /// The address that will actually be opened. Never followed to find out where it goes,
+    /// because following a wrapper *is* the tracking event FR-30 refuses to cause.
     pub target: String,
+    /// The wrapper this was recovered from, kept available on request rather than discarded.
+    /// A user who cannot see that a link was wrapped cannot judge who wrapped it.
+    pub wrapper: Option<String>,
+    /// A `mailto:`, which is shown and **reported as requiring a mail handler** rather than
+    /// silently omitted — a user who cannot see it cannot know it existed.
+    pub needs_a_mail_handler: bool,
+}
+
+/// One fetching position the broker refused, and the rule that refused it.
+///
+/// This is what the blocked-content disclosure lists. It is native chrome by construction: a
+/// count a sender could write into the document is not a count, and a "load images" control
+/// inside the body is one a sender can counterfeit.
+#[derive(Debug, Clone)]
+pub struct Withheld {
+    /// Where it appeared — `img`/`src`, `link`/`href` — so the disclosure says what was lost
+    /// rather than only how much.
+    pub element: String,
+    pub attribute: String,
+    /// The address the sender wrote, shown under the same rules as a link: decoded, stripped,
+    /// and never fetched from.
+    pub displayed: String,
+    /// Why. `AbsentAuthority` is the honest answer until the filter lists ship, and it says
+    /// *shed* rather than *rule* — which is a different sentence and the true one.
+    pub rule: String,
 }
 
 impl App {
@@ -95,11 +148,14 @@ impl App {
             reason: Some(format!("{:?}", chosen.reason)),
         };
 
+        // Bound before the context borrows it, because whether an allowance has anything to
+        // key on is a property of the origin rather than of the render.
+        let context_origin = sift_block::origin::Origin::Null;
         let mut context = sift_pipeline::Context {
             // Nothing has authenticated this message yet, so the origin is null and every
             // resource is third-party under the strictest rules. D-11's fourth priority is
             // exactly this case, and it is the correct answer rather than a placeholder.
-            origin: sift_block::origin::Origin::Null,
+            origin: context_origin.clone(),
             blocker: None,
             dark,
             broker: &mut self.resources,
@@ -109,26 +165,46 @@ impl App {
         // A refusal is anything that is not an allow, which includes `AbsentAuthority`:
         // D-10 makes a missing filter engine **deny**, never fall through, so a shed that
         // dropped the engine shows as content withheld rather than as content loaded.
-        let blocked = rendered
-            .verdicts
+        //
+        // `positions` and `verdicts` are in step by construction — the pipeline documents
+        // that, and I2 is asserted over the pair — so zipping them is reading the pairing
+        // rather than assuming one.
+        let withheld: Vec<Withheld> = rendered
+            .positions
             .iter()
-            .filter(|v| !v.permits_fetch())
-            .count();
+            .zip(&rendered.verdicts)
+            .filter(|(_, verdict)| !verdict.permits_fetch())
+            .map(|(position, verdict)| Withheld {
+                element: position.element.clone(),
+                attribute: position.attribute.clone(),
+                displayed: sift_block::link::display_form(&position.original),
+                rule: describe(verdict),
+            })
+            .collect();
+
+        // Nothing keys a durable allowance while the origin is null, so the control that
+        // would set one is absent rather than present and ineffective.
+        let may_always_allow = !matches!(context_origin, sift_block::origin::Origin::Null);
+
+        let links: Vec<Link> = rendered
+            .links
+            .iter()
+            // No removal rules are loaded, so nothing is stripped and the wrapper recovery is
+            // the only transformation. That is the same shed as the absent authority above:
+            // the answer is honest about what it did rather than claiming a cleaning it did
+            // not perform.
+            .map(|target| Link::of(&sift_block::link::unwrap(target, &[])))
+            .collect();
 
         Ok(Document {
             html: rendered.html,
             token: rendered.token.as_str().to_owned(),
-            blocked,
-            // A link is **not** a fetching position: it keeps its real address, because it
-            // is followed on an explicit confirmation and never in place.
-            links: rendered
-                .links
-                .iter()
-                .map(|target| Link {
-                    displayed: target.clone(),
-                    target: target.clone(),
-                })
-                .collect(),
+            fetching_positions: rendered.positions.len(),
+            blocked: withheld.len(),
+            withheld,
+            may_always_allow,
+            unsubscribe: unsubscribe_among(&links),
+            links,
             stages: rendered.stages.iter().map(|s| (*s).to_owned()).collect(),
         })
     }
@@ -164,4 +240,55 @@ impl App {
         // should be given a way to *construct* one — that is the part that stays unforgeable.
         self.resources.revoke_named(token)
     }
+}
+
+impl Link {
+    /// The presentation-facing form of a destination the block layer resolved.
+    fn of(destination: &sift_block::link::Destination) -> Self {
+        Self {
+            displayed: destination.display.clone(),
+            target: destination.resolved.clone(),
+            wrapper: destination.wrapper.clone(),
+            needs_a_mail_handler: destination.needs_a_mail_handler,
+        }
+    }
+}
+
+/// Name a decision in the words that are true of it.
+///
+/// `AbsentAuthority` is not "blocked by a rule" — no rule ran. Saying so is the difference
+/// between a user believing a filter list caught something and knowing that Sift withheld it
+/// because it had nothing to decide with.
+fn describe(decision: &sift_block::engine::Decision) -> String {
+    use sift_block::engine::{Decision, Verdict};
+    match decision {
+        Decision::Agreed(Verdict::Block) => "a filter rule".to_owned(),
+        Decision::Agreed(Verdict::Allow) => "allowed".to_owned(),
+        Decision::Disagreed { authority, .. } => {
+            format!("{authority:?}, with the backstop disagreeing — a defect worth reporting")
+        }
+        Decision::AbsentAuthority => "no filter list is loaded, so nothing is fetched".to_owned(),
+    }
+}
+
+/// FR-42 — the unsubscribe destination a message declares, recovered from what is renderable.
+///
+/// **The header form is the authoritative one and is not available here yet**: `List-Unsubscribe`
+/// is a header, and the envelope Sift stores does not carry it. Until it does, this recovers the
+/// in-body form, which is what most senders provide anyway and is the one a person actually
+/// clicks. When the header arrives it takes precedence and this becomes the fallback.
+///
+/// Matching is on the address rather than on link text because link text is the sender's, and a
+/// sender who wants a click will label anything "unsubscribe".
+fn unsubscribe_among(links: &[Link]) -> Option<Link> {
+    links
+        .iter()
+        .find(|l| {
+            let target = l.target.to_ascii_lowercase();
+            target.contains("unsubscribe")
+                || target.contains("optout")
+                || target.contains("opt-out")
+                || (l.needs_a_mail_handler && target.contains("unsub"))
+        })
+        .cloned()
 }
