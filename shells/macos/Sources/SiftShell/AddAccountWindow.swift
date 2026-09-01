@@ -207,8 +207,11 @@ final class AddAccountWindow: NSWindowController {
             self.callbackArrived(callback.absoluteString)
         }
         session.presentationContextProvider = self
-        // The provider is asked for consent every time, so nothing is carried over from a
-        // previous grant — which is what makes `prompt=consent` produce a refresh token.
+        // Not ephemeral, which is the default and is stated because it is a decision: the
+        // session shares the browser's cookies, so a user already signed in to the provider is
+        // not made to sign in again. It is unrelated to consent — the profile asks for that
+        // every time with `prompt=consent`, which is what makes a refresh token arrive on a
+        // re-add rather than only on the first one.
         session.prefersEphemeralWebBrowserSession = false
         self.session = session
         guard session.start() else {
