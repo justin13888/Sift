@@ -215,6 +215,19 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         #endif
     }
 
+    /// Whether a preference-gated surface is on. D-101 has both off by default.
+    private func settingIsOn(_ key: String) -> Bool {
+        guard let app else { return false }
+        var rows = SiftRows_SiftSetting()
+        guard sift_settings(UnsafeMutablePointer(app), &rows) == Ok, let ptr = rows.ptr else {
+            return false
+        }
+        for index in 0..<rows.len where SiftText.string(ptr[index].key) == key {
+            return SiftText.string(ptr[index].value) == "true"
+        }
+        return false
+    }
+
     /// Invoke an action by identifier — the one path every gesture takes.
     ///
     /// D-98 makes the action set an ABI surface; the palette is a filtered view of the same
@@ -232,6 +245,32 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         case "app.quit":
             quit()
             return
+        case "read.open-in-standalone-reader":
+            guard let app, let row = windows.first?.selectedRow else { return }
+            // A window per message rather than one that retargets: D-97 makes this its own
+            // window kind, and a second message opening in the first would be the retarget
+            // this exists instead of.
+            let reader = StandaloneReader(app: app, row: row)
+            standaloneReaders.append(reader)
+            reader.showWindow(nil)
+            return
+        case "app.open-message-debug-view":
+            guard let app, let row = windows.first?.selectedRow else { return }
+            // Gated here rather than in the menu, so a key equivalent cannot reach past the
+            // preference. D-101 has it off by default.
+            guard settingIsOn("debug.message-view") else {
+                let alert = NSAlert()
+                alert.messageText = "Message details are turned off."
+                alert.informativeText =
+                    "Turn them on in Settings. They are off by default because a debug surface "
+                    + "that is on by default is one whose cost nobody measured."
+                alert.runModal()
+                return
+            }
+            let window = debugWindow ?? MessageDebugWindow(app: app)
+            debugWindow = window
+            window.present(row)
+            return
         case "app.open-settings":
             guard let app else { return }
             let window = settingsWindow ?? SettingsWindow(app: app)
@@ -240,6 +279,15 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             return
         case "app.open-runtime-panel":
             guard let app else { return }
+            guard settingIsOn("debug.runtime-panel") else {
+                let alert = NSAlert()
+                alert.messageText = "The runtime window is turned off."
+                alert.informativeText =
+                    "Turn it on in Settings. It is off by default, and it is where you can see "
+                    + "that an account Sift is only watching has sent nothing."
+                alert.runModal()
+                return
+            }
             let panel = runtimePanel ?? RuntimePanel(app: app)
             runtimePanel = panel
             panel.present()
@@ -343,6 +391,8 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     private var addAccount: AddAccountWindow?
     private var runtimePanel: RuntimePanel?
     private var settingsWindow: SettingsWindow?
+    private var standaloneReaders: [StandaloneReader] = []
+    private var debugWindow: MessageDebugWindow?
 
     /// **The account-less state is the add-account flow**, not an empty inbox with a hint in
     /// it. So first run is a screen, and this is where it opens.

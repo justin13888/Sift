@@ -174,6 +174,9 @@ final class MessageListViewController: NSViewController {
         }
     }
 
+    /// What is selected, for the window's own surfaces.
+    var selection: MessageRow? { selectedRow() }
+
     private func selectedRow() -> MessageRow? {
         let index = table.selectedRow
         guard index >= 0, index < rows.count else { return nil }

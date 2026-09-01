@@ -199,6 +199,9 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     /// Called after every invocation rather than on a timer: a resident process that polls its
     /// own state is exactly the idle wakeup NFR-11 counts, and neither of these changes without
     /// something happening.
+    /// The row the user is looking at, for the surfaces that act on one.
+    var selectedRow: MessageRow? { list.selection }
+
     func refreshChrome() {
         annunciator.show(app: app)
         undoBar.refresh(app: app)
