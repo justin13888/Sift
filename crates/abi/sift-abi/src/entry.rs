@@ -135,14 +135,37 @@ pub unsafe extern "C" fn sift_initialize(
             // is the same shape — a security guarantee that is absent refuses.
             //
             // The tests run without a credential store, which on a machine with one would
-            // prompt. `SIFT_EPHEMERAL` is what they set; a shell never does, and a shell
-            // that did would get a container that does not survive its own process.
+            // prompt. `SIFT_EPHEMERAL` is what they set; a shell never does.
+            //
+            // **It ignores the root it was given rather than sharing it.** An ephemeral
+            // session writing into the real container collides with what is already there —
+            // an identity that is taken, a file that is sealed under a key this session does
+            // not have — and the collision surfaces as an account that silently fails to be
+            // added and a first-run screen where a mailbox should be. Which is how it was
+            // found.
             app.scheme_is_registered = init.scheme_is_registered != 0;
             if std::env::var_os("SIFT_EPHEMERAL").is_none() {
                 app.open_container(std::path::Path::new(root))
                     .map_err(|_| ())?;
             } else {
-                app.root = Some(std::path::PathBuf::from(root));
+                // A counter as well as the clock. `as_nanos` reports at whatever resolution
+                // the platform has, and two initializations in one process can and do read
+                // the same value — which gives two sessions one directory, two accounts one
+                // set of files, and a failure about one run in ten. The same mistake was
+                // made and fixed in the test scratch path; the clock is here for readable
+                // names and the counter is what makes them unique.
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static NEXT: AtomicU64 = AtomicU64::new(0);
+                let unique = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos());
+                let n = NEXT.fetch_add(1, Ordering::Relaxed);
+                let scratch = std::env::temp_dir().join(format!(
+                    "sift-ephemeral-{}-{unique}-{n}",
+                    std::process::id()
+                ));
+                std::fs::create_dir_all(&scratch).map_err(|_| ())?;
+                app.root = Some(scratch);
             }
 
             let layer = Box::new(Layer {

@@ -41,6 +41,11 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             defer: false
         )
         window.title = "Sift"
+        // The search field sits where the title would be, which is the mail-client idiom and
+        // is also the only way to reach it without a toolbar. Showing both put the field on
+        // top of the word "Sift" — the window is still named for the switcher and the Window
+        // menu, and the name is simply not drawn twice.
+        window.titleVisibility = .hidden
         window.minSize = NSSize(width: 900, height: 560)
         window.titlebarAppearsTransparent = false
         window.delegate = self
@@ -103,12 +108,15 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         // blank when there is nothing to say.
         let container = NSView()
         let splitView = split.view
-        splitView.translatesAutoresizingMaskIntoConstraints = false
-        annunciator.translatesAutoresizingMaskIntoConstraints = false
-        undoBar.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(splitView)
-        container.addSubview(annunciator)
-        container.addSubview(undoBar)
+        for view in [splitView, annunciator, undoBar, searchField, searchReport] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            // **Every one of them, before any constraint mentions one.** A constraint between
+            // two views with no common ancestor raises, and AppKit catches that exception at
+            // the top of the event loop and carries on — so the symptom is not a crash and not
+            // a layout complaint. It is a window that is never ordered in, from a method that
+            // simply stops running, with nothing on stderr. Two of these were missing.
+            container.addSubview(view)
+        }
         NSLayoutConstraint.activate([
             splitView.topAnchor.constraint(equalTo: container.topAnchor),
             splitView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
