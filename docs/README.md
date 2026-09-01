@@ -4,8 +4,15 @@ Sift is a desktop mail client for **reading, searching, and triaging** mail acro
 is designed to run all the time, so its idle resource cost ranks above feature breadth. It does not send
 mail, and never will — see [scope](product/scope.md).
 
-This documentation set is **normative**. It is the specification, not a description of an implementation;
-no code exists yet.
+This documentation set is **normative**. It is the specification rather than a description of an
+implementation, and where the two disagree the specification is what is wrong with the code — not the
+other way round.
+
+**An implementation now exists**, and the distinction still matters. What is built is a macOS application
+that syncs, renders and triages mail through the hardened pipeline; a command-driven harness that drives
+the same application with no window; and one provider adapter, exercised against a recorded corpus. What
+is not built is listed in [the roadmap](product/roadmap.md), and nothing below has been rewritten to
+describe what happens to exist: a requirement that is not yet met is still a requirement.
 
 ## Reading order
 
@@ -16,7 +23,7 @@ them.
 2. [Architecture overview](architecture/overview.md) — the one structural claim everything follows from
 3. [Provider model](mail/provider-model.md) — how four providers become one abstraction
 4. [Rendering pipeline](rendering/pipeline.md) — how attacker-controlled input becomes pixels
-5. [Decisions](decisions.md) — the hundred and five calls that shaped the rest, and where each is weak
+5. [Decisions](decisions.md) — the hundred-odd calls that shaped the rest, and where each is weak
 
 ## Indexes
 

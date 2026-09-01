@@ -5,6 +5,12 @@ Open-source, snappy email client for reading, searching, and triaging mail acros
 > Sift is in early development. The design was settled and written down first, and
 > [`docs/`](docs/README.md) remains normative — the code follows it rather than the other way
 > round. Start there.
+>
+> **The macOS application runs.** It syncs, renders and triages mail through the hardened
+> pipeline, keeps it encrypted on disk, and survives a restart. A new account is **watched
+> rather than written to** until you say otherwise: it syncs and shows everything and changes
+> nothing in your mailbox, and the queued changes are visible in the runtime window so that
+> "nothing was sent" is something you can check rather than something you are told.
 
 Sift does not send mail. Reading, search, and triage are the product; composition, calendar, and contacts
 are [out of scope by design](docs/product/scope.md), not deferred.
@@ -68,13 +74,55 @@ browser you would return from to nothing:
 
 ```
 mise run harness -- "account authorize work <client-id>"
-mise run harness -- "account callback work net.justinchung.sift:/oauth2/callback?state=...&code=..."
+mise run harness -- "account callback work com.googleusercontent.apps.<id>:/oauth2/callback?state=...&code=..."
 ```
 
 The callback returns through a **registered URI scheme**, never a loopback address: NFR-24
 admits no listening socket for any purpose. The scope set is one scope, it is permanent, and
 it cannot send — which is the no-send constraint expressed where you can check it against the
 consent screen you are looking at.
+
+## Connecting a real Gmail account
+
+Sift ships with **no OAuth client**, and a build with none runs against the recorded corpus and
+says so. A client identifier is not a secret — it appears in every authorization URL, which is
+why PKCE exists — but quota, verification status and the consent screen all attach to the
+client rather than to the application, so a committed one would make every checkout share all
+three.
+
+**1. Create the client.** In the [Google Cloud console](https://console.cloud.google.com):
+
+- Create a project, then enable the **Gmail API** for it.
+- Configure the OAuth consent screen as **External**, and add your own address under
+  *Test users*. Until the app is verified, only test users can sign in.
+- Under *Credentials*, create an **OAuth client ID** with application type **iOS** — not
+  "Desktop app". Desktop expects a `127.0.0.1` loopback redirect, and
+  [NFR-24](docs/architecture/shell-boundary.md) forbids a listening socket of any kind, for any
+  purpose. The iOS/macOS type is the only one that accepts a scheme redirect.
+- For the bundle identifier, enter `net.justinchung.sift`.
+- Add the scope `https://www.googleapis.com/auth/gmail.modify`. It is the only one Sift asks
+  for, and it is the narrowest one that permits triage. **The scope that permits permanent
+  deletion also permits sending**, which is why Sift will do neither.
+
+**2. Point the build at it.** Put the identifier where the build will find it — the file is not
+committed:
+
+```
+echo '123456789-abcdef.apps.googleusercontent.com' > shells/macos/oauth-client.txt
+mise run macos -- --run
+```
+
+The build derives the callback scheme from the client (`com.googleusercontent.apps.123456789-abcdef`)
+and registers it in the bundle, and prints both so you can check them against the console.
+There is **no client secret** to store: a public client cannot keep one, which is what PKCE
+replaces it with.
+
+**3. Watch before you write.** The account is added read-only. Let it sync, read some mail,
+archive something, then open **Runtime** (turn it on in Settings first — it is off by default)
+and look at the queue: every intent should read `Pending`, and the window says so in a sentence.
+When you are satisfied, enable writes for that account. Sift will then be able to archive, move,
+flag, label, mark read, report junk, and move messages to Gmail's own Trash. It can never
+permanently delete one, and it can never send one.
 
 The two native shells are [`crates/shells/sift-gtk`](crates/shells/sift-gtk) and
 [`shells/macos`](shells/macos/README.md), built by `mise run linux` and `mise run macos`.
