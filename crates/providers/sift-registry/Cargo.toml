@@ -1,0 +1,22 @@
+[package]
+name = "sift-registry"
+description = "D-12's seam: the one place above the adapters where a provider is named."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sift-foundation.workspace = true
+sift-provider.workspace = true
+# The register names the adapters. That is its whole purpose, and it is why it lives in the
+# providers layer: `cargo xtask invariants` bans a provider name in `application`,
+# `presentation` and `abi`, and stops here. The adapters still cannot see each other —
+# `cargo xtask arch` checks that of the adapters themselves, and none of them depends on this.
+sift-http.workspace = true
+sift-gmail.workspace = true

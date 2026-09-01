@@ -840,7 +840,7 @@ fn refresh_credential(
         .cloned()
         .or_else(|| std::env::var("SIFT_OAUTH_CLIENT_ID").ok())
         .ok_or("no client identifier is known for this account, so it cannot be refreshed")?;
-    let registration = crate::account::registration(&client_id);
+    let registration = crate::account::registration(crate::account::default_kind(), &client_id)?;
     let mut transport = sift_http::Https::to(&registration.profile.token.host)
         .map_err(|why| format!("the trust store could not be consulted: {why}"))?;
     app.broker

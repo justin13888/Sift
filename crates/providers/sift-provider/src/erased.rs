@@ -65,6 +65,12 @@ pub trait ErasedAdapter {
     fn fetch_part(&self, id: &RemoteMessageId, part: &str) -> Result<Vec<u8>, ProviderError>;
     fn apply(&self, batch: &[WireMutation]) -> Result<Vec<MutationOutcome>, ProviderError>;
     fn watch(&self, folders: &[RemoteFolderId]) -> Result<(), ProviderError>;
+
+    /// NFR-23's one path by which a secret reaches an adapter. Not fallible, so not erased.
+    fn present_credential(&self, secret: &str);
+
+    /// FR-36's bytes on the wire. Not fallible, so not erased.
+    fn wire_bytes(&self) -> (u64, u64);
 }
 
 /// Every adapter is an erased adapter, and the erasure is where `classify` is applied.
@@ -108,6 +114,14 @@ where
     fn watch(&self, folders: &[RemoteFolderId]) -> Result<(), ProviderError> {
         Adapter::watch(self, folders).map_err(|e| self.erase(&e))
     }
+
+    fn present_credential(&self, secret: &str) {
+        Adapter::present_credential(self, secret);
+    }
+
+    fn wire_bytes(&self) -> (u64, u64) {
+        Adapter::wire_bytes(self)
+    }
 }
 
 /// The erasure itself, kept in one place so no method can forget to classify.
@@ -128,14 +142,76 @@ where
     }
 }
 
-/// A boxed erased adapter is itself an adapter, so every generic caller keeps working.
+/// The erased trait object is itself an adapter, so every generic caller keeps working.
 ///
 /// This is what lets `sift_sync::run` and `sift_mutations::flush` stay generic over
-/// [`Adapter`] while the application holds a `Box<dyn ErasedAdapter>` it cannot name the
-/// provider of. `classify` is total and allocation-free here because the classification was
-/// already made, once, where the concrete error still existed.
-impl Adapter for Box<dyn ErasedAdapter> {
+/// [`Adapter`] while the application holds an adapter whose provider it cannot name.
+/// `classify` is total and allocation-free here because the classification was already made,
+/// once, where the concrete error still existed.
+impl Adapter for dyn ErasedAdapter + '_ {
     type Error = ProviderError;
+
+    fn capabilities(&self) -> &Capabilities {
+        ErasedAdapter::capabilities(self)
+    }
+
+    fn enumerate_folders(&self) -> Result<Vec<RemoteFolder>, Self::Error> {
+        ErasedAdapter::enumerate_folders(self)
+    }
+
+    fn delta(
+        &self,
+        folder: &RemoteFolderId,
+        cursor: Option<&Cursor>,
+    ) -> Result<Delta, Self::Error> {
+        ErasedAdapter::delta(self, folder, cursor)
+    }
+
+    fn fetch_envelopes(&self, ids: &[RemoteMessageId]) -> Result<Vec<Envelope>, Self::Error> {
+        ErasedAdapter::fetch_envelopes(self, ids)
+    }
+
+    fn structure(&self, id: &RemoteMessageId) -> Result<Vec<PartDescriptor>, Self::Error> {
+        ErasedAdapter::structure(self, id)
+    }
+
+    fn fetch_part(&self, id: &RemoteMessageId, part: &str) -> Result<Vec<u8>, Self::Error> {
+        ErasedAdapter::fetch_part(self, id, part)
+    }
+
+    fn apply(&self, batch: &[WireMutation]) -> Result<Vec<MutationOutcome>, Self::Error> {
+        ErasedAdapter::apply(self, batch)
+    }
+
+    fn watch(&self, folders: &[RemoteFolderId]) -> Result<(), Self::Error> {
+        ErasedAdapter::watch(self, folders)
+    }
+
+    fn present_credential(&self, secret: &str) {
+        ErasedAdapter::present_credential(self, secret);
+    }
+
+    fn wire_bytes(&self) -> (u64, u64) {
+        ErasedAdapter::wire_bytes(self)
+    }
+
+    /// The identity over what the error already carries.
+    ///
+    /// Answering anything else here would discard the adapter's own verdict — a permanent
+    /// failure retried until L-17 expired it, or a cursor invalidation degrading an account
+    /// that only needed to recover.
+    fn classify(&self, error: &Self::Error) -> Failure {
+        error.failure
+    }
+}
+
+/// A box holding an adapter is an adapter, whether or not what it holds is sized.
+///
+/// Written once, generically, rather than for `Box<dyn ErasedAdapter>` alone: the callers
+/// that hold an owned adapter and the callers that borrow one should not need to know which
+/// they have.
+impl<A: Adapter + ?Sized> Adapter for Box<A> {
+    type Error = A::Error;
 
     fn capabilities(&self) -> &Capabilities {
         (**self).capabilities()
@@ -173,8 +249,16 @@ impl Adapter for Box<dyn ErasedAdapter> {
         (**self).watch(folders)
     }
 
+    fn present_credential(&self, secret: &str) {
+        (**self).present_credential(secret);
+    }
+
+    fn wire_bytes(&self) -> (u64, u64) {
+        (**self).wire_bytes()
+    }
+
     fn classify(&self, error: &Self::Error) -> Failure {
-        error.failure
+        (**self).classify(error)
     }
 }
 

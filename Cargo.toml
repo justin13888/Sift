@@ -36,6 +36,8 @@ members = [
     # Providers — the capability abstraction, the transport, and one crate per adapter.
     "crates/providers/sift-provider",
     "crates/providers/sift-http",
+    # The register: the one crate above the adapters that names them.
+    "crates/providers/sift-registry",
     "crates/providers/sift-jmap",
     "crates/providers/sift-graph",
     "crates/providers/sift-gmail",
@@ -120,6 +122,7 @@ sift-broker     = { path = "crates/rendering/sift-broker" }
 sift-pipeline   = { path = "crates/rendering/sift-pipeline" }
 sift-provider   = { path = "crates/providers/sift-provider" }
 sift-http       = { path = "crates/providers/sift-http" }
+sift-registry   = { path = "crates/providers/sift-registry" }
 sift-jmap       = { path = "crates/providers/sift-jmap" }
 sift-graph      = { path = "crates/providers/sift-graph" }
 sift-gmail      = { path = "crates/providers/sift-gmail" }

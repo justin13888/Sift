@@ -1784,13 +1784,13 @@ dependencies = [
  "sift-broker",
  "sift-credentials",
  "sift-foundation",
- "sift-gmail",
  "sift-http",
  "sift-mime",
  "sift-mutations",
  "sift-pipeline",
  "sift-presentation",
  "sift-provider",
+ "sift-registry",
  "sift-scheduler",
  "sift-store",
  "sift-subsystem",
@@ -1899,6 +1899,16 @@ dependencies = [
  "sha2",
  "sift-foundation",
  "sift-mime",
+]
+
+[[package]]
+name = "sift-registry"
+version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+ "sift-gmail",
+ "sift-http",
+ "sift-provider",
 ]
 
 [[package]]
