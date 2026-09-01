@@ -10,7 +10,11 @@ import CSift
 final class WindowShell: NSObject, NSWindowDelegate {
     private let app: OpaquePointer?
     private var window: NSWindow?
-    private var generation: Generation = Generation(0)
+    /// The observation's **identity**, which is what cancellation takes.
+    ///
+    /// Not a generation. A generation is a per-delivery staleness stamp; cancelling by one
+    /// would cancel every observation sharing it.
+    private var observation: SiftObservation = SiftObservation(SiftObservation_NONE)
 
     /// How this shell announces that it is finished.
     ///
@@ -61,7 +65,7 @@ final class WindowShell: NSObject, NSWindowDelegate {
     /// every notification, which is the polling D-18 rejected wearing different clothes.
     private func observeMessages() {
         guard let app else { return }
-        var generation = Generation(0)
+        var observation = SiftObservation(SiftObservation_NONE)
         _ = sift_observe_messages(
             UnsafeMutablePointer(app),
             // The anchor. D-18 anchors an observation on an identity rather than an integer
@@ -69,17 +73,22 @@ final class WindowShell: NSObject, NSWindowDelegate {
             // shell recomputing it on every notification.
             SiftId(bytes: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)),
             200,
-            { _, generation, rows in
+            { _, observation, generation, rows in
                 // Receive, record, return. The boundary is **not reentrant**: calling back
                 // into the layer from here is the thing D-48 forbids, and acting on the next
                 // turn of the loop is the shell author's rule.
+                //
+                // Both identifiers arrive because they answer different questions: the
+                // observation says which registration this is for, the generation says
+                // whether it is still wanted.
+                _ = observation
                 _ = generation
                 _ = rows
             },
             nil,
-            &generation
+            &observation
         )
-        self.generation = generation
+        self.observation = observation
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -88,7 +97,7 @@ final class WindowShell: NSObject, NSWindowDelegate {
         // called from somewhere that cannot afford to wait — and a stale delivery already
         // posted to this loop is discarded by comparing generations rather than waited for,
         // because waiting would be waiting on this loop from this loop.
-        if let app { _ = sift_cancel_observation(UnsafeMutablePointer(app), generation) }
+        if let app { _ = sift_cancel_observation(UnsafeMutablePointer(app), observation) }
 
         // Cancellation first, and it stays synchronous — that is D-48's rule and the whole
         // guarantee is that when it returns, nothing further arrives for this observation.

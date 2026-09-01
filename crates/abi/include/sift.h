@@ -188,6 +188,34 @@ typedef struct {
 } SiftApp;
 
 /**
+ * Which observation a delivery belongs to.
+ *
+ * **Distinct from [`Generation`], and the two cannot be one value.** A generation is a
+ * per-delivery staleness stamp: it advances on cancellation so that a delivery already
+ * posted to the main loop is discarded on arrival. An observation handle is an identity: it
+ * says *which* registration a callback is for, and it must not change while that
+ * registration lives.
+ *
+ * Collapsing them was a defect rather than a simplification. With one value, two live
+ * observations over different sets are indistinguishable — a shell watching a folder list
+ * and a message list holds the same handle for both — and cancelling one either cancels
+ * every observation or none of them. The shell has no way to tell which it got.
+ *
+ * A handle is never reused within a process, for the same reason a generation is not: a
+ * reused handle would let a delivery for a dead observation be accepted by a live one that
+ * happened to inherit its number.
+ */
+typedef uint64_t SiftObservation;
+/**
+ * Not a valid observation. What an out-parameter holds if a registration fails.
+ */
+#define SiftObservation_NONE 0
+/**
+ * The first handle a process issues. Deliberately not zero.
+ */
+#define SiftObservation_FIRST 1
+
+/**
  * The generation of an observation.
  *
  * D-66's answer to a race D-48 would otherwise deadlock on. Cancellation is synchronous:
@@ -267,8 +295,17 @@ typedef struct {
  *
  * The shell's rule inside one of these is D-48's: **receive, record, return; act on the next
  * turn of the loop.**
+ *
+ * It carries **both** identifiers, and they answer different questions. The observation says
+ * which registration this delivery belongs to, so a shell holding several can route it. The
+ * generation says whether it is still wanted, so a delivery posted before a cancellation is
+ * discarded on arrival rather than waited for at the cancel — which is the deadlock D-48
+ * names.
  */
-typedef void (*SiftRowsCallback)(void *context, Generation generation, SiftRows_SiftMessageRow rows);
+typedef void (*SiftRowsCallback)(void *context,
+                                 SiftObservation observation,
+                                 Generation generation,
+                                 SiftRows_SiftMessageRow rows);
 
 /**
  * Initialize the layer.
@@ -313,6 +350,10 @@ SiftStatus sift_invoke_action(SiftApp *app, const uint8_t *id, size_t id_len);
  * synchronous**: when [`sift_cancel_observation`] returns, no further callback for that
  * observation will arrive, on any thread, ever.
  *
+ * The handle written to `out` is the observation's **identity**, which is what
+ * [`sift_cancel_observation`] takes. It is not a generation and the two are not
+ * interchangeable.
+ *
  * # Safety
  * `app` and `out` must be valid.
  */
@@ -321,13 +362,13 @@ SiftStatus sift_observe_messages(SiftApp *app,
                                  uint32_t count,
                                  SiftRowsCallback callback,
                                  void *context,
-                                 Generation *out);
+                                 SiftObservation *out);
 
 /**
- * Cancel an observation.
+ * Cancel an observation, by its identity.
  *
- * Advances the generation, which is what makes a delivery already posted to the main loop
- * discardable on arrival. Cancellation rendezvous with **worker-side work only** — waiting
+ * Advances that observation's generation, which is what makes a delivery already posted to
+ * the main loop discardable on arrival. Cancellation rendezvous with **worker-side work only** — waiting
  * for posted deliveries would be waiting on the caller's own loop, and that deadlocks
  * deterministically rather than occasionally.
  *
@@ -336,7 +377,8 @@ SiftStatus sift_observe_messages(SiftApp *app,
  * # Safety
  * `app` must be valid.
  */
-SiftStatus sift_cancel_observation(SiftApp *app, Generation generation);
+SiftStatus sift_cancel_observation(SiftApp *app,
+                                   SiftObservation observation);
 
 /**
  * How many actions the register holds.

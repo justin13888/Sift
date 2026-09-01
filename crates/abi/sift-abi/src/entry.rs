@@ -23,7 +23,7 @@
 
 use crate::barrier::{guard, guard_out};
 use crate::host::SiftHostCallbacks;
-use crate::repr::{Generation, SiftId, SiftRows, SiftStatus, SiftStr};
+use crate::repr::{Generation, SiftId, SiftObservation, SiftRows, SiftStatus, SiftStr};
 use core::ffi::c_void;
 use sift_presentation::action;
 
@@ -73,8 +73,15 @@ pub struct SiftMessageRow<'a> {
 ///
 /// The shell's rule inside one of these is D-48's: **receive, record, return; act on the next
 /// turn of the loop.**
+///
+/// It carries **both** identifiers, and they answer different questions. The observation says
+/// which registration this delivery belongs to, so a shell holding several can route it. The
+/// generation says whether it is still wanted, so a delivery posted before a cancellation is
+/// discarded on arrival rather than waited for at the cancel — which is the deadlock D-48
+/// names.
 pub type SiftRowsCallback = extern "C" fn(
     context: *mut c_void,
+    observation: SiftObservation,
     generation: Generation,
     rows: SiftRows<'_, SiftMessageRow<'_>>,
 );
@@ -156,6 +163,10 @@ pub unsafe extern "C" fn sift_invoke_action(
 /// synchronous**: when [`sift_cancel_observation`] returns, no further callback for that
 /// observation will arrive, on any thread, ever.
 ///
+/// The handle written to `out` is the observation's **identity**, which is what
+/// [`sift_cancel_observation`] takes. It is not a generation and the two are not
+/// interchangeable.
+///
 /// # Safety
 /// `app` and `out` must be valid.
 #[unsafe(no_mangle)]
@@ -165,7 +176,7 @@ pub unsafe extern "C" fn sift_observe_messages(
     count: u32,
     callback: SiftRowsCallback,
     context: *mut c_void,
-    out: *mut Generation,
+    out: *mut SiftObservation,
 ) -> SiftStatus {
     unsafe {
         guard_out(out, || {
@@ -173,15 +184,15 @@ pub unsafe extern "C" fn sift_observe_messages(
             // An observation is **anchored, not an integer range**: a shell holding a range
             // would have to recompute it on every notification, which is the polling D-18
             // rejected wearing different clothes.
-            Ok(Generation::FIRST)
+            Ok(SiftObservation::FIRST)
         })
     }
 }
 
-/// Cancel an observation.
+/// Cancel an observation, by its identity.
 ///
-/// Advances the generation, which is what makes a delivery already posted to the main loop
-/// discardable on arrival. Cancellation rendezvous with **worker-side work only** — waiting
+/// Advances that observation's generation, which is what makes a delivery already posted to
+/// the main loop discardable on arrival. Cancellation rendezvous with **worker-side work only** — waiting
 /// for posted deliveries would be waiting on the caller's own loop, and that deadlocks
 /// deterministically rather than occasionally.
 ///
@@ -192,10 +203,15 @@ pub unsafe extern "C" fn sift_observe_messages(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sift_cancel_observation(
     app: *mut SiftApp,
-    generation: Generation,
+    observation: SiftObservation,
 ) -> SiftStatus {
     guard(|| {
-        let _ = (app, generation);
+        let _ = app;
+        // An identity, not a generation. Cancelling by generation would cancel every
+        // observation sharing it, which with one live generation means all of them.
+        if !observation.is_valid() {
+            return Err(());
+        }
         Ok(())
     })
 }
@@ -235,7 +251,13 @@ mod tests {
     extern "C" fn noop_notification(_: *mut c_void, _: SiftId, _: SiftId) {}
     extern "C" fn noop_condition(_: *mut c_void, _: SiftId, _: u32) {}
     extern "C" fn noop_url(_: *mut c_void, _: SiftStr<'_>) {}
-    extern "C" fn noop_rows(_: *mut c_void, _: Generation, _: SiftRows<'_, SiftMessageRow<'_>>) {}
+    extern "C" fn noop_rows(
+        _: *mut c_void,
+        _: SiftObservation,
+        _: Generation,
+        _: SiftRows<'_, SiftMessageRow<'_>>,
+    ) {
+    }
 
     fn callbacks() -> SiftHostCallbacks {
         SiftHostCallbacks {
@@ -317,7 +339,7 @@ mod tests {
 
     #[test]
     fn observation_and_cancellation_round_trip() {
-        let mut generation = Generation::FIRST;
+        let mut observation = SiftObservation::NONE;
         let status = unsafe {
             sift_observe_messages(
                 core::ptr::null_mut(),
@@ -325,13 +347,27 @@ mod tests {
                 50,
                 noop_rows,
                 core::ptr::null_mut(),
-                &raw mut generation,
+                &raw mut observation,
             )
         };
         assert_eq!(status, SiftStatus::Ok);
+        assert!(
+            observation.is_valid(),
+            "a registration that succeeded handed back no handle to cancel it with"
+        );
         assert_eq!(
-            unsafe { sift_cancel_observation(core::ptr::null_mut(), generation) },
+            unsafe { sift_cancel_observation(core::ptr::null_mut(), observation) },
             SiftStatus::Ok
+        );
+    }
+
+    #[test]
+    fn cancelling_nothing_is_a_failure_rather_than_a_silent_success() {
+        // A shell that lost track of a handle and passed NONE must be told, not quietly
+        // told nothing happened — the observation it meant to cancel is still delivering.
+        assert_eq!(
+            unsafe { sift_cancel_observation(core::ptr::null_mut(), SiftObservation::NONE) },
+            SiftStatus::Failed
         );
     }
 
