@@ -69,6 +69,7 @@ fn dispatch(session: &mut Session, verb: &str, rest: &[&str]) -> Output {
         "blocked" => blocked(app, &rest),
         "links" => links(app, &rest),
         "attachments" => attachments(app, &rest),
+        "search" => search(app, &rest),
         "save" => save(app, &rest),
         "resource" => resource(app, &rest),
         "close" => close(app, &rest),
@@ -93,6 +94,7 @@ fn help() -> Vec<String> {
         "blocked <id|#n>                                  FR-29: what was withheld, and the rule",
         "links <id|#n>                                    FR-30/FR-42: where each link really goes",
         "attachments <id|#n>                              FR-10: what is carried, fetching none of it",
+        "search [--in <account>] <query>                  FR-20: operators, and how they were read",
         "save <id|#n> <part> <dir> [write]                NFR-53: the final path, shown before the write",
         "resource <url|#n>                                answer one load, as the scheme handler does",
         "close <token|#>                                  revoke a document — D-90's navigation",
@@ -1035,6 +1037,47 @@ fn link_lines(document: &sift_app::document::Document) -> Vec<String> {
             line
         })
         .collect()
+}
+
+/// FR-19, FR-20 and FR-21 — search, and what the query was understood to mean.
+///
+/// The interpretation is printed **before** the results, because that is the order in which it
+/// is useful: a query that found nothing and one that was misread look identical from the
+/// results alone, and `form:alice` is a plausible typo for `from:alice`.
+fn search(app: &mut App, args: &[&str]) -> Output {
+    let (account, terms) = match args {
+        ["--in", account, rest @ ..] => (Some(*account), rest),
+        rest => (None, rest),
+    };
+    if terms.is_empty() {
+        return Err("search [--in <account>] <query>".to_owned());
+    }
+    let report = app.search(&terms.join(" "), account, 50)?;
+
+    let mut out = vec![format!("read as: {}", report.interpretation.join("; "))];
+    out.extend(report.caveats.iter().map(|c| format!("-- {c}")));
+    out.push(format!(
+        "{} result(s){}",
+        report.hits.len(),
+        if report.delegable_accounts == 0 {
+            ", all from this machine — nothing was asked of a provider"
+        } else {
+            ""
+        }
+    ));
+    out.extend(report.hits.iter().map(|h| {
+        format!(
+            "  [{}] {}  {}  {}",
+            match h.source {
+                sift_app::search::Source::Local => "local",
+                sift_app::search::Source::Server => "server",
+            },
+            h.row.id,
+            h.row.sender,
+            h.row.subject
+        )
+    }));
+    Ok(out)
 }
 
 /// FR-10 — what a message carries, without fetching any of it.

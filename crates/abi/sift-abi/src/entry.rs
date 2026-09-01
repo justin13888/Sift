@@ -161,6 +161,7 @@ pub unsafe extern "C" fn sift_initialize(
                 stage_rows: std::sync::Mutex::new(Vec::new()),
                 setting_rows: std::sync::Mutex::new(Vec::new()),
                 setting_values: std::sync::Mutex::new(Vec::new()),
+                search: std::sync::Mutex::new(crate::layer::SearchResult::default()),
             });
             Ok(Box::into_raw(layer).cast::<SiftApp>())
         })
@@ -412,6 +413,85 @@ pub unsafe extern "C" fn sift_complete_authorization(
             Ok(SiftId::from_u128(id.as_u128()))
         })
     }
+}
+
+/// FR-19, FR-20 and FR-21 — search, with the interpretation the user is shown.
+///
+/// **The interpretation crosses the boundary as a result, not as a debug aid.** A query that
+/// found nothing and one that was misread look identical from the results alone, and
+/// `form:alice` is a plausible typo for `from:alice`. So is the caveat list: empty results and
+/// unsearched fields also look identical, and a person who searches `has:attachment`, gets
+/// nothing, and concludes they have no attachments has been misled by a filter that was never
+/// evaluated.
+///
+/// # Safety
+/// `app` and `out` must be valid; the strings must point to their lengths in UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_search(
+    app: *mut SiftApp,
+    query: *const u8,
+    query_len: usize,
+    limit: u32,
+    out: *mut SiftSearch<'static>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let query = borrowed(query, query_len)?;
+            let layer = layer(app).ok_or(())?;
+            let report = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                session
+                    .app_mut()
+                    .search(query, None, limit)
+                    .map_err(|_| ())?
+            };
+
+            let mut held = layer.search.lock().map_err(|_| ())?;
+            held.interpretation = report.interpretation.join("; ");
+            held.caveats = report.caveats.join("\n");
+            held.sources = report
+                .hits
+                .iter()
+                .map(|h| match h.source {
+                    sift_app::search::Source::Local => SIFT_SOURCE_LOCAL,
+                    sift_app::search::Source::Server => SIFT_SOURCE_SERVER,
+                })
+                .collect();
+            held.owned = report.hits.into_iter().map(|h| h.row).collect();
+            // SAFETY: the rows borrow from `held.owned`, which the layer owns and replaces
+            // only on the next search — the call that also tells the shell to stop reading
+            // the previous one.
+            held.rows = held.owned.iter().map(|r| extend_row(row_of(r))).collect();
+            Ok(SiftSearch {
+                rows: SiftRows::new(extend_rows(&held.rows)),
+                interpretation: SiftStr::new(extend(&held.interpretation)),
+                caveats: SiftStr::new(extend(&held.caveats)),
+                delegable_accounts: u32::try_from(report.delegable_accounts).unwrap_or(u32::MAX),
+            })
+        })
+    }
+}
+
+/// Sift's own store.
+pub const SIFT_SOURCE_LOCAL: u32 = 0;
+/// The provider answered. Not reachable yet; the label exists because a merge that does not
+/// distinguish the two is the mistake FR-21 is about.
+pub const SIFT_SOURCE_SERVER: u32 = 1;
+
+/// What a search found, and what it understood.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftSearch<'a> {
+    /// The same fixed-layout row the list uses, so a shell draws results with the code it
+    /// already has.
+    pub rows: SiftRows<'a, SiftMessageRow<'a>>,
+    /// How each term was read, joined by `; `. Shown to the user, not logged.
+    pub interpretation: SiftStr<'a>,
+    /// What this build could not answer about this query, one per line. Empty is the good
+    /// case and means exactly that.
+    pub caveats: SiftStr<'a>,
+    /// How many accounts could have been asked to search server-side, and were not.
+    pub delegable_accounts: u32,
 }
 
 /// D-101's settings: every one, with its scope, its default and what it currently holds.
@@ -1033,6 +1113,14 @@ fn deliver(layer: &Layer) {
 ///
 /// Every string points into the row it came from and is valid for the delivery only, which
 /// is D-66's rule: a shell that needs a value beyond the callback copies it.
+/// # Safety
+/// The row must borrow from layer-owned storage freed only by the call that tells the shell
+/// to stop reading it.
+const unsafe fn extend_row(r: SiftMessageRow<'_>) -> SiftMessageRow<'static> {
+    // SAFETY: the caller's obligation. The lifetime is the only thing that changes.
+    unsafe { core::mem::transmute::<SiftMessageRow<'_>, SiftMessageRow<'static>>(r) }
+}
+
 fn row_of(r: &sift_app::rows::MessageRow) -> SiftMessageRow<'_> {
     SiftMessageRow {
         id: SiftId::from_u128(r.id.as_u128()),
@@ -2623,6 +2711,76 @@ mod tests {
             .collect();
         assert!(stages.contains(&"sanitize".to_owned()), "{stages:?}");
         assert!(stages.contains(&"filter".to_owned()), "{stages:?}");
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// FR-20's operators, executed, with the two things a shell must show beside the results.
+    #[test]
+    fn a_search_carries_how_it_was_read_and_what_it_could_not_answer() {
+        let app = start(run_inline, scratch_str());
+        let _ = hostile_message(app);
+
+        let query = "from:someone has:attachment";
+        let mut found = SiftSearch {
+            rows: SiftRows::empty(),
+            interpretation: SiftStr::null(),
+            caveats: SiftStr::null(),
+            delegable_accounts: 0,
+        };
+        assert_eq!(
+            unsafe { sift_search(app, query.as_ptr(), query.len(), 50, &raw mut found) },
+            SiftStatus::Ok
+        );
+
+        let read = text(found.interpretation);
+        assert!(read.contains("from: someone"), "{read}");
+        assert!(read.contains("with an attachment"), "{read}");
+
+        // The caveat is the point. Without it, "no results" and "that filter was never
+        // evaluated" are the same sentence to a user.
+        let caveats = text(found.caveats);
+        assert!(
+            caveats.contains("has:attachment"),
+            "an unevaluated filter said nothing about itself: {caveats:?}"
+        );
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// A typo that looks like an operator is read as text, and **says so**. `form:alice` is a
+    /// plausible mistake for `from:alice`, and the two produce very different result sets.
+    #[test]
+    fn an_operator_this_build_does_not_know_is_read_as_text_and_reported_as_such() {
+        let app = start(run_inline, scratch_str());
+        let _ = hostile_message(app);
+        let query = "form:alice";
+        let mut found = SiftSearch {
+            rows: SiftRows::empty(),
+            interpretation: SiftStr::null(),
+            caveats: SiftStr::null(),
+            delegable_accounts: 0,
+        };
+        let _ = unsafe { sift_search(app, query.as_ptr(), query.len(), 50, &raw mut found) };
+        let read = text(found.interpretation);
+        assert!(read.contains("read as text, not as an operator"), "{read}");
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// FR-21's label. Nothing delegates yet, and the count says so rather than the absence of
+    /// server results implying it.
+    #[test]
+    fn a_search_says_that_nothing_was_asked_of_a_provider() {
+        let app = start(run_inline, scratch_str());
+        let _ = hostile_message(app);
+        let query = "receipt";
+        let mut found = SiftSearch {
+            rows: SiftRows::empty(),
+            interpretation: SiftStr::null(),
+            caveats: SiftStr::null(),
+            delegable_accounts: 0,
+        };
+        let _ = unsafe { sift_search(app, query.as_ptr(), query.len(), 50, &raw mut found) };
+        assert_eq!(found.delegable_accounts, 0);
+        assert!(!found.rows.is_empty(), "the local search found nothing");
         let _ = unsafe { sift_shutdown(app) };
     }
 

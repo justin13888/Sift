@@ -24,6 +24,17 @@
 #include <stdlib.h>
 
 /**
+ * Sift's own store.
+ */
+#define SIFT_SOURCE_LOCAL 0
+
+/**
+ * The provider answered. Not reachable yet; the label exists because a merge that does not
+ * distinguish the two is the mistake FR-21 is about.
+ */
+#define SIFT_SOURCE_SERVER 1
+
+/**
  * A boolean.
  */
 #define SIFT_SETTING_FLAG 0
@@ -303,6 +314,90 @@ typedef struct {
 } SiftUndoable;
 
 /**
+ * A message row, as the list receives it.
+ *
+ * **Fixed layout, and the text fields are pointers into layer-owned storage valid for the
+ * duration of the delivery.** A shell that needs a value beyond the callback copies it.
+ *
+ * D-66 excluded the alternative arithmetically: FR-6's ten fields against NFR-6's
+ * 10,000-row fling is a hundred thousand boundary crossings per fling, versus one delivery.
+ */
+typedef struct {
+  /**
+   * D-78's local identity. Stable for as long as the message exists in that account, and
+   * therefore usable as a key for selection, undo rendering and notification
+   * click-through.
+   */
+  SiftId id;
+  SiftId account;
+  /**
+   * Server-assigned received time — what D-55 orders on.
+   */
+  uint64_t received_millis;
+  /**
+   * The sender's `Date` header. **Displayed only.**
+   */
+  uint64_t origination_millis;
+  /**
+   * Normalized under NFR-54 before it got here. Validity is established once, where
+   * normalization happens, and is **not re-checked by the shell**.
+   */
+  SiftStr sender;
+  SiftStr subject;
+  SiftStr snippet;
+  uint8_t unread;
+  uint8_t flagged;
+  uint8_t has_attachments;
+  /**
+   * Marked rather than joined — D-4.
+   */
+  uint8_t duplicate_across_accounts;
+  uint32_t thread_count;
+} SiftMessageRow;
+
+/**
+ * A contiguous, borrowed array of fixed-layout records.
+ *
+ * The alternative — an opaque row handle with a per-field accessor — was excluded
+ * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
+ * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
+ * hundred thousand boundary crossings per fling, against one delivery.
+ *
+ * # Safety
+ *
+ * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
+ * pointing into layer-owned storage with the same lifetime.
+ */
+typedef struct {
+  const SiftMessageRow *ptr;
+  size_t len;
+} SiftRows_SiftMessageRow;
+
+/**
+ * What a search found, and what it understood.
+ */
+typedef struct {
+  /**
+   * The same fixed-layout row the list uses, so a shell draws results with the code it
+   * already has.
+   */
+  SiftRows_SiftMessageRow rows;
+  /**
+   * How each term was read, joined by `; `. Shown to the user, not logged.
+   */
+  SiftStr interpretation;
+  /**
+   * What this build could not answer about this query, one per line. Empty is the good
+   * case and means exactly that.
+   */
+  SiftStr caveats;
+  /**
+   * How many accounts could have been asked to search server-side, and were not.
+   */
+  uint32_t delegable_accounts;
+} SiftSearch;
+
+/**
  * One setting, as D-101 enumerates it.
  */
 typedef struct {
@@ -543,66 +638,6 @@ typedef uint64_t SiftObservation;
  */
 typedef uint64_t Generation;
 #define Generation_FIRST 0
-
-/**
- * A message row, as the list receives it.
- *
- * **Fixed layout, and the text fields are pointers into layer-owned storage valid for the
- * duration of the delivery.** A shell that needs a value beyond the callback copies it.
- *
- * D-66 excluded the alternative arithmetically: FR-6's ten fields against NFR-6's
- * 10,000-row fling is a hundred thousand boundary crossings per fling, versus one delivery.
- */
-typedef struct {
-  /**
-   * D-78's local identity. Stable for as long as the message exists in that account, and
-   * therefore usable as a key for selection, undo rendering and notification
-   * click-through.
-   */
-  SiftId id;
-  SiftId account;
-  /**
-   * Server-assigned received time — what D-55 orders on.
-   */
-  uint64_t received_millis;
-  /**
-   * The sender's `Date` header. **Displayed only.**
-   */
-  uint64_t origination_millis;
-  /**
-   * Normalized under NFR-54 before it got here. Validity is established once, where
-   * normalization happens, and is **not re-checked by the shell**.
-   */
-  SiftStr sender;
-  SiftStr subject;
-  SiftStr snippet;
-  uint8_t unread;
-  uint8_t flagged;
-  uint8_t has_attachments;
-  /**
-   * Marked rather than joined — D-4.
-   */
-  uint8_t duplicate_across_accounts;
-  uint32_t thread_count;
-} SiftMessageRow;
-
-/**
- * A contiguous, borrowed array of fixed-layout records.
- *
- * The alternative — an opaque row handle with a per-field accessor — was excluded
- * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
- * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
- * hundred thousand boundary crossings per fling, against one delivery.
- *
- * # Safety
- *
- * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
- * pointing into layer-owned storage with the same lifetime.
- */
-typedef struct {
-  const SiftMessageRow *ptr;
-  size_t len;
-} SiftRows_SiftMessageRow;
 
 /**
  * Delivered on the shell's main loop, non-reentrantly.
@@ -958,6 +993,25 @@ SiftStatus sift_complete_authorization(SiftApp *app,
                                        const uint8_t *display_name,
                                        size_t display_name_len,
                                        SiftId *out);
+
+/**
+ * FR-19, FR-20 and FR-21 — search, with the interpretation the user is shown.
+ *
+ * **The interpretation crosses the boundary as a result, not as a debug aid.** A query that
+ * found nothing and one that was misread look identical from the results alone, and
+ * `form:alice` is a plausible typo for `from:alice`. So is the caveat list: empty results and
+ * unsearched fields also look identical, and a person who searches `has:attachment`, gets
+ * nothing, and concludes they have no attachments has been misled by a filter that was never
+ * evaluated.
+ *
+ * # Safety
+ * `app` and `out` must be valid; the strings must point to their lengths in UTF-8.
+ */
+SiftStatus sift_search(SiftApp *app,
+                       const uint8_t *query,
+                       size_t query_len,
+                       uint32_t limit,
+                       SiftSearch *out);
 
 /**
  * D-101's settings: every one, with its scope, its default and what it currently holds.

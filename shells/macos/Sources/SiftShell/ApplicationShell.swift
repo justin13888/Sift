@@ -244,6 +244,12 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             runtimePanel = panel
             panel.present()
             return
+        case "search.begin", "navigate.focus-search":
+            windows.first?.focusSearch()
+            return
+        case "search.clear":
+            windows.first?.clearSearch()
+            return
         case "app.close-window":
             NSApp.keyWindow?.performClose(nil)
             return

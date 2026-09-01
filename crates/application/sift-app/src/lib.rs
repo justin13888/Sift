@@ -22,6 +22,7 @@ pub mod authorize;
 pub mod container;
 pub mod document;
 pub mod rows;
+pub mod search;
 pub mod settings;
 
 use sift_foundation::condition::AccountCondition;

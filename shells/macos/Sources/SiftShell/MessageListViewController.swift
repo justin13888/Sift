@@ -25,6 +25,57 @@ final class MessageListViewController: NSViewController {
     /// Told when the selection changes, so the reader can follow it.
     var onSelect: ((MessageRow?) -> Void)?
 
+    /// FR-19 — search replaces the list's contents rather than opening a window.
+    ///
+    /// The two things shown beside the results are not decoration. **A query that found
+    /// nothing and one that was misread look identical from the results alone**, so the
+    /// interpretation is shown; and empty results and unevaluated filters also look identical,
+    /// so what the build could not answer is shown too. A person searching `has:attachment`,
+    /// getting nothing, and concluding they have no attachments has been misled by a filter
+    /// that never ran.
+    private var searching = false
+
+    func search(_ query: String, app: OpaquePointer) {
+        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else {
+            clearSearch()
+            return
+        }
+        var found = SiftSearch()
+        let ok = SiftText.withBytes(query) { ptr, len in
+            sift_search(UnsafeMutablePointer(app), ptr, len, 200, &found) == Ok
+        }
+        guard ok else { return }
+
+        // The observation keeps delivering while a search is on screen, and its batches would
+        // fight the results for the same table. Cancelling is synchronous: when it returns, no
+        // further delivery for it can arrive on any thread.
+        cancel()
+        searching = true
+        rows = []
+        if let ptr = found.rows.ptr {
+            for index in 0..<found.rows.len {
+                rows.append(MessageRow(ptr[index]))
+            }
+        }
+        table.reloadData()
+        onSearchReport?(
+            SiftText.string(found.interpretation), SiftText.string(found.caveats), rows.count)
+        onSelect?(nil)
+    }
+
+    /// Where the interpretation and the caveats go. The list draws rows; the window draws
+    /// sentences about them.
+    var onSearchReport: ((String, String, Int) -> Void)?
+    var onSearchCleared: (() -> Void)?
+
+    func clearSearch() {
+        guard searching else { return }
+        searching = false
+        rows = []
+        table.reloadData()
+        onSearchCleared?()
+    }
+
     // Row geometry. Two lines plus the breathing room a mail list needs to be scannable;
     // sized from the body font so that the system's larger-text setting grows the row rather
     // than clipping what is drawn in it.

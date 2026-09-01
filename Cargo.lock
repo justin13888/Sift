@@ -1692,6 +1692,7 @@ dependencies = [
  "sift-crypto",
  "sift-foundation",
  "sift-http",
+ "sift-index",
  "sift-mime",
  "sift-mutations",
  "sift-pipeline",

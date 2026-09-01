@@ -108,6 +108,23 @@ pub(crate) struct Layer {
     /// The text the setting rows borrow. Held separately because the rows are `repr(C)` and
     /// cannot own a `String`.
     pub(crate) setting_values: Mutex<Vec<String>>,
+    /// The last search. Held for the same reason every other table here is: the rows are
+    /// borrowed, and something has to own them past the call that returns them.
+    pub(crate) search: Mutex<SearchResult>,
+}
+
+/// One search's results, and the text they borrow.
+#[derive(Debug, Default)]
+pub(crate) struct SearchResult {
+    /// The rows themselves, owned here. The `repr(C)` records below borrow from these, and
+    /// something has to hold them past the call that returns them.
+    pub(crate) owned: Vec<sift_app::rows::MessageRow>,
+    pub(crate) rows: Vec<crate::entry::SiftMessageRow<'static>>,
+    /// In step with `rows`. Kept beside them rather than in them so that a result row is
+    /// byte-identical to a list row and a shell draws both with one code path.
+    pub(crate) sources: Vec<u32>,
+    pub(crate) interpretation: String,
+    pub(crate) caveats: String,
 }
 
 /// One authorization in progress. Empty means none.

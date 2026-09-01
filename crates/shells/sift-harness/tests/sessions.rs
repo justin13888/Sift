@@ -1368,3 +1368,80 @@ fn an_undo_that_could_not_run_does_not_consume_the_thing_it_would_have_undone() 
     // second reports an empty stack rather than an error about a half-consumed one.
     assert!(out.contains("there is nothing to undo"), "{out}");
 }
+
+// ---------------------------------------------------------------------------------------
+// FR-19, FR-20, FR-21 — search, and the two things shown beside the results.
+// ---------------------------------------------------------------------------------------
+
+/// The operators, executed. Conjunctive, because that is what a person means by typing two.
+#[test]
+fn the_operators_narrow_rather_than_widen() {
+    let mut cmds = hostile();
+    cmds.extend(["search receipt", "search from:someone is:unread"]);
+    let out = session(&cmds);
+    let counts: Vec<usize> = out
+        .lines()
+        .filter_map(|l| l.split_once(" result(s)"))
+        .filter_map(|(n, _)| n.trim().parse().ok())
+        .collect();
+    assert_eq!(counts.len(), 2, "{out}");
+    assert!(
+        counts[0] >= counts[1],
+        "adding a term widened the results: {counts:?}"
+    );
+}
+
+/// The failure this is written against: `form:alice` is a plausible typo for `from:alice`, and
+/// a search that silently read it as free text returns nothing with no way to tell why.
+#[test]
+fn a_typo_that_looks_like_an_operator_says_it_was_read_as_text() {
+    let mut cmds = hostile();
+    cmds.push("search form:alice");
+    let out = session(&cmds);
+    assert!(out.contains("read as text, not as an operator"), "{out}");
+}
+
+/// Empty results and unevaluated filters look identical. A person who searches
+/// `has:attachment`, gets nothing, and concludes they have no attachments has been misled.
+#[test]
+fn a_filter_that_was_never_evaluated_says_so_rather_than_returning_nothing_quietly() {
+    let mut cmds = hostile();
+    cmds.push("search has:attachment");
+    let out = session(&cmds);
+    assert!(out.contains("0 result(s)"), "{out}");
+    assert!(
+        out.contains("`has:attachment` matched nothing"),
+        "an unevaluated filter returned nothing without saying so: {out}"
+    );
+}
+
+/// The caveat is keyed on the query rather than printed under every search: one printed
+/// unconditionally is one nobody reads.
+#[test]
+fn a_caveat_appears_only_for_the_query_it_is_about() {
+    let mut cmds = hostile();
+    cmds.push("search is:unread");
+    let out = session(&cmds);
+    assert!(!out.contains("has:attachment"), "{out}");
+    assert!(!out.contains("Message bodies are not searched"), "{out}");
+}
+
+/// FR-5: a folder matches on its semantic use, which means the same thing in every locale,
+/// as well as on its display name.
+#[test]
+fn a_folder_is_matched_semantically_rather_than_by_a_localised_name() {
+    let mut cmds = hostile();
+    cmds.push("search in:inbox");
+    let out = session(&cmds);
+    assert!(out.contains("A receipt"), "{out}");
+}
+
+/// FR-21's label. Nothing delegates yet, and the transcript says so rather than leaving the
+/// absence of server results to imply it.
+#[test]
+fn a_search_says_that_nothing_was_asked_of_a_provider() {
+    let mut cmds = hostile();
+    cmds.push("search receipt");
+    let out = session(&cmds);
+    assert!(out.contains("nothing was asked of a provider"), "{out}");
+}

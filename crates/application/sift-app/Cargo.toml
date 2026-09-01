@@ -20,6 +20,8 @@ sift-registry.workspace = true
 # The transport an authorization's token exchange runs over. One host, one request.
 sift-http.workspace = true
 sift-store.workspace = true
+# FR-20's operator grammar. The parser is the index's; executing it is the application's.
+sift-index.workspace = true
 sift-sync.workspace = true
 sift-mutations.workspace = true
 sift-credentials.workspace = true

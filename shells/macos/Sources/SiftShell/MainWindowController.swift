@@ -18,6 +18,8 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     /// three ways to reach an action must not be three implementations of it.
     var onInvoke: ((String) -> Void)?
     private let annunciator = AnnunciatorView(frame: .zero)
+    private let searchField = NSSearchField()
+    private let searchReport = NSTextField(labelWithString: "")
     private let undoBar = UndoBar(frame: .zero)
 
     /// Told when the last window closes, so FR-25's distinction can be honoured: closing a
@@ -69,6 +71,33 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         split.addSplitViewItem(listItem)
         split.addSplitViewItem(readerItem)
 
+        // FR-19's search is in the window's own chrome rather than in a pane: it replaces
+        // what the list shows, so it cannot live inside the thing it replaces.
+        searchField.placeholderString = "Search — from: subject: is:unread in:inbox"
+        searchField.target = self
+        searchField.action = #selector(runSearch)
+        searchField.sendsSearchStringImmediately = false
+        searchReport.font = .preferredFont(forTextStyle: .caption1)
+        searchReport.textColor = .secondaryLabelColor
+        searchReport.lineBreakMode = .byWordWrapping
+        searchReport.isHidden = true
+
+        list.onSearchReport = { [weak self] interpretation, caveats, count in
+            guard let self else { return }
+            self.searchReport.isHidden = false
+            // Both, and in this order. The interpretation answers "did it read what I meant",
+            // and the caveats answer "is nothing there, or was nothing looked at".
+            var text = "\(count) result(s) · read as: \(interpretation)"
+            if !caveats.isEmpty { text += "\n\(caveats)" }
+            self.searchReport.stringValue = text
+        }
+        list.onSearchCleared = { [weak self] in
+            guard let self else { return }
+            self.searchReport.isHidden = true
+            self.searchField.stringValue = ""
+            self.list.observe(app: self.app, account: .zero)
+        }
+
         // The annunciator and the undo toast are window chrome, not panes: they sit over the
         // split view so that neither steals width from a pane, and both are absent rather than
         // blank when there is nothing to say.
@@ -85,6 +114,12 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             splitView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             splitView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            searchField.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
+            searchField.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 250),
+            searchField.widthAnchor.constraint(equalToConstant: 320),
+            searchReport.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 4),
+            searchReport.leadingAnchor.constraint(equalTo: searchField.leadingAnchor),
+            searchReport.widthAnchor.constraint(equalToConstant: 460),
             annunciator.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
             annunciator.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
             undoBar.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -20),
@@ -138,6 +173,25 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     /// Bring an existing window forward. "Open Sift" means *show me Sift*, not *make another*.
     func raise() {
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func runSearch() {
+        let query = searchField.stringValue
+        if query.trimmingCharacters(in: .whitespaces).isEmpty {
+            list.clearSearch()
+        } else {
+            list.search(query, app: app)
+        }
+    }
+
+    /// Put the caret in the search field — `search.begin`.
+    func focusSearch() {
+        window?.makeFirstResponder(searchField)
+    }
+
+    /// `search.clear`: back to the list the observation maintains.
+    func clearSearch() {
+        list.clearSearch()
     }
 
     /// Redraw what a gesture may have changed.
