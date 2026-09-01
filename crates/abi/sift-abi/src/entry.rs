@@ -125,7 +125,24 @@ pub unsafe extern "C" fn sift_initialize(
                 return Err(());
             }
             let mut app = sift_app::App::new();
-            app.root = Some(std::path::PathBuf::from(root));
+            // The container, and everything the last run left in it: the accounts, sealed
+            // under their own keys, with each queue rebuilt from its journal.
+            //
+            // A failure here is a **refused launch** rather than a degraded one. The
+            // alternatives are all worse than not starting: an empty application over a
+            // container that is there would look like the user's mail had gone, and a
+            // scratch root beside it would quietly start a second installation. D-71's rule
+            // is the same shape — a security guarantee that is absent refuses.
+            //
+            // The tests run without a credential store, which on a machine with one would
+            // prompt. `SIFT_EPHEMERAL` is what they set; a shell never does, and a shell
+            // that did would get a container that does not survive its own process.
+            if std::env::var_os("SIFT_EPHEMERAL").is_none() {
+                app.open_container(std::path::Path::new(root))
+                    .map_err(|_| ())?;
+            } else {
+                app.root = Some(std::path::PathBuf::from(root));
+            }
 
             let layer = Box::new(Layer {
                 session: std::sync::Mutex::new(Session::new(app)),
@@ -1433,6 +1450,13 @@ mod tests {
         Box::leak(d.to_str().expect("utf-8").to_owned().into_boxed_str())
     }
 
+    /// The tests drive the boundary without a credential store: opening a real container
+    /// would reach the login keychain and prompt. A shell never sets this.
+    fn ephemeral() {
+        // SAFETY: single-threaded at this point in every test, and the value is only ever set.
+        unsafe { std::env::set_var("SIFT_EPHEMERAL", "1") };
+    }
+
     fn scratch() -> std::path::PathBuf {
         // A clock is **not** a unique identifier. `as_nanos` reports at whatever resolution the
         // platform has, and two of these tests running in parallel on the same machine can and
@@ -1451,6 +1475,7 @@ mod tests {
     }
 
     fn start(schedule: crate::layer::SiftSchedule, root: &'static str) -> *mut SiftApp {
+        ephemeral();
         let mut app: *mut SiftApp = core::ptr::null_mut();
         let init = SiftInit {
             container_root: SiftStr::new(root),
@@ -1497,6 +1522,7 @@ mod tests {
         // The container is the shell's to name. A layer that fell back to a path of its own
         // would be wrong under the sandbox and under Flatpak, and would put a user's mail
         // somewhere nobody chose.
+        ephemeral();
         let mut app: *mut SiftApp = core::ptr::null_mut();
         let init = SiftInit {
             container_root: SiftStr::new(""),

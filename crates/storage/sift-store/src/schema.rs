@@ -288,8 +288,18 @@ CREATE TABLE intent (
     -- D-85's undo group: what a compensation acts over, assigned at the gesture.
     undo_group          BLOB,
     message_id          BLOB NOT NULL,
-    -- FR-13's closed set, serialised.
+    -- FR-13's closed set, serialised. The discriminant only: NFR-48's quarantine keys on
+    -- whether *this* build recognises the operation, and a name that carried its parameters
+    -- would make an unrecognised parameter look like an unrecognised operation.
     operation           TEXT NOT NULL,
+    -- What the gesture supplied and the register did not: a destination folder for a move,
+    -- a name for a tag.
+    --
+    -- **Not optional decoration.** A move with no destination is not a move, and the first
+    -- version of this table had no such column — so an intent read back from the journal
+    -- would have been a `move-to` with nowhere to go. That is silent loss of a gesture the
+    -- user watched succeed, which is the exact failure the journal exists to prevent.
+    parameter           TEXT,
     -- NFR-48: serialised intents carry their own version, so a build that does not
     -- recognise one QUARANTINES it rather than dropping or guessing at it.
     intent_version      INTEGER NOT NULL,

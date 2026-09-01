@@ -113,6 +113,52 @@ impl Intent {
         }
     }
 
+    /// The gesture's own argument, where the intent has one.
+    ///
+    /// Serialised beside [`name`](Self::name) rather than inside it, because the two answer
+    /// different questions: the name is the closed-set discriminant NFR-48's quarantine keys
+    /// on, and this is a value a later build may read even where it does not recognise the
+    /// operation.
+    #[must_use]
+    pub fn parameter(&self) -> Option<String> {
+        match self {
+            Self::MoveTo { folder } => Some(folder.to_string()),
+            Self::AddTag { name } | Self::RemoveTag { name } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Rebuild an intent from what the journal holds.
+    ///
+    /// `None` where this build does not recognise the operation, or where one that needs a
+    /// parameter was stored without one. Both are **quarantined rather than dropped or
+    /// guessed at** — NFR-48 is explicit that an unrecognised intent is held, shown, and left
+    /// executable by a later build.
+    #[must_use]
+    pub fn from_parts(operation: &str, parameter: Option<&str>) -> Option<Self> {
+        Some(match operation {
+            "archive" => Self::Archive,
+            "delete-to-trash" => Self::DeleteToTrash,
+            "permanently-delete" => Self::PermanentlyDelete,
+            "move-to" => Self::MoveTo {
+                folder: parameter?.parse().ok()?,
+            },
+            "mark-read" => Self::MarkRead,
+            "mark-unread" => Self::MarkUnread,
+            "flag" => Self::Flag,
+            "unflag" => Self::Unflag,
+            "add-tag" => Self::AddTag {
+                name: parameter?.to_owned(),
+            },
+            "remove-tag" => Self::RemoveTag {
+                name: parameter?.to_owned(),
+            },
+            "report-junk" => Self::ReportJunk,
+            "report-not-junk" => Self::ReportNotJunk,
+            _ => return None,
+        })
+    }
+
     /// A stable name for the queue's serialised form and for the debug view.
     #[must_use]
     pub const fn name(&self) -> &'static str {
@@ -187,6 +233,24 @@ impl State {
             Self::Quarantined => "Quarantined",
             Self::Expired => "Expired",
             Self::Settled => "Settled",
+        }
+    }
+
+    /// Read a state back from the journal.
+    ///
+    /// **A state this build does not recognise becomes `Quarantined`, never `Pending`.** The
+    /// two directions of the mistake are not symmetric: treating an unknown state as pending
+    /// would reissue an intent that may already have been applied, and treating it as
+    /// quarantined holds it where a person can see it.
+    #[must_use]
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "Pending" => Self::Pending,
+            "Issued" => Self::Issued,
+            "Reconciling" => Self::Reconciling,
+            "Expired" => Self::Expired,
+            "Settled" => Self::Settled,
+            _ => Self::Quarantined,
         }
     }
 }
@@ -388,5 +452,76 @@ mod tests {
         // mutation that is not an intent." Twelve here, because FR-13's nine count
         // read/unread, flag/unflag and add/remove tag as one row each.
         assert_eq!(all().len(), 12);
+    }
+}
+
+#[cfg(test)]
+mod serialisation {
+    use super::*;
+
+    /// Every intent survives the journal. The parameterised ones are why this test exists:
+    /// a `move-to` that came back with no destination is not a move, and the loss would be
+    /// silent — the queue would hold an intent that could never be issued.
+    #[test]
+    fn every_intent_round_trips_through_what_the_journal_stores() {
+        let all = [
+            Intent::Archive,
+            Intent::DeleteToTrash,
+            Intent::PermanentlyDelete,
+            Intent::MoveTo { folder: 42 },
+            Intent::MarkRead,
+            Intent::MarkUnread,
+            Intent::Flag,
+            Intent::Unflag,
+            Intent::AddTag {
+                name: "receipts".to_owned(),
+            },
+            Intent::RemoveTag {
+                name: "receipts".to_owned(),
+            },
+            Intent::ReportJunk,
+            Intent::ReportNotJunk,
+        ];
+        for intent in all {
+            let name = intent.name();
+            let parameter = intent.parameter();
+            let back = Intent::from_parts(name, parameter.as_deref())
+                .unwrap_or_else(|| panic!("`{name}` did not come back"));
+            assert_eq!(back, intent, "`{name}` came back as something else");
+        }
+    }
+
+    /// A state this build does not know must not read as pending: reissuing an intent that
+    /// may already have been applied is the direction of the mistake that costs something.
+    #[test]
+    fn an_unknown_state_is_quarantined_rather_than_pending() {
+        assert_eq!(State::from_name("Scheduled"), State::Quarantined);
+        assert_eq!(State::from_name(""), State::Quarantined);
+        for state in [
+            State::Pending,
+            State::Issued,
+            State::Reconciling,
+            State::Quarantined,
+            State::Expired,
+            State::Settled,
+        ] {
+            assert_eq!(State::from_name(state.name()), state);
+        }
+    }
+
+    /// NFR-48: an operation this build does not know is quarantined, never guessed at.
+    #[test]
+    fn an_unrecognised_operation_is_refused_rather_than_approximated() {
+        assert!(Intent::from_parts("schedule-send", None).is_none());
+        assert!(Intent::from_parts("archive-forever", None).is_none());
+    }
+
+    /// A parameterised intent stored without its parameter is refused for the same reason.
+    /// Defaulting the folder to zero would move the user's mail somewhere nobody chose.
+    #[test]
+    fn a_parameterised_intent_with_no_parameter_is_refused() {
+        assert!(Intent::from_parts("move-to", None).is_none());
+        assert!(Intent::from_parts("move-to", Some("not a folder")).is_none());
+        assert!(Intent::from_parts("add-tag", None).is_none());
     }
 }

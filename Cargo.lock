@@ -1682,10 +1682,12 @@ dependencies = [
 name = "sift-app"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.4.3",
  "rusqlite",
  "sift-block",
  "sift-broker",
  "sift-credentials",
+ "sift-crypto",
  "sift-foundation",
  "sift-mime",
  "sift-mutations",

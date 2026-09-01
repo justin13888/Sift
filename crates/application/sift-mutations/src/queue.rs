@@ -126,6 +126,22 @@ impl Overlay {
     }
 }
 
+/// One intent as the journal holds it, on the way back into the queue.
+///
+/// A struct rather than a tuple because six of its eight fields are integers and a caller
+/// swapping two of them would compile.
+#[derive(Debug, Clone)]
+pub struct Restored {
+    pub id: u128,
+    pub undo_group: Option<u128>,
+    pub message: LocalId,
+    pub intent: Intent,
+    pub state: State,
+    pub attempts: u32,
+    pub created_millis: u64,
+    pub sequence: u64,
+}
+
 /// The durable queue, in memory. Persistence is the journal's.
 #[derive(Debug, Default)]
 pub struct Queue {
@@ -137,6 +153,48 @@ impl Queue {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Rebuild the queue from what the journal holds.
+    ///
+    /// # This is the whole reason the journal is the file that may not be discarded
+    ///
+    /// D-74 gives an account a store that may be thrown away and a journal that may not, and
+    /// the difference is exactly this: the store can be resynced from the provider, and a
+    /// queued gesture cannot be recovered from anywhere. **Until this existed, `Queue::new()`
+    /// started empty and nothing ever read an intent back** — which was harmless only for as
+    /// long as nothing persisted, and became silent loss of every queued-but-unissued gesture
+    /// on the first restart of a durable container.
+    ///
+    /// Restoration is not enqueueing. It does **not** coalesce, does not reassign sequences,
+    /// and does not re-derive identifiers: every one of those is a decision that was already
+    /// made when the gesture happened, and remaking it would change what the user asked for.
+    /// The per-message sequence counter resumes above the highest it finds, so an intent
+    /// enqueued after a restart still sorts after the ones that survived it.
+    ///
+    /// An intent whose operation this build does not recognise arrives here already
+    /// [`Quarantined`](State::Quarantined) — held, shown, and executable by a later build,
+    /// per NFR-48. Restoring it as anything else would either drop it or guess at it.
+    pub fn restore(&mut self, rows: impl IntoIterator<Item = Restored>) {
+        for row in rows {
+            let sequence = row.sequence;
+            let seq = self.next_sequence.entry(row.message).or_insert(0);
+            *seq = (*seq).max(sequence + 1);
+            self.entries.push(Queued {
+                id: row.id,
+                undo_group: row.undo_group,
+                message: row.message,
+                intent: row.intent,
+                state: row.state,
+                attempts: row.attempts,
+                created_millis: row.created_millis,
+                sequence,
+            });
+        }
+        // The journal is a table, and a table has no order. Intents against one message apply
+        // strictly in sequence — always, including across a restart — so the order is restored
+        // from the sequence rather than from whatever the rows arrived in.
+        self.entries.sort_by_key(|q| (q.message, q.sequence));
     }
 
     /// Enqueue an intent, assigning its per-message sequence.

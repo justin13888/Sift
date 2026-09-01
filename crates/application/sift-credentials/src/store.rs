@@ -35,6 +35,14 @@ pub enum Item {
     Refresh,
     SupersededAccess,
     SupersededRefresh,
+    /// The key an account's databases are sealed under — or, under the reserved installation
+    /// identity, the installation's own secret.
+    ///
+    /// **This is what makes FR-4's erasure a proof rather than a promise.** Removing an
+    /// account's files is a deletion somebody has to trust; destroying this makes what is left
+    /// unreadable, which is checkable. It is in `ALL`, so the enumeration erasure walks
+    /// already covers it.
+    DatabaseKey,
 }
 
 impl Item {
@@ -44,6 +52,7 @@ impl Item {
         Self::Refresh,
         Self::SupersededAccess,
         Self::SupersededRefresh,
+        Self::DatabaseKey,
     ];
 
     #[must_use]
@@ -53,6 +62,7 @@ impl Item {
             Self::Refresh => "refresh",
             Self::SupersededAccess => "superseded-access",
             Self::SupersededRefresh => "superseded-refresh",
+            Self::DatabaseKey => "database-key",
         }
     }
 }
@@ -243,11 +253,31 @@ mod tests {
     fn the_item_set_is_closed_so_erasure_is_an_enumeration() {
         // FR-4's claim rests on this: "has every credential for this account been erased?"
         // is a question with a finite answer rather than a search.
-        assert_eq!(Item::ALL.len(), 4);
+        //
+        // **The `match` is the tripwire, not the count.** Rust cannot enumerate an enum's
+        // variants without a derive, so nothing here can *prove* `ALL` is complete. What this
+        // does instead is fail to compile the moment a variant is added — which puts the
+        // author in this function, reading the sentence above, at the moment the omission
+        // would otherwise become an unerased credential.
+        for item in Item::ALL {
+            let covered = match item {
+                Item::Access
+                | Item::Refresh
+                | Item::SupersededAccess
+                | Item::SupersededRefresh
+                | Item::DatabaseKey => true,
+            };
+            assert!(covered);
+        }
+        assert_eq!(
+            Item::ALL.len(),
+            5,
+            "a variant was added to the enum without joining the enumeration erasure walks"
+        );
         let mut names: Vec<&str> = Item::ALL.iter().map(|i| i.name()).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 4, "two items share a name");
+        assert_eq!(names.len(), Item::ALL.len(), "two items share a name");
     }
 
     #[test]

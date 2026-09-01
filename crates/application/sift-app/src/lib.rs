@@ -18,6 +18,7 @@
 //! which sits above this one.
 
 pub mod attachment;
+pub mod container;
 pub mod document;
 pub mod rows;
 
@@ -218,6 +219,12 @@ pub struct App {
     pub open_message: Option<LocalId>,
     pub has_window: bool,
     pub root: Option<PathBuf>,
+    /// The installation container, where one has been opened.
+    ///
+    /// `None` is the scratch mode the harness and the tests run in: a temporary root, no
+    /// registry, and nothing that survives the process. It is **not** a fallback a shell can
+    /// end up in by accident — a shell calls [`App::open_container`] and fails if it cannot.
+    pub container: Option<container::Container>,
     next_intent: u128,
     next_ordinal: u16,
 }
@@ -251,9 +258,69 @@ impl App {
             open_message: None,
             has_window: false,
             root: None,
+            container: None,
             next_intent: 0,
             next_ordinal: 0,
         }
+    }
+
+    /// Open the installation container, and everything the last run left in it.
+    ///
+    /// # What happens here that did not happen before
+    ///
+    /// Each account's files are opened **sealed**, under a key derived from that account's own
+    /// key by D-106's role separation, and **its queue is rebuilt from its journal**. The
+    /// second one is the reason this is one call rather than two commits: until it existed,
+    /// `Queue::new()` started empty and nothing in the product ever read an intent back — which
+    /// was harmless only while nothing persisted. The first restart of a durable container
+    /// would have silently discarded every gesture a user watched succeed and that had not yet
+    /// been issued, which is precisely what D-74 makes the journal undiscardable to prevent.
+    ///
+    /// # Errors
+    /// The container cannot be made or read, the credential store is unavailable — D-71 makes
+    /// that a refusal, because the only fallback is a key in a file — or an account's files do
+    /// not authenticate, which D-73 makes a refusal rather than a repair.
+    pub fn open_container(&mut self, root: &std::path::Path) -> Result<usize, String> {
+        let store = sift_credentials::store::Platform;
+        let container = container::Container::open(root, &store)?;
+        let registered = container.accounts()?;
+
+        for row in &registered {
+            let owner = container::account_secret(&store, row.id)?;
+            let paths = AccountPaths::under(root, row.id);
+            let account =
+                Account::open_sealed(&paths, row.id, &owner).map_err(|e| e.to_string())?;
+
+            let mut queue = Queue::new();
+            queue.restore(read_intents(&account.journal)?);
+
+            let capabilities = stored_capabilities(&account).unwrap_or_else(|| {
+                shape_named("rich").unwrap_or_else(|_| unreachable!("`rich` is a shape"))
+            });
+            self.accounts.insert(
+                row.display_name.clone(),
+                OpenAccount {
+                    id: row.id,
+                    capabilities,
+                    store: account,
+                    queue,
+                    ids: LocalIdGenerator::new(row.ordinal),
+                    adapter: None,
+                    writes_enabled: row.writes_enabled,
+                    subjects: BTreeMap::new(),
+                },
+            );
+            self.next_ordinal = self.next_ordinal.max(row.ordinal.get().saturating_add(1));
+        }
+
+        // Reported rather than removed silently: dead bytes in the container are NFR-14's
+        // budget being spent on nothing, and a sweep that ran without saying so would be a
+        // deletion nobody asked for.
+        let orphans = container.orphans().unwrap_or_default();
+        self.root = Some(root.to_path_buf());
+        self.container = Some(container);
+        let _ = orphans;
+        Ok(registered.len())
     }
 
     /// Add an account with a provider behind it.
@@ -320,13 +387,33 @@ impl App {
         }
         // D-89: the identity is Sift's own, assigned when the account is added, and
         // independent of address and provider. Re-adding is a new account.
-        let id = AccountId::from_u128(u128::from(self.next_ordinal) + 1);
-        let ordinal = AccountOrdinal::new(self.next_ordinal);
-        self.next_ordinal += 1;
-
-        let root = self.root();
-        let paths = AccountPaths::under(&root, id);
-        let store = Account::open(&paths, id).map_err(|e| e.to_string())?;
+        //
+        // Where a container is open the registry assigns it — 128 random bits, with an ordinal
+        // that is monotonic and never reclaimed — and the files are **sealed**. Without one,
+        // this is the scratch mode the harness runs in: a sequential identity in a temporary
+        // directory that nothing outlives.
+        let (id, ordinal, root, store) = match self.container.as_mut() {
+            Some(container) => {
+                let registered = container.register(shape, name)?;
+                let root = container.root().to_path_buf();
+                let owner =
+                    container::account_secret(&sift_credentials::store::Platform, registered.id)?;
+                let paths = AccountPaths::under(&root, registered.id);
+                let store = Account::open_sealed(&paths, registered.id, &owner)
+                    .map_err(|e| e.to_string())?;
+                (registered.id, registered.ordinal, root, store)
+            }
+            None => {
+                let id = AccountId::from_u128(u128::from(self.next_ordinal) + 1);
+                let ordinal = AccountOrdinal::new(self.next_ordinal);
+                let root = self.root();
+                let paths = AccountPaths::under(&root, id);
+                let store = Account::open(&paths, id).map_err(|e| e.to_string())?;
+                (id, ordinal, root, store)
+            }
+        };
+        self.next_ordinal = self.next_ordinal.max(ordinal.get().saturating_add(1));
+        let _ = root;
 
         // A real account row and a real inbox, so that ingest writes through the same schema
         // a shell would read. A harness that kept its messages in a map would be a mock, and
@@ -663,6 +750,36 @@ impl App {
             .get_mut(name)
             .ok_or_else(|| format!("no account named `{name}`"))?;
         account.writes_enabled = enabled;
+        let id = account.id;
+        // Durable, and in the registry rather than in the account's own store. An
+        // authorisation that only lived in memory would be withdrawn by a restart, which
+        // sounds safe until a user turns it on, closes the window, and finds their triage
+        // silently held again with nothing saying why.
+        if let Some(container) = self.container.as_mut() {
+            container.set_writes_enabled(id, enabled)?;
+        }
+        Ok(())
+    }
+
+    /// FR-4 — erase an account: its files, its registry row, and every credential item.
+    ///
+    /// Provable by enumeration, which is what the registry is for: what it does not list does
+    /// not exist. The ordinal is not freed, because D-78 never reuses local identity.
+    ///
+    /// # Errors
+    /// There is no such account, or the registry refused.
+    pub fn forget_account(&mut self, name: &str) -> Result<(), String> {
+        let id = self
+            .accounts
+            .get(name)
+            .ok_or_else(|| format!("no account named `{name}`"))?
+            .id;
+        // Closed first: the files cannot be removed from underneath an open connection on
+        // every platform, and a half-removed account is the state this is preventing.
+        self.accounts.remove(name);
+        if let Some(container) = self.container.as_mut() {
+            container.forget(id, &sift_credentials::store::Platform)?;
+        }
         Ok(())
     }
 
@@ -756,4 +873,92 @@ impl App {
         let affected = conditions.iter().filter(|c| **c == worst).count();
         (worst, affected)
     }
+}
+
+/// Read a journal's intents back, for [`Queue::restore`].
+///
+/// **The only place in the product that reads an intent back from disk.** Before this the two
+/// `SELECT … FROM intent` statements in the workspace were both inside a `#[cfg(test)]` block,
+/// which is why nothing failed: the queue was never rebuilt, and no test asked it to be.
+fn read_intents(
+    journal: &rusqlite::Connection,
+) -> Result<Vec<sift_mutations::queue::Restored>, String> {
+    let mut statement = journal
+        .prepare(
+            "SELECT id, undo_group, message_id, operation, parameter, state,
+                    attempt_count, created_millis, per_message_seq
+             FROM intent WHERE state != 'Settled' ORDER BY message_id, per_message_seq",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([], |r| {
+            let id: Vec<u8> = r.get(0)?;
+            let undo_group: Option<Vec<u8>> = r.get(1)?;
+            let message: Vec<u8> = r.get(2)?;
+            let operation: String = r.get(3)?;
+            let parameter: Option<String> = r.get(4)?;
+            let state: String = r.get(5)?;
+            Ok((
+                id,
+                undo_group,
+                message,
+                operation,
+                parameter,
+                state,
+                r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, undo_group, message, operation, parameter, state, attempts, created, sequence) =
+            row.map_err(|e| e.to_string())?;
+        let bytes: [u8; 16] = message
+            .as_slice()
+            .try_into()
+            .map_err(|_| "a message identity is not 16 bytes".to_owned())?;
+
+        // NFR-48: an operation this build does not recognise is **quarantined** — held, shown,
+        // and executable by a later build. Dropping it would lose a gesture; guessing at it
+        // would perform one the user did not ask for.
+        let (intent, state) =
+            match sift_mutations::intent::Intent::from_parts(&operation, parameter.as_deref()) {
+                Some(intent) => (intent, sift_mutations::intent::State::from_name(&state)),
+                None => (
+                    sift_mutations::intent::Intent::Archive,
+                    sift_mutations::intent::State::Quarantined,
+                ),
+            };
+
+        out.push(sift_mutations::queue::Restored {
+            id: be_u128(&id),
+            undo_group: undo_group.as_deref().map(be_u128),
+            message: LocalId::from_bytes(bytes),
+            intent,
+            state,
+            attempts: u32::try_from(attempts).unwrap_or(u32::MAX),
+            created_millis: u64::try_from(created).unwrap_or(0),
+            sequence: u64::try_from(sequence).unwrap_or(0),
+        });
+    }
+    Ok(out)
+}
+
+/// What an account declared, as its own store recorded it.
+fn stored_capabilities(account: &Account) -> Option<Capabilities> {
+    let shape: Vec<u8> = account
+        .store
+        .query_row("SELECT capabilities FROM account LIMIT 1", [], |r| r.get(0))
+        .ok()?;
+    shape_named(std::str::from_utf8(&shape).ok()?).ok()
+}
+
+fn be_u128(bytes: &[u8]) -> u128 {
+    let mut out = [0u8; 16];
+    let n = bytes.len().min(16);
+    out[16 - n..].copy_from_slice(&bytes[..n]);
+    u128::from_be_bytes(out)
 }
