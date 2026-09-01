@@ -403,6 +403,96 @@ fn row_of(r: &sift_app::rows::MessageRow) -> SiftMessageRow<'_> {
     }
 }
 
+/// Add an account backed by D-65's recorded corpus rather than by a socket.
+///
+/// **This is the fixture path, and it is deliberately part of the boundary rather than a
+/// test-only door.** D-98 says the shell test harness invokes through the same entry points a
+/// shell does; a second door would mean the thing under test is not the thing that ships.
+/// What it adds is a real adapter over recorded exchanges — no network, no credential, no
+/// account belonging to anybody — which is what lets a shell be driven, and looked at, before
+/// a real mailbox is ever connected.
+///
+/// # Safety
+/// `app` must be valid; `label` must point to `label_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_add_replayed_account(
+    app: *mut SiftApp,
+    label: *const u8,
+    label_len: usize,
+    out: *mut SiftId,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            if label.is_null() {
+                return Err(());
+            }
+            // SAFETY: the caller's obligation — already inside this entry point's own
+            // `unsafe` block, so no second one.
+            let bytes = core::slice::from_raw_parts(label, label_len);
+            let name = core::str::from_utf8(bytes).map_err(|_| ())?;
+            let Some(layer) = layer(app) else {
+                return Err(());
+            };
+            let id = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                session
+                    .app_mut()
+                    .add_replayed_account(name)
+                    .map_err(|_| ())?
+            };
+            crate::layer::post(
+                layer,
+                Task::Deliver {
+                    layer: app as usize,
+                },
+            );
+            Ok(SiftId::from_u128(id.as_u128()))
+        })
+    }
+}
+
+/// Discover an account's folders and walk its delta.
+///
+/// Folders first, because a delta needs somewhere to put what it finds and D-83 assigns local
+/// identity on discovery rather than on first use.
+///
+/// **This blocks the calling thread**, which is a limitation rather than a design: the work
+/// belongs on a worker under D-19, and moving it there changes nothing a shell can see
+/// because every delivery already arrives through D-48's hop rather than from this call.
+///
+/// # Safety
+/// `app` must be valid; `label` must point to `label_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_sync_account(
+    app: *mut SiftApp,
+    label: *const u8,
+    label_len: usize,
+) -> SiftStatus {
+    guard(|| {
+        if label.is_null() {
+            return Err(());
+        }
+        // SAFETY: the caller's obligation.
+        let bytes = unsafe { core::slice::from_raw_parts(label, label_len) };
+        let name = core::str::from_utf8(bytes).map_err(|_| ())?;
+        // SAFETY: the caller's obligation.
+        let Some(layer) = (unsafe { layer(app) }) else {
+            return Err(());
+        };
+        {
+            let mut session = layer.session.lock().map_err(|_| ())?;
+            session.app_mut().sync(name, 20).map_err(|_| ())?;
+        }
+        crate::layer::post(
+            layer,
+            Task::Deliver {
+                layer: app as usize,
+            },
+        );
+        Ok(())
+    })
+}
+
 /// How many actions the register holds.
 ///
 /// Exposed so a shell can assert at build time that it handles every one — D-66 makes an

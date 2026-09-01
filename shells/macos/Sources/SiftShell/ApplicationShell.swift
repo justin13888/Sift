@@ -23,7 +23,7 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// keeps them alive for the duration of that call.
     private var containerRoot: [UInt8] = []
     private var statusItem: NSStatusItem?
-    private var windows: [WindowShell] = []
+    private var windows: [MainWindowController] = []
 
     /// The one instance, so the C callbacks below have somewhere to arrive.
     ///
@@ -82,6 +82,8 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             return
         }
         app = OpaquePointer(handle)
+
+        addFixtureAccountIfAsked()
 
         // Both branches open a window; what differs is what the window is *for*. The
         // account-less state *is* the add-account flow rather than an empty inbox, because an
@@ -177,7 +179,12 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             return
         }
 
-        let window = WindowShell(app: app) { [weak self] shell in self?.forget(shell) }
+        guard let app else { return }
+        let window = MainWindowController(app: app)
+        window.onClose = { [weak self, weak window] in
+            guard let window else { return }
+            self?.forget(window)
+        }
         windows.append(window)
 
         // Raise the policy *before* the window is ordered in. Putting Sift in the dock and the
@@ -200,7 +207,7 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// after its window closed would hold Sift in the dock with nothing on screen — and it
     /// would hold the shell itself alive along with everything L1 and L3 expect a closing
     /// window to release.
-    private func forget(_ shell: WindowShell) {
+    private func forget(_ shell: MainWindowController) {
         windows.removeAll { $0 === shell }
         syncActivationPolicy()
     }
@@ -224,13 +231,39 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         invoke("app.add-account")
         // `docs/architecture/ui-shell.md`: **the account-less state is the add-account flow**,
         // not an empty inbox with a hint in it. So first run is a screen, and this is where it
-        // opens. The surface's *content* is not built — what opens is a window with an empty
-        // view in it, which is honest about the stage rather than invisible about it. A first
-        // run that presents nothing at all is indistinguishable from a launch that failed.
+        // opens. The flow's own content is not built yet, so what opens is the main window —
+        // honest about the stage rather than invisible about it, because a first run that
+        // presents nothing at all is indistinguishable from a launch that failed.
         openMainWindow()
     }
 
-    private func hasAnyAccount() -> Bool { false }
+    private var accounts = 0
+
+    private func hasAnyAccount() -> Bool { accounts > 0 }
+
+    /// D-65's recorded corpus, as an account.
+    ///
+    /// **Off unless asked for.** This is how Sift is driven, and looked at, before a real
+    /// mailbox is ever connected: a real adapter over recorded exchanges, with no network, no
+    /// credential and nobody's mail in it. It is gated on the environment rather than on a
+    /// build configuration so that the thing being looked at is the shipping binary.
+    private func addFixtureAccountIfAsked() {
+        guard ProcessInfo.processInfo.environment["SIFT_FIXTURES"] != nil, let app else { return }
+        let label = "fixtures"
+        var id = SiftId.zero
+        let bytes = Array(label.utf8)
+        let added = bytes.withUnsafeBufferPointer { p in
+            sift_add_replayed_account(UnsafeMutablePointer(app), p.baseAddress, p.count, &id)
+        }
+        guard added == Ok else { return }
+        // Blocking, and on the main thread, which is a limitation stated where it happens:
+        // the walk belongs on a worker under D-19. Against the recorded corpus it returns
+        // immediately, which is why it is tolerable here and would not be against a socket.
+        _ = bytes.withUnsafeBufferPointer { p in
+            sift_sync_account(UnsafeMutablePointer(app), p.baseAddress, p.count)
+        }
+        accounts += 1
+    }
 
     /// The container the application's files live under.
     ///

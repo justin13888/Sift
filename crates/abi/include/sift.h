@@ -439,6 +439,39 @@ SiftStatus sift_cancel_observation(SiftApp *app,
 void sift_run_scheduled(uint64_t ticket);
 
 /**
+ * Add an account backed by D-65's recorded corpus rather than by a socket.
+ *
+ * **This is the fixture path, and it is deliberately part of the boundary rather than a
+ * test-only door.** D-98 says the shell test harness invokes through the same entry points a
+ * shell does; a second door would mean the thing under test is not the thing that ships.
+ * What it adds is a real adapter over recorded exchanges — no network, no credential, no
+ * account belonging to anybody — which is what lets a shell be driven, and looked at, before
+ * a real mailbox is ever connected.
+ *
+ * # Safety
+ * `app` must be valid; `label` must point to `label_len` bytes of UTF-8.
+ */
+SiftStatus sift_add_replayed_account(SiftApp *app,
+                                     const uint8_t *label,
+                                     size_t label_len,
+                                     SiftId *out);
+
+/**
+ * Discover an account's folders and walk its delta.
+ *
+ * Folders first, because a delta needs somewhere to put what it finds and D-83 assigns local
+ * identity on discovery rather than on first use.
+ *
+ * **This blocks the calling thread**, which is a limitation rather than a design: the work
+ * belongs on a worker under D-19, and moving it there changes nothing a shell can see
+ * because every delivery already arrives through D-48's hop rather than from this call.
+ *
+ * # Safety
+ * `app` must be valid; `label` must point to `label_len` bytes of UTF-8.
+ */
+SiftStatus sift_sync_account(SiftApp *app, const uint8_t *label, size_t label_len);
+
+/**
  * How many actions the register holds.
  *
  * Exposed so a shell can assert at build time that it handles every one — D-66 makes an

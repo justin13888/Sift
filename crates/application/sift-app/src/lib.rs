@@ -539,3 +539,76 @@ fn shape_named(shape: &str) -> Result<Capabilities, String> {
         }
     })
 }
+
+/// Adding an account with a provider behind it, and walking it.
+///
+/// These sit here rather than in a shell because **both shells need the same ones**, and a
+/// capability that exists for one shell and not the other is a defect in the boundary rather
+/// than a feature of that shell.
+impl App {
+    /// D-65's fixture account: a real adapter over the recorded corpus rather than a socket.
+    ///
+    /// Not a convenience and not a mock. `docs/build/verification.md` puts the fixture harness
+    /// in P0 **before the adapters it tests**, because it is what makes a provider's behaviour
+    /// assertable "against servers nobody has" — and it is what lets a shell be driven, and
+    /// looked at, with no account and no network at all.
+    ///
+    /// # Errors
+    /// The account could not be created.
+    pub fn add_replayed_account(&mut self, name: &str) -> Result<AccountId, String> {
+        let descriptor = sift_registry::KINDS
+            .first()
+            .ok_or("this build has no provider adapters")?;
+        self.add_provider_account(name, descriptor.replayed())
+    }
+
+    /// Discover folders and walk the delta, in that order.
+    ///
+    /// Folders first, because a delta needs somewhere to put what it finds and D-83 assigns
+    /// local identity on discovery rather than on first use.
+    ///
+    /// # Errors
+    /// The account has no provider behind it, or the walk failed. The adapter is returned to
+    /// the account either way — a failed sync must not leave an account unreachable.
+    pub fn sync(&mut self, name: &str, pages: usize) -> Result<SyncReport, String> {
+        let account = self.account(name)?;
+        let adapter = account
+            .adapter
+            .take()
+            .ok_or("this account has no provider behind it")?;
+
+        let outcome = sift_sync::run::discover_folders(adapter.as_ref(), &account.store).and_then(
+            |folders| {
+                sift_sync::run::sync_account(
+                    adapter.as_ref(),
+                    &mut account.store,
+                    &account.ids,
+                    pages,
+                )
+                .map(|page| SyncReport {
+                    discovered: folders.discovered.len(),
+                    inserted: page.inserted,
+                    updated: page.updated,
+                    removed: page.removed,
+                    delivered: page.delivered,
+                })
+            },
+        );
+
+        // The adapter goes back before the result is examined. An account whose sync failed
+        // is an account in a condition, not one that can never be reached again.
+        account.adapter = Some(adapter);
+        outcome.map_err(|e| e.to_string())
+    }
+}
+
+/// What one turn of the sync loop did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SyncReport {
+    pub discovered: usize,
+    pub inserted: usize,
+    pub updated: usize,
+    pub removed: usize,
+    /// FR-23's new mail: delivered-and-unread at this moment, and not reconstructable later.
+    pub delivered: usize,
+}
