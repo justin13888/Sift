@@ -38,6 +38,16 @@ use sift_store::account::{Account, AccountPaths};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// What an account registered as a real mailbox is recorded as in the container.
+///
+/// Persisted, and read back on the next run to decide how to reconnect it. Not a provider
+/// name: D-12 keeps those below the adapter layer, and a second provider will resolve through
+/// the register rather than by widening this.
+pub const PROVIDER_KIND: &str = "provider";
+
+/// The same for D-65's recorded corpus, which reconnects to no network and no credential.
+pub const REPLAYED_KIND: &str = "replayed";
+
 /// The adapter an account is reached through.
 ///
 /// Its error is erased, which is what lets this crate hold one at all: a
@@ -157,6 +167,13 @@ impl sift_mutations::flush::Resolve for Remote<'_> {
 /// One account, as the harness holds it.
 pub struct OpenAccount {
     pub id: AccountId,
+    /// What this account was registered as, and what a later run reconnects it by.
+    ///
+    /// `"provider"` reaches a real mailbox through the credential store; `"replayed"` is
+    /// D-65's recorded corpus; anything else is a capability shape with no provider at all.
+    /// It is persisted in the container registry, because the alternative is a restored
+    /// account that opens, shows the mail the last run left, and can never fetch another.
+    pub kind: String,
     pub capabilities: Capabilities,
     pub store: Account,
     pub queue: Queue,
@@ -326,6 +343,7 @@ impl App {
                 row.display_name.clone(),
                 OpenAccount {
                     id: row.id,
+                    kind: row.kind.clone(),
                     capabilities,
                     store: account,
                     queue,
@@ -354,8 +372,25 @@ impl App {
     /// difference between this and [`Self::add_account`]: a shape is something a test picks,
     /// and this is what an account actually declares.
     pub fn add_provider_account(&mut self, name: &str, adapter: Live) -> Result<AccountId, String> {
+        self.add_account_of_kind(name, adapter, PROVIDER_KIND)
+    }
+
+    /// The same, saying what a later run should reconnect it as.
+    ///
+    /// The distinction is not cosmetic: a restored account with no adapter can fetch nothing,
+    /// and the two kinds are reconnected by different means — one through the credential store
+    /// and the network, one through the recorded corpus and neither.
+    ///
+    /// # Errors
+    /// The account could not be created.
+    pub fn add_account_of_kind(
+        &mut self,
+        name: &str,
+        adapter: Live,
+        kind: &str,
+    ) -> Result<AccountId, String> {
         let capabilities = adapter.capabilities().clone();
-        let id = self.create_account(name, capabilities, "provider")?;
+        let id = self.create_account(name, capabilities, kind)?;
         self.accounts
             .get_mut(name)
             .ok_or("the account vanished")?
@@ -376,16 +411,27 @@ impl App {
     fn root(&mut self) -> PathBuf {
         self.root
             .get_or_insert_with(|| {
-                // Process identifier **and** the clock. A pid alone is not unique for long:
-                // the operating system reuses one within seconds, and a session that landed
-                // on a reused directory would open a previous session's account files and
-                // fail to insert its own account row — which is a flaky test that looks like
-                // a bug in the store.
+                // Process identifier, the clock **and** a counter. A pid alone is not unique
+                // for long: the operating system reuses one within seconds, and a session that
+                // landed on a reused directory would open a previous session's account files
+                // and fail to insert its own account row — which is a flaky test that looks
+                // like a bug in the store.
+                //
+                // The counter is the other half, and it was missing. `as_nanos` reports at
+                // whatever resolution the platform has, and two `App`s constructed in one
+                // process read the same value often enough to matter — which gave two of them
+                // one directory, and `remove_dir_all` below then deleted the other's files
+                // underneath it. It surfaced as `database is locked` from a test that had
+                // nothing to do with the one that took the directory. The same mistake was
+                // made and fixed in the layer's ephemeral root; this is the other copy.
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static NEXT: AtomicU64 = AtomicU64::new(0);
                 let unique = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos());
+                let n = NEXT.fetch_add(1, Ordering::Relaxed);
                 let d = std::env::temp_dir()
-                    .join(format!("sift-harness-{}-{unique}", std::process::id()));
+                    .join(format!("sift-harness-{}-{unique}-{n}", std::process::id()));
                 let _ = std::fs::remove_dir_all(&d);
                 std::fs::create_dir_all(&d).expect("scratch root");
                 d
@@ -475,6 +521,7 @@ impl App {
             name.to_owned(),
             OpenAccount {
                 id,
+                kind: shape.to_owned(),
                 capabilities,
                 store,
                 queue: Queue::new(),
@@ -704,7 +751,63 @@ impl App {
         let descriptor = sift_registry::KINDS
             .first()
             .ok_or("this build has no provider adapters")?;
-        self.add_provider_account(name, descriptor.replayed())
+        self.add_account_of_kind(name, descriptor.replayed(), REPLAYED_KIND)
+    }
+
+    /// Give an account restored from the container a provider to reach again.
+    ///
+    /// # What each kind needs
+    ///
+    /// D-65's recorded corpus needs nothing: no credential, no network, and the same adapter
+    /// this process would have built to add it.
+    ///
+    /// A real mailbox needs its access token, and the stored one is very likely spent — the
+    /// provider's are good for an hour and a resident application is restarted after longer
+    /// than that far more often than not. So this refreshes rather than presenting what it
+    /// holds and hoping: the cost is one round trip per account per launch, and the failure it
+    /// avoids is a whole sync rejected with nothing retrying it. D-88's rules all apply, and
+    /// the ones that matter here are that the write precedes the use and the previous pair is
+    /// retained, so a refresh interrupted between receiving a pair and using it does not
+    /// strand the account.
+    ///
+    /// # Errors
+    /// There is no such account, the build has no adapter for it, no client identifier is
+    /// configured, or the credential store or the provider refused.
+    pub fn reconnect(&mut self, name: &str) -> Result<(), String> {
+        let kind = self.account(name)?.kind.clone();
+        let descriptor = sift_registry::KINDS
+            .first()
+            .ok_or("this build has no provider adapters")?;
+
+        let adapter = if kind == REPLAYED_KIND {
+            descriptor.replayed()
+        } else if kind == PROVIDER_KIND {
+            if self.oauth_client_id.is_empty() {
+                return Err(
+                    "this build has no OAuth client configured, so an account it did not add                      cannot be reached"
+                        .to_owned(),
+                );
+            }
+            let id = self.account(name)?.id;
+            let registration =
+                authorize::registration(authorize::default_kind(), &self.oauth_client_id.clone())?;
+            let mut transport = sift_http::Https::to(&registration.profile.token.host)
+                .map_err(|why| format!("the trust store could not be consulted: {why}"))?;
+            let pair = self
+                .broker
+                .refresh(&mut transport, &registration, id)
+                .map_err(|e| e.to_string())?;
+            descriptor
+                .connect(&pair.access)
+                .map_err(|e| e.to_string())?
+        } else {
+            return Err(format!(
+                "`{name}` is a capability shape rather than an account with a provider"
+            ));
+        };
+
+        self.account(name)?.adapter = Some(adapter);
+        Ok(())
     }
 
     /// Discover folders and walk the delta, in that order.
@@ -716,6 +819,14 @@ impl App {
     /// The account has no provider behind it, or the walk failed. The adapter is returned to
     /// the account either way — a failed sync must not leave an account unreachable.
     pub fn sync(&mut self, name: &str, pages: usize) -> Result<SyncReport, String> {
+        // An account the last run left behind opens with no adapter: the store is sealed on
+        // disk and its queue is rebuilt from the journal, but nothing reaches the provider.
+        // Reconnecting here rather than at `open_container` is deliberate — it is a network
+        // round trip, and a launch that waits on the network is the opposite of what a
+        // resident mail client should do. This is already a network call.
+        if self.account(name)?.adapter.is_none() {
+            self.reconnect(name)?;
+        }
         let account = self.account(name)?;
         let adapter = account
             .adapter

@@ -415,7 +415,6 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     private func beginAddAccount() {
         guard let app else { return }
         let window = AddAccountWindow(app: app) { [weak self] in
-            self?.accounts += 1
             self?.openMainWindow()
         }
         addAccount = window
@@ -424,9 +423,14 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private var accounts = 0
-
-    private func hasAnyAccount() -> Bool { accounts > 0 }
+    /// **Asked, not remembered.** This was a counter starting at zero on every launch, so an
+    /// account added in a previous run was invisible to the next one: the container had the
+    /// mail and the queue, and the first-run screen was drawn over them anyway. The layer knows
+    /// how many accounts the container holds, because it is what opened it.
+    private func hasAnyAccount() -> Bool {
+        guard let app else { return false }
+        return sift_account_count(UnsafeMutablePointer(app)) > 0
+    }
 
     /// D-65's recorded corpus, as an account.
     ///
@@ -449,7 +453,6 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         _ = bytes.withUnsafeBufferPointer { p in
             sift_sync_account(UnsafeMutablePointer(app), p.baseAddress, p.count)
         }
-        accounts += 1
     }
 
     /// The container the application's files live under.

@@ -978,6 +978,22 @@ SiftStatus sift_undoable(SiftApp *app, SiftUndoable *out);
 /**
  * D-36 — begin an authorization, and hand back the address to open in a browser.
  *
+ * How many accounts this installation has — including the ones a previous run added.
+ *
+ * **A shell asks rather than counting what it has seen.** The macOS shell kept a counter that
+ * began at zero every launch, so every launch took the account-less branch and offered to add
+ * an account the user had already added: the container had the mail, sealed, with its queue
+ * rebuilt from its journal, and the first-run screen was drawn over it.
+ *
+ * Zero is the genuine account-less state, and it is what makes the add-account flow the right
+ * thing to show rather than an empty inbox.
+ *
+ * # Safety
+ * `app` must be valid.
+ */
+uint32_t sift_account_count(SiftApp *app);
+
+/**
  * The URI scheme this client's authorization callback comes back on — D-36 and D-109.
  *
  * # Why a shell asks rather than derives
