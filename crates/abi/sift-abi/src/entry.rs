@@ -137,6 +137,7 @@ pub unsafe extern "C" fn sift_initialize(
             // The tests run without a credential store, which on a machine with one would
             // prompt. `SIFT_EPHEMERAL` is what they set; a shell never does, and a shell
             // that did would get a container that does not survive its own process.
+            app.scheme_is_registered = init.scheme_is_registered != 0;
             if std::env::var_os("SIFT_EPHEMERAL").is_none() {
                 app.open_container(std::path::Path::new(root))
                     .map_err(|_| ())?;
@@ -154,6 +155,7 @@ pub unsafe extern "C" fn sift_initialize(
                 attachments: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 plans: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 next_plan: std::sync::Mutex::new(1),
+                flows: std::sync::Mutex::new(crate::layer::Flow::default()),
             });
             Ok(Box::into_raw(layer).cast::<SiftApp>())
         })
@@ -312,6 +314,99 @@ pub struct SiftUndoable<'a> {
     /// What was done, for the affordance's own words. A `'static` name from the register,
     /// so unlike every other borrowed string here it outlives any document.
     pub intent: SiftStr<'a>,
+}
+
+/// D-36 — begin an authorization, and hand back the address to open in a browser.
+///
+/// **The scheme registration is checked before the user goes anywhere.** Discovering it
+/// afterwards means they have already granted consent and returned to nothing, and the
+/// resulting page is a browser error rather than anything Sift can explain.
+///
+/// The address is held by the layer until the flow completes or another begins, because the
+/// verifier behind it is: PKCE binds the exchange to the process that started it, and a shell
+/// holding the state would be a shell that could be asked to complete a flow it did not begin.
+///
+/// # Safety
+/// `app` and `out` must be valid; `client_id` must point to `client_id_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_begin_authorization(
+    app: *mut SiftApp,
+    client_id: *const u8,
+    client_id_len: usize,
+    out: *mut SiftStr<'static>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let client_id = borrowed(client_id, client_id_len)?;
+            let layer = layer(app).ok_or(())?;
+            let url = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                let app = session.app_mut();
+                let registered = app.scheme_is_registered;
+                sift_app::authorize::begin(&mut app.broker, client_id, registered, now_millis())
+                    .map_err(|_| ())?
+            };
+            let mut flows = layer.flows.lock().map_err(|_| ())?;
+            flows.client_id = client_id.to_owned();
+            flows.url = url;
+            Ok(SiftStr::new(extend(&flows.url)))
+        })
+    }
+}
+
+/// Finish an authorization from the address the system handed back, and add the account.
+///
+/// The callback arrives through the registered URI scheme — **not a socket**, because NFR-24
+/// admits none for any purpose. It is also one of only two local attack surfaces Sift has, so
+/// a callback whose state matches no flow in progress is discarded without comment: D-88's
+/// state parameter is doing real work here rather than being ceremony.
+///
+/// # Safety
+/// `app` and `out` must be valid; both strings must point to their lengths in UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_complete_authorization(
+    app: *mut SiftApp,
+    callback: *const u8,
+    callback_len: usize,
+    display_name: *const u8,
+    display_name_len: usize,
+    out: *mut SiftId,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let callback = borrowed(callback, callback_len)?;
+            let display_name = borrowed(display_name, display_name_len)?;
+            let layer = layer(app).ok_or(())?;
+            let client_id = {
+                let flows = layer.flows.lock().map_err(|_| ())?;
+                if flows.client_id.is_empty() {
+                    return Err(());
+                }
+                flows.client_id.clone()
+            };
+
+            let mut session = layer.session.lock().map_err(|_| ())?;
+            let app_ref = session.app_mut();
+            let identity = app_ref.reserve_identity();
+            let adapter = sift_app::authorize::complete(
+                &mut app_ref.broker,
+                &client_id,
+                identity,
+                callback,
+                now_millis(),
+            )
+            .map_err(|_| ())?;
+            let id = app_ref
+                .add_provider_account(display_name, adapter)
+                .map_err(|_| ())?;
+            // The flow is spent. A verifier that outlived its exchange would be one a second
+            // callback could be replayed against.
+            let mut flows = layer.flows.lock().map_err(|_| ())?;
+            flows.client_id.clear();
+            flows.url.clear();
+            Ok(SiftId::from_u128(id.as_u128()))
+        })
+    }
 }
 
 /// D-49's annunciator: the one condition worth drawing, across every account.

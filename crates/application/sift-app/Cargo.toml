@@ -17,6 +17,8 @@ sift-provider.workspace = true
 # The register, so that this layer resolves an opaque kind rather than naming a provider.
 # D-12 bans the name here and `cargo xtask invariants` enforces it.
 sift-registry.workspace = true
+# The transport an authorization's token exchange runs over. One host, one request.
+sift-http.workspace = true
 sift-store.workspace = true
 sift-sync.workspace = true
 sift-mutations.workspace = true

@@ -770,6 +770,43 @@ SiftStatus sift_invoke_action(SiftApp *app,
 SiftStatus sift_undoable(SiftApp *app, SiftUndoable *out);
 
 /**
+ * D-36 — begin an authorization, and hand back the address to open in a browser.
+ *
+ * **The scheme registration is checked before the user goes anywhere.** Discovering it
+ * afterwards means they have already granted consent and returned to nothing, and the
+ * resulting page is a browser error rather than anything Sift can explain.
+ *
+ * The address is held by the layer until the flow completes or another begins, because the
+ * verifier behind it is: PKCE binds the exchange to the process that started it, and a shell
+ * holding the state would be a shell that could be asked to complete a flow it did not begin.
+ *
+ * # Safety
+ * `app` and `out` must be valid; `client_id` must point to `client_id_len` bytes of UTF-8.
+ */
+SiftStatus sift_begin_authorization(SiftApp *app,
+                                    const uint8_t *client_id,
+                                    size_t client_id_len,
+                                    SiftStr *out);
+
+/**
+ * Finish an authorization from the address the system handed back, and add the account.
+ *
+ * The callback arrives through the registered URI scheme — **not a socket**, because NFR-24
+ * admits none for any purpose. It is also one of only two local attack surfaces Sift has, so
+ * a callback whose state matches no flow in progress is discarded without comment: D-88's
+ * state parameter is doing real work here rather than being ceremony.
+ *
+ * # Safety
+ * `app` and `out` must be valid; both strings must point to their lengths in UTF-8.
+ */
+SiftStatus sift_complete_authorization(SiftApp *app,
+                                       const uint8_t *callback,
+                                       size_t callback_len,
+                                       const uint8_t *display_name,
+                                       size_t display_name_len,
+                                       SiftId *out);
+
+/**
  * D-49's annunciator: the one condition worth drawing, across every account.
  *
  * **One badge, not a list.** `AccountCondition`'s ordering is the precedence, so this is a

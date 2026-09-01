@@ -95,6 +95,22 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// D-36's callback, arriving through the registered URI scheme.
+    ///
+    /// **This is the whole of how an authorization returns.** NFR-24 admits no listening socket
+    /// for any purpose, so there is no loopback redirect and nothing here binds a port — the
+    /// platform's own launch machinery hands Sift the address.
+    ///
+    /// It is also one of only two local attack surfaces Sift has: any process running as the
+    /// user can invoke a registered scheme. The layer discards a callback whose state matches
+    /// no flow in progress **without comment**, and this method reports nothing either, because
+    /// a message here would turn Sift into a way to find out whether a guess was received.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            addAccount?.callbackArrived(url.absoluteString)
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // FR-25, and `docs/architecture/process-model.md` calls this the single most likely
         // source of user distrust in the whole design. Closing the last window sheds the
@@ -306,14 +322,20 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     @objc private func pauseSync() { invoke("app.pause-sync") }
     @objc private func quit() { invoke("app.quit"); NSApp.terminate(nil) }
 
+    private var addAccount: AddAccountWindow?
+
+    /// **The account-less state is the add-account flow**, not an empty inbox with a hint in
+    /// it. So first run is a screen, and this is where it opens.
     private func beginAddAccount() {
-        invoke("app.add-account")
-        // `docs/architecture/ui-shell.md`: **the account-less state is the add-account flow**,
-        // not an empty inbox with a hint in it. So first run is a screen, and this is where it
-        // opens. The flow's own content is not built yet, so what opens is the main window —
-        // honest about the stage rather than invisible about it, because a first run that
-        // presents nothing at all is indistinguishable from a launch that failed.
-        openMainWindow()
+        guard let app else { return }
+        let window = AddAccountWindow(app: app) { [weak self] in
+            self?.accounts += 1
+            self?.openMainWindow()
+        }
+        addAccount = window
+        window.showWindow(nil)
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private var accounts = 0

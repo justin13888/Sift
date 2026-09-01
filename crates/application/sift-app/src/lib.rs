@@ -18,6 +18,7 @@
 //! which sits above this one.
 
 pub mod attachment;
+pub mod authorize;
 pub mod container;
 pub mod document;
 pub mod rows;
@@ -218,6 +219,13 @@ pub struct App {
     pub selection: Vec<LocalId>,
     pub open_message: Option<LocalId>,
     pub has_window: bool,
+    /// D-71 — whether this shell's bundle registers the callback scheme with the system.
+    ///
+    /// The shell owns this fact and the layer is told, because a bundle is what registers a
+    /// scheme and the layer is not one. It gates the *start* of an authorization rather than
+    /// the end: discovering it afterwards means the user has already granted consent and come
+    /// back to nothing.
+    pub scheme_is_registered: bool,
     pub root: Option<PathBuf>,
     /// The installation container, where one has been opened.
     ///
@@ -257,6 +265,7 @@ impl App {
             selection: Vec::new(),
             open_message: None,
             has_window: false,
+            scheme_is_registered: false,
             root: None,
             container: None,
             next_intent: 0,

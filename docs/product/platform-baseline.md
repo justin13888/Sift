@@ -105,10 +105,21 @@ submission to any channel**, and MUST NOT thereafter be changed.
 | Keychain service and access-group names | service `net.justinchung.sift`; access group `<team>.net.justinchung.sift` | Published in the Cask uninstall stanza, so a change breaks uninstall for existing users |
 | App Store build number space | begins at 1 | Monotonically increasing for the life of the app record; a number is never reused or decreased |
 
-Two of the six are **not** free choices once the first is made. The OAuth redirect scheme is derived from
-the bundle identifier because that is what the providers requiring a custom scheme expect, and the Keychain
-access group is the team identifier prefixed to it. So the bundle identifier is the only one of the three
-that is genuinely decided, and the other two follow. The team identifier is the one value here that is
+Two of the six are **not** free choices once the first is made. The Keychain access group is the team
+identifier prefixed to the bundle identifier, and the OAuth redirect scheme is derived — from the bundle
+identifier for a provider that lets an application name its own redirect, and **from the OAuth client
+identifier for one that does not**. So the bundle identifier is the only one of the three that is genuinely
+decided, and the other two follow.
+
+**The second case was found by generating a real authorization URL rather than by reading documentation.**
+Google's "Desktop app" client type expects a `127.0.0.1` loopback redirect, which
+[NFR-24](../architecture/shell-boundary.md) forbids outright — *never a listening socket of any kind, for
+any purpose*. Its iOS/macOS client type is the only one compatible with that constraint, and it accepts
+exactly one scheme: the client identifier with its components reversed. A build therefore registers **two**
+schemes — Sift's own, and the one derived from whichever client it was configured with — and the derived
+one is empty on a build with no client, which is a build that runs against the recorded corpus and cannot
+sign in to anything. A client identifier is configuration rather than a secret: it appears in every
+authorization URL the flow generates, which is why PKCE exists. The team identifier is the one value here that is
 issued rather than chosen, and it is outstanding until the developer account exists.
 
 **The bundle identifier arrived by accident and was inspected rather than kept.** It was declared by a

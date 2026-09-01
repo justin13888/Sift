@@ -76,6 +76,43 @@ archive="target/$([[ "$configuration" == "Release" ]] && echo release || echo de
 # D-60 — the committed header matches the ABI crate. `mise run bless-header` regenerates it.
 cargo xtask header
 
+# The OAuth client, and the callback scheme derived from it.
+#
+# **Configuration, not a secret.** A client identifier for a public client appears in every
+# authorization URL it generates — that is why PKCE exists — so this is not withheld for
+# secrecy. It is out of the repository because it is per-installation: baking one in would make
+# every checkout share one client, and Google's quota, verification status and consent screen
+# all attach to the client rather than to the application.
+#
+# The scheme is **derived** rather than configured separately, so the two cannot disagree.
+# Google's iOS/macOS client type accepts exactly one redirect scheme — the client identifier
+# reversed — and its Desktop type wants a 127.0.0.1 loopback, which NFR-24 forbids outright.
+client_file="shells/macos/oauth-client.txt"
+if [[ -z "${SIFT_OAUTH_CLIENT_ID:-}" && -f "$client_file" ]]; then
+    SIFT_OAUTH_CLIENT_ID="$(tr -d '[:space:]' < "$client_file")"
+fi
+export SIFT_OAUTH_CLIENT_ID="${SIFT_OAUTH_CLIENT_ID:-}"
+
+if [[ -n "$SIFT_OAUTH_CLIENT_ID" ]]; then
+    case "$SIFT_OAUTH_CLIENT_ID" in
+        *.apps.googleusercontent.com)
+            export SIFT_OAUTH_SCHEME="com.googleusercontent.apps.${SIFT_OAUTH_CLIENT_ID%.apps.googleusercontent.com}"
+            ;;
+        *)
+            echo "macos: SIFT_OAUTH_CLIENT_ID does not look like a Google client identifier," >&2
+            echo "       so the callback scheme falls back to Sift's own. If your provider" >&2
+            echo "       requires a derived scheme, this build will not complete a sign-in." >&2
+            export SIFT_OAUTH_SCHEME="net.justinchung.sift"
+            ;;
+    esac
+    echo "macos: OAuth client $SIFT_OAUTH_CLIENT_ID"
+    echo "       callback scheme $SIFT_OAUTH_SCHEME"
+else
+    export SIFT_OAUTH_SCHEME="net.justinchung.sift"
+    echo "macos: no OAuth client configured — this build runs against fixtures only."
+    echo "       Put one in $client_file, or set SIFT_OAUTH_CLIENT_ID, to sign in to a real account."
+fi
+
 xcodegen generate --spec shells/macos/project.yml --project shells/macos --quiet
 
 # Every build setting lives in project.yml rather than on this command line, for the same

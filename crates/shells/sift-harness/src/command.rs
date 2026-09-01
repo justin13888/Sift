@@ -129,7 +129,7 @@ fn account(app: &mut App, args: &[&str]) -> Output {
             // a batch answered out of order cannot be arranged against a real account on
             // demand, and a shell drivable only against one would leave every one of them
             // untested end to end.
-            let adapter = crate::account::replayed();
+            let adapter = sift_app::authorize::replayed();
             let id = app.add_provider_account(name, adapter)?;
             Ok(vec![format!("added `{name}` (replayed)  id={id}")])
         }
@@ -138,15 +138,19 @@ fn account(app: &mut App, args: &[&str]) -> Output {
             // registered the scheme with the system — a bundle does that, and a bundle is
             // what this binary is not — so it says so rather than opening a browser the user
             // would return from to nothing.
-            let registered = std::env::var("SIFT_CALLBACK_SCHEME_REGISTERED").is_ok();
-            let url = crate::account::begin(&mut app.broker, client_id, registered, now_millis())
-                .map_err(|e| e.to_string())?;
+            // D-71's fact, which the shell owns. This binary is not a bundle, so it is false
+            // unless a test forces it to exercise the URL's shape.
+            app.scheme_is_registered = std::env::var("SIFT_CALLBACK_SCHEME_REGISTERED").is_ok();
+            let registered = app.scheme_is_registered;
+            let url =
+                sift_app::authorize::begin(&mut app.broker, client_id, registered, now_millis())
+                    .map_err(|e| e.to_string())?;
             app.pending_authorization
                 .insert((*name).to_owned(), (*client_id).to_owned());
             Ok(vec![
                 format!(
                     "the callback returns through the registered scheme{}",
-                    if crate::account::callback_arrives_on_a_socket() {
+                    if sift_app::authorize::callback_arrives_on_a_socket() {
                         " and a socket"
                     } else {
                         ", never a socket — NFR-24 admits none for any purpose"
@@ -165,9 +169,14 @@ fn account(app: &mut App, args: &[&str]) -> Output {
                 .cloned()
                 .ok_or_else(|| format!("no authorization is in progress for `{name}`"))?;
             let id = app.reserve_identity();
-            let adapter =
-                crate::account::complete(&mut app.broker, &client_id, id, callback, now_millis())
-                    .map_err(|e| e.to_string())?;
+            let adapter = sift_app::authorize::complete(
+                &mut app.broker,
+                &client_id,
+                id,
+                callback,
+                now_millis(),
+            )
+            .map_err(|e| e.to_string())?;
             app.pending_authorization.remove(*name);
             let id = app.add_provider_account(name, adapter)?;
             Ok(vec![format!("added `{name}`  id={id}")])
@@ -825,7 +834,7 @@ fn sync(app: &mut App, args: &[&str]) -> Output {
     // Folders first: a delta needs somewhere to put what it finds, and D-83 assigns local
     // identity on discovery rather than on first use.
     fn turn(
-        adapter: &crate::account::Live,
+        adapter: &sift_app::authorize::Live,
         account: &mut sift_app::OpenAccount,
         pages: usize,
     ) -> Result<sift_sync::ingest::PageReport, sift_sync::run::RunError> {
@@ -906,7 +915,8 @@ fn refresh_credential(
         .cloned()
         .or_else(|| std::env::var("SIFT_OAUTH_CLIENT_ID").ok())
         .ok_or("no client identifier is known for this account, so it cannot be refreshed")?;
-    let registration = crate::account::registration(crate::account::default_kind(), &client_id)?;
+    let registration =
+        sift_app::authorize::registration(sift_app::authorize::default_kind(), &client_id)?;
     let mut transport = sift_http::Https::to(&registration.profile.token.host)
         .map_err(|why| format!("the trust store could not be consulted: {why}"))?;
     app.broker

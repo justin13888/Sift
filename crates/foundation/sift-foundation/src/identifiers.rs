@@ -33,6 +33,43 @@ pub const BUNDLE_IDENTIFIER: &str = "net.justinchung.sift";
 /// discarded without comment.
 pub const CALLBACK_SCHEME: &str = "net.justinchung.sift";
 
+/// The scheme a **particular provider** will accept the callback on — D-36, amended.
+///
+/// # Why one fixed scheme is not enough
+///
+/// [`CALLBACK_SCHEME`] is Sift's own, and it is what a provider that lets an application
+/// choose its redirect will use. Google does not. Its "Desktop app" client type wants a
+/// `127.0.0.1` loopback redirect, which NFR-24 forbids outright — *never a listening socket
+/// of any kind, for any purpose*. Its iOS/macOS client type is the only one compatible with
+/// that constraint, and it accepts exactly one scheme: **the client identifier, reversed**.
+///
+/// This was found by generating a real authorization URL and reading it, not by reading
+/// documentation. The parameters were all correct and the redirect was not, and the failure
+/// would have arrived as a browser page after the user had already granted consent.
+///
+/// So the scheme is derived from the registered client rather than fixed. A client identifier
+/// of `123-abc.apps.googleusercontent.com` yields `com.googleusercontent.apps.123-abc`.
+///
+/// Returns [`CALLBACK_SCHEME`] for any client the rule does not apply to, which is every
+/// provider that lets an application name its own redirect.
+#[must_use]
+pub fn callback_scheme_for(client_id: &str) -> String {
+    match client_id.strip_suffix(".apps.googleusercontent.com") {
+        Some(body) => format!("com.googleusercontent.apps.{body}"),
+        None => CALLBACK_SCHEME.to_owned(),
+    }
+}
+
+/// The full redirect a flow declares, under the scheme the client requires.
+///
+/// One slash, not two: there is no authority component. `scheme://host/path` would name a host
+/// that does not exist, and providers differ on whether they normalise it away — so the form
+/// that is registered and the form that is sent have to be the same string, and this is it.
+#[must_use]
+pub fn redirect_uri_for(client_id: &str) -> String {
+    format!("{}:/oauth2/callback", callback_scheme_for(client_id))
+}
+
 /// The internal scheme body-view resources are addressed under — D-28.
 ///
 /// **MUST NOT appear in the bundle's registered URL types, on either platform.** It is
@@ -146,5 +183,53 @@ mod tests {
             keychain_access_group("ABCDE12345"),
             "ABCDE12345.net.justinchung.sift"
         );
+    }
+}
+
+#[cfg(test)]
+mod callback_scheme {
+    use super::*;
+
+    /// The rule Google's iOS/macOS client type imposes, and the reason the scheme could not
+    /// stay a constant. Its Desktop type wants a loopback redirect, which NFR-24 forbids.
+    #[test]
+    fn a_google_client_gets_its_own_identifier_reversed() {
+        assert_eq!(
+            callback_scheme_for("123456-abcdef.apps.googleusercontent.com"),
+            "com.googleusercontent.apps.123456-abcdef"
+        );
+        assert_eq!(
+            redirect_uri_for("123456-abcdef.apps.googleusercontent.com"),
+            "com.googleusercontent.apps.123456-abcdef:/oauth2/callback"
+        );
+    }
+
+    /// Every provider that lets an application name its own redirect gets Sift's.
+    #[test]
+    fn anything_else_keeps_sifts_own_scheme() {
+        assert_eq!(callback_scheme_for("some-client-id"), CALLBACK_SCHEME);
+        assert_eq!(callback_scheme_for(""), CALLBACK_SCHEME);
+    }
+
+    /// One slash. `scheme://host/path` names a host that does not exist, and providers differ
+    /// on whether they normalise it away — so the registered form and the sent form must be
+    /// the same string.
+    #[test]
+    fn the_redirect_has_no_authority_component() {
+        for client in ["x.apps.googleusercontent.com", "other"] {
+            let uri = redirect_uri_for(client);
+            assert!(!uri.contains("://"), "{uri}");
+            assert!(uri.ends_with(":/oauth2/callback"), "{uri}");
+        }
+    }
+
+    /// The derived scheme must never collide with the internal one: D-28's unguessability is
+    /// the whole of the body view's address security, and a scheme the operating system knows
+    /// about is one any local process can hand an address to.
+    #[test]
+    fn a_derived_scheme_is_never_the_internal_one() {
+        for client in ["x.apps.googleusercontent.com", "sift-resource", ""] {
+            assert_ne!(callback_scheme_for(client), INTERNAL_SCHEME);
+        }
     }
 }

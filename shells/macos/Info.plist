@@ -36,6 +36,18 @@
 	     by the platform's own launch machinery. Not a socket: NFR-24 admits none, for any
 	     purpose. The scheme is derived from the bundle identifier because that is what the
 	     providers requiring a custom scheme expect. -->
+	<!-- D-36's registered URI scheme. Two entries, and the second is not redundant.
+
+	     The first is Sift's own, and is what a provider that lets an application choose its
+	     redirect returns through. Google does not: its Desktop client type wants a 127.0.0.1
+	     loopback redirect, which NFR-24 forbids outright, and its iOS/macOS type — the only
+	     one compatible with that constraint — accepts exactly one scheme, the client
+	     identifier reversed. So the second is derived from the configured client at build
+	     time, and defaults to Sift's own when no client is configured.
+
+	     Neither is `sift-resource`. That one is registered with the web engine and nowhere
+	     else: registering it here would let any local process hand a capability-token address
+	     to Sift, which is the one thing D-28's unguessability exists to prevent. -->
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -48,6 +60,22 @@
 				<string>net.justinchung.sift</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>net.justinchung.sift.oauth</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>$(SIFT_OAUTH_SCHEME)</string>
+			</array>
+		</dict>
 	</array>
+	<!-- The OAuth client this build was configured with. **Not a secret**: a client identifier
+	     for a public client is published in every authorization URL it generates, which is why
+	     PKCE exists. It is here rather than baked into the core because it is per-installation
+	     configuration, and because a build with none should still run against fixtures. -->
+	<key>SiftOAuthClientID</key>
+	<string>$(SIFT_OAUTH_CLIENT_ID)</string>
 </dict>
 </plist>

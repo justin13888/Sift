@@ -93,6 +93,19 @@ pub(crate) struct Layer {
     /// let the written one differ from the shown one, which is the whole requirement.
     pub(crate) plans: Mutex<BTreeMap<u64, sift_app::attachment::SavePlan>>,
     pub(crate) next_plan: Mutex<u64>,
+    /// The authorization in progress, if any.
+    ///
+    /// **The layer holds it, not the shell.** PKCE binds the exchange to the process that
+    /// started the flow, and a shell holding the client identifier and the address would be a
+    /// shell that could be asked to complete a flow it did not begin.
+    pub(crate) flows: Mutex<Flow>,
+}
+
+/// One authorization in progress. Empty means none.
+#[derive(Debug, Default)]
+pub(crate) struct Flow {
+    pub(crate) client_id: String,
+    pub(crate) url: String,
 }
 
 /// A message's attachment listing, and the rows borrowed from it.

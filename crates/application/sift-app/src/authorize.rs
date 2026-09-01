@@ -1,20 +1,24 @@
-//! Adding an account, and everything a live one needs to work.
+//! Adding an account: the authorization flow, and the adapter it produces.
 //!
-//! # A shell asks which provider exactly once, and now it does not even do that
+//! # Why this is not in a shell
+//!
+//! It was, and then there were two shells. Driving an OAuth flow is not shell work — it is
+//! four steps with an ordering that matters, a credential store at the end of it, and one
+//! check (is the callback scheme registered?) that must happen *before* the user is sent to a
+//! browser rather than after they come back to nothing. A second copy of that in AppKit would
+//! be a second answer to every one of those questions.
+//!
+//! # Naming a provider here is legal, and that is the point of the register
 //!
 //! Everywhere above the adapter layer plans against declared capabilities, and
-//! `cargo xtask invariants` enforces it — but the rule stops below the shells, because "add a
-//! Gmail account" is a thing a person clicks.
-//!
-//! This shell used to be where that name lived. It no longer is: the register in
-//! `sift-registry` sits *below* every layer the rule covers, so the name lives there and this
-//! module resolves an opaque [`ProviderKind`] through it. What is left here is the part that
-//! is genuinely the shell's — driving the authorization flow — and it is written against the
-//! descriptor rather than against a provider.
+//! `cargo xtask invariants` enforces it in the application, presentation and ABI layers. This
+//! file is in the application layer and names no provider: it resolves an opaque
+//! [`ProviderKind`] through the register in `sift-registry`, which sits *below* every layer
+//! the rule covers. "Add a Gmail account" is a thing a person clicks, and the register is
+//! where that sentence is allowed to exist.
 
 use sift_credentials::oauth::{AuthError, Broker, Registration};
 use sift_credentials::store::CredentialStore;
-use sift_foundation::identifiers::CALLBACK_SCHEME;
 use sift_foundation::identity::AccountId;
 use sift_provider::erased::ErasedAdapter;
 use sift_registry::ProviderKind;
@@ -32,13 +36,15 @@ pub fn default_kind() -> ProviderKind {
     sift_registry::KINDS[0].kind
 }
 
-/// Where the callback comes back to — D-36's registered URI scheme.
+/// Where the callback comes back to — D-36's registered URI scheme, as the client requires it.
 ///
 /// **Not a loopback address.** NFR-24 admits no listening socket for any purpose, and D-36
-/// removes the loopback redirect rather than excusing it.
+/// removes the loopback redirect rather than excusing it — which is what forces the scheme to
+/// be derived from the client rather than fixed, because the provider client type that permits
+/// a scheme redirect at all accepts exactly one: the client identifier, reversed.
 #[must_use]
-pub fn redirect_uri() -> String {
-    format!("{CALLBACK_SCHEME}:/oauth2/callback")
+pub fn redirect_uri(client_id: &str) -> String {
+    sift_foundation::identifiers::redirect_uri_for(client_id)
 }
 
 /// The authorization this shell can offer for a kind.
@@ -54,7 +60,7 @@ pub fn registration(kind: ProviderKind, client_id: &str) -> Result<Registration,
     Ok(Registration {
         profile,
         client_id: client_id.to_owned(),
-        redirect_uri: redirect_uri(),
+        redirect_uri: redirect_uri(client_id),
     })
 }
 
@@ -126,8 +132,11 @@ mod tests {
     #[test]
     fn the_callback_returns_through_a_registered_scheme_and_not_a_socket() {
         assert!(!callback_arrives_on_a_socket());
-        let uri = redirect_uri();
-        assert!(uri.starts_with(CALLBACK_SCHEME), "{uri}");
+        let uri = redirect_uri("not-a-google-client");
+        assert!(
+            uri.starts_with(sift_foundation::identifiers::CALLBACK_SCHEME),
+            "{uri}"
+        );
         assert!(
             !uri.contains("localhost") && !uri.contains("127.0.0.1"),
             "{uri}"

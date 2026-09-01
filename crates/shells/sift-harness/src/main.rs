@@ -20,7 +20,6 @@
 //! a user — D-56 keeps prose on the shell's side of the boundary, and this shell's prose is
 //! deliberately terse and diagnostic rather than a rendering of the product.
 
-mod account;
 mod command;
 
 /// The harness installs the tagging allocator, because an attribution surface that is only
