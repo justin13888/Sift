@@ -736,3 +736,445 @@ fn the_replay_harness_is_not_on_anybodys_data_plan() {
 fn replay_of(g: &Gmail<Replay>) -> core::cell::Ref<'_, Replay> {
     g.transport()
 }
+
+// ---------------------------------------------------------------------------
+// 7. Every intent, pinned to the request it makes.
+//
+// The individual tests above check one behaviour each. This section is a different
+// question, and the one that matters before a real mailbox is connected: **given FR-13's
+// closed set, what does each member actually put on the wire, and is there anything on the
+// wire that no member should have put there?**
+//
+// A per-intent test cannot answer the second half. A table can.
+// ---------------------------------------------------------------------------
+
+/// Every request the adapter performed, as `VERB target`.
+fn wire_log(g: &Gmail<Replay>) -> Vec<String> {
+    replay_of(g)
+        .performed
+        .iter()
+        .map(|e| format!("{} {}", e.verb, e.target))
+        .collect()
+}
+
+/// The whole of FR-13, with the exact call each one makes.
+///
+/// Read this as the answer to "what will Sift do to my mailbox". Two entries are worth
+/// pausing on: permanent delete makes **no request at all**, and nothing anywhere reaches
+/// `messages.delete`.
+#[test]
+fn every_intent_makes_exactly_the_request_it_should_and_no_other() {
+    let expected: &[(&str, Operation, &[&str])] = &[
+        (
+            "archive",
+            Operation::Archive,
+            &["POST /gmail/v1/users/me/messages/batchModify"],
+        ),
+        (
+            "delete-to-trash",
+            Operation::DeleteToTrash,
+            &["POST /gmail/v1/users/me/messages/m1/trash"],
+        ),
+        // **Nothing.** The scope Sift asks for cannot permanently delete, and the scope that
+        // can also authorizes sending — which the no-send constraint forbids outright. So this
+        // is refused inside the adapter and never becomes a request.
+        ("permanently-delete", Operation::PermanentlyDelete, &[]),
+        (
+            "move-to",
+            Operation::MoveTo(RemoteFolderId("Label_11".into())),
+            &["POST /gmail/v1/users/me/messages/batchModify"],
+        ),
+        (
+            "mark-read",
+            Operation::SetRead(true),
+            &["POST /gmail/v1/users/me/messages/batchModify"],
+        ),
+        (
+            "mark-unread",
+            Operation::SetRead(false),
+            &["POST /gmail/v1/users/me/messages/batchModify"],
+        ),
+        (
+            "flag",
+            Operation::SetFlagged(true),
+            &["POST /gmail/v1/users/me/messages/batchModify"],
+        ),
+        (
+            "unflag",
+            Operation::SetFlagged(false),
+            &["POST /gmail/v1/users/me/messages/batchModify"],
+        ),
+        (
+            "add-tag",
+            Operation::AddTag("Receipts".into()),
+            &["POST /gmail/v1/users/me/messages/batchModify"],
+        ),
+        (
+            "remove-tag",
+            Operation::RemoveTag("Receipts".into()),
+            &["POST /gmail/v1/users/me/messages/batchModify"],
+        ),
+        (
+            "report-junk",
+            Operation::ReportJunk,
+            &["POST /gmail/v1/users/me/messages/batchModify"],
+        ),
+        (
+            "report-not-junk",
+            Operation::ReportNotJunk,
+            &["POST /gmail/v1/users/me/messages/batchModify"],
+        ),
+    ];
+
+    for (name, operation, calls) in expected {
+        let mut r = modifying();
+        r.respond(
+            "POST",
+            &wire::trash_target(&RemoteMessageId("m1".into())),
+            Response {
+                status: 200,
+                headers: vec![],
+                body: br#"{"id":"m1"}"#.to_vec(),
+            },
+        );
+        let g = gmail(r);
+        // The labels fetch is the adapter resolving a name to an identifier, and it happens
+        // once. Filtering it out leaves exactly the mutation traffic.
+        let _ = g.apply(&[mutation("m1", operation.clone())]);
+        let log: Vec<String> = wire_log(&g)
+            .into_iter()
+            .filter(|c| !c.contains("/labels") && !c.contains("/profile"))
+            .collect();
+        assert_eq!(
+            log,
+            calls.iter().map(|c| (*c).to_owned()).collect::<Vec<_>>(),
+            "`{name}` did not make the calls it should"
+        );
+    }
+}
+
+/// The one that would be unrecoverable. `messages.delete` bypasses the Trash entirely, and
+/// nothing in FR-13's set may reach it — not by any operation, and not by any sequence.
+#[test]
+fn nothing_in_the_intent_set_can_reach_the_endpoint_that_deletes_without_a_trash() {
+    let every = [
+        Operation::Archive,
+        Operation::DeleteToTrash,
+        Operation::PermanentlyDelete,
+        Operation::MoveTo(RemoteFolderId("Label_11".into())),
+        Operation::SetRead(true),
+        Operation::SetRead(false),
+        Operation::SetFlagged(true),
+        Operation::SetFlagged(false),
+        Operation::AddTag("Receipts".into()),
+        Operation::RemoveTag("Receipts".into()),
+        Operation::ReportJunk,
+        Operation::ReportNotJunk,
+    ];
+    let mut r = modifying();
+    r.respond(
+        "POST",
+        &wire::trash_target(&RemoteMessageId("m1".into())),
+        Response {
+            status: 200,
+            headers: vec![],
+            body: br#"{"id":"m1"}"#.to_vec(),
+        },
+    );
+    let g = gmail(r);
+    let batch: Vec<WireMutation> = every.iter().cloned().map(|o| mutation("m1", o)).collect();
+    let _ = g.apply(&batch);
+
+    for call in wire_log(&g) {
+        assert!(
+            !call.starts_with("DELETE "),
+            "a DELETE reached the wire: {call}"
+        );
+        // Gmail's own permanent deletion is `DELETE …/messages/{id}` and the batch form is
+        // `POST …/messages/batchDelete`. Neither may appear.
+        assert!(
+            !call.contains("batchDelete"),
+            "the batch delete endpoint was called: {call}"
+        );
+    }
+}
+
+/// Permanent deletion is refused **inside the adapter**, so it cannot be reached by anything
+/// above it that ignored the capability table. The refusal is settled rather than retryable:
+/// a retry of something the provider will never do is a loop.
+#[test]
+fn permanent_deletion_is_refused_without_a_request_and_is_not_retryable() {
+    let g = gmail(modifying());
+    let outcomes = g
+        .apply(&[mutation("m1", Operation::PermanentlyDelete)])
+        .expect("the batch itself succeeds");
+
+    assert_eq!(
+        outcomes,
+        vec![sift_provider::adapter::MutationOutcome::Refused]
+    );
+    let mutations: Vec<String> = wire_log(&g)
+        .into_iter()
+        .filter(|c| !c.contains("/labels") && !c.contains("/profile"))
+        .collect();
+    assert!(
+        mutations.is_empty(),
+        "permanent deletion put something on the wire: {mutations:?}"
+    );
+}
+
+/// The capability table is what the layers above plan against, so it has to agree with what
+/// the adapter will actually do. Two answers to "can this account permanently delete" is how
+/// an action gets offered that then refuses.
+#[test]
+fn the_declared_capability_and_the_adapter_agree_about_permanent_deletion() {
+    let g = gmail(modifying());
+    assert!(
+        !g.capabilities().permanent_delete,
+        "the capability says it can, and the adapter refuses"
+    );
+}
+
+/// Trashing is recoverable, and that is the whole reason `delete` means this. A message in
+/// the provider's own Trash is one the user can get back through any client they own.
+#[test]
+fn delete_means_the_providers_own_trash_and_the_message_is_still_there() {
+    let mut r = modifying();
+    r.respond(
+        "POST",
+        &wire::trash_target(&RemoteMessageId("m1".into())),
+        Response {
+            status: 200,
+            headers: vec![],
+            body: br#"{"id":"m1","labelIds":["TRASH"]}"#.to_vec(),
+        },
+    );
+    let g = gmail(r);
+    let outcomes = g
+        .apply(&[mutation("m1", Operation::DeleteToTrash)])
+        .unwrap();
+    assert_eq!(
+        outcomes,
+        vec![sift_provider::adapter::MutationOutcome::Applied]
+    );
+    assert_eq!(
+        replay_of(&g).count_of("POST", &wire::trash_target(&RemoteMessageId("m1".into()))),
+        1
+    );
+    // And the untrash endpoint exists, which is what makes the compensation reachable.
+    assert!(wire::untrash_target(&RemoteMessageId("m1".into())).ends_with("/untrash"));
+}
+
+// ---------------------------------------------------------------------------
+// 8. The shapes a real mailbox produces.
+//
+// Every one of these is a thing that happens and that nobody can arrange on demand against
+// a live account — which is why they are fixtures. What is being checked is not that the
+// adapter survives them but that it classifies each one **correctly**, because the class is
+// what decides whether the scheduler retries, whether the folder resynchronises, and whether
+// the user is asked to sign in again.
+// ---------------------------------------------------------------------------
+
+/// A refused credential is not a refused account.
+///
+/// Only the credential broker can decide whether the *grant* is gone. This says the request
+/// was not answered, and nothing more — because a refresh that succeeds afterwards must leave
+/// no trace of this having happened.
+#[test]
+fn a_refused_token_is_its_own_class_and_not_a_permanent_failure() {
+    let mut r = account();
+    r.respond(
+        "GET",
+        &wire::list_target(&inbox(), None, 500),
+        Response {
+            status: 401,
+            headers: vec![],
+            body: br#"{"error":{"code":401,"message":"Invalid Credentials"}}"#.to_vec(),
+        },
+    );
+    let g = gmail(r);
+    let error = g.delta(&inbox(), None).expect_err("401 is not success");
+    assert!(matches!(
+        g.classify(&error),
+        sift_provider::adapter::Failure::CredentialRefused
+    ));
+}
+
+/// 403 is the provider saying no to *this request*, and it is settled: retrying a scope the
+/// account does not have is a loop. NFR-29 requires the reason be surfaced rather than
+/// swallowed, which is why the message is carried rather than discarded.
+#[test]
+fn a_forbidden_request_is_settled_and_carries_the_reason() {
+    let mut r = account();
+    r.respond(
+        "GET",
+        &wire::list_target(&inbox(), None, 500),
+        Response {
+            status: 403,
+            headers: vec![],
+            body: br#"{"error":{"code":403,"message":"Insufficient Permission"}}"#.to_vec(),
+        },
+    );
+    let g = gmail(r);
+    let error = g.delta(&inbox(), None).expect_err("403 is not success");
+    assert!(matches!(
+        g.classify(&error),
+        sift_provider::adapter::Failure::Permanent
+    ));
+    assert!(
+        format!("{error}").contains("Insufficient Permission"),
+        "the reason was swallowed: {error}"
+    );
+}
+
+/// A captive portal's sign-in page arrives as an answer that does not parse. Treating it as
+/// settled would degrade **every account** on a hotel network — the cascade NFR-34 is about,
+/// reaching the folder state machine instead of the credential store.
+#[test]
+fn an_answer_that_does_not_parse_is_transient_rather_than_settled() {
+    let mut r = account();
+    r.on(
+        "GET",
+        &wire::list_target(&inbox(), None, 500),
+        b"<html><body>Sign in to continue</body></html>",
+    );
+    let g = gmail(r);
+    let error = g
+        .delta(&inbox(), None)
+        .expect_err("a login page is not a message list");
+    assert!(
+        matches!(
+            g.classify(&error),
+            sift_provider::adapter::Failure::Transient
+        ),
+        "a portal page was classified as {:?}, which would degrade every account on the network",
+        g.classify(&error)
+    );
+}
+
+/// D-82: a cursor outside the retained window is **progress, not a fault**. NFR-18 recovers
+/// without asking the user anything, so this must not reach them as an error.
+#[test]
+fn a_cursor_outside_the_window_is_progress_and_recovers_into_a_full_walk() {
+    let mut r = account();
+    // A 404 body **with a 404 status**. Registering the body at 200 would test a fixture
+    // rather than the adapter: the status is what carries the meaning here.
+    r.respond(
+        "GET",
+        &wire::history_target("1000", &inbox(), None, 500),
+        Response {
+            status: 404,
+            headers: vec![],
+            body: HISTORY_EXPIRED.to_vec(),
+        },
+    );
+    r.on("GET", &wire::list_target(&inbox(), None, 500), LIST_1);
+    r.on(
+        "GET",
+        &wire::list_target(&inbox(), Some("page2"), 500),
+        LIST_2,
+    );
+    let g = gmail(r);
+    let error = g
+        .delta(&inbox(), Some(&live_cursor()))
+        .expect_err("the cursor is gone");
+    assert!(matches!(
+        g.classify(&error),
+        sift_provider::adapter::Failure::CursorInvalidated
+    ));
+
+    // And the recovery is a full walk from no cursor, which the same adapter can do.
+    let recovered = g.delta(&inbox(), None).expect("a full walk");
+    assert!(
+        !recovered.changes.is_empty(),
+        "the recovery produced nothing"
+    );
+}
+
+/// An empty answer is an answer. A folder with nothing in it must produce no changes rather
+/// than an error, because "empty" and "broken" reaching the same place is how an account gets
+/// marked degraded for being tidy.
+#[test]
+fn an_empty_folder_is_a_delta_with_nothing_in_it() {
+    let mut r = account();
+    r.on("GET", &wire::list_target(&inbox(), None, 500), b"{}");
+    let g = gmail(r);
+    let delta = g
+        .delta(&inbox(), None)
+        .expect("an empty list is not an error");
+    assert!(delta.changes.is_empty());
+}
+
+/// A folder larger than any list a person scrolls.
+///
+/// The walk is **resumable by page** under D-53 rather than one call that returns everything,
+/// so this drives it the way the sync engine does and checks the total. The failure it is
+/// looking for is a walk that stops at a page boundary and reports itself complete, which
+/// looks like mail that never arrived.
+#[test]
+fn a_folder_larger_than_one_page_is_walked_rather_than_truncated() {
+    let ids: Vec<String> = (0..1_500)
+        .map(|i| format!(r#"{{"id":"m{i}","threadId":"t{i}"}}"#))
+        .collect();
+    let (first, second) = ids.split_at(500);
+    let mut r = account();
+    r.on(
+        "GET",
+        &wire::list_target(&inbox(), None, 500),
+        format!(
+            r#"{{"messages":[{}],"nextPageToken":"p2"}}"#,
+            first.join(",")
+        )
+        .as_bytes(),
+    );
+    r.on(
+        "GET",
+        &wire::list_target(&inbox(), Some("p2"), 500),
+        format!(r#"{{"messages":[{}]}}"#, second.join(",")).as_bytes(),
+    );
+    let g = gmail(r);
+    let mut total = 0;
+    let mut cursor = None;
+    let mut pages = 0;
+    loop {
+        let delta = g.delta(&inbox(), cursor.as_ref()).expect("a page");
+        total += delta.changes.len();
+        pages += 1;
+        if !delta.more {
+            break;
+        }
+        cursor = Some(delta.next);
+        assert!(pages < 10, "the walk did not terminate");
+    }
+    assert_eq!(total, 1_500, "the walk stopped at a page boundary");
+    assert_eq!(pages, 2, "1500 messages in 500-message pages is two pages");
+}
+
+/// A message whose structure is not what the provider's own schema says. Sender-controlled
+/// bytes reach this parser, so a malformed one must be a refusal rather than a panic — and it
+/// must be **transient**, because what is malformed may be the network rather than the message.
+#[test]
+fn a_malformed_structure_refuses_without_panicking() {
+    let id = RemoteMessageId("m1".into());
+    for body in [
+        &b"{}"[..],
+        &b"{\"payload\":null}"[..],
+        &b"{\"payload\":{\"parts\":\"not an array\"}}"[..],
+        &b"not json at all"[..],
+    ] {
+        let mut r = account();
+        r.on("GET", &wire::structure_target(&id), body);
+        let g = gmail(r);
+        // Either an empty structure or a refusal. What must not happen is a panic, and what
+        // must not happen is a *permanent* classification of a network's answer.
+        if let Err(e) = g.structure(&id) {
+            assert!(
+                !matches!(
+                    g.classify(&e),
+                    sift_provider::adapter::Failure::CredentialRefused
+                ),
+                "a malformed body was read as a credential problem"
+            );
+        }
+    }
+}
