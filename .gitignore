@@ -24,10 +24,13 @@ logs
 # intermediates around it are not.
 /target-abi
 
-# Swift and Xcode
+# Swift and Xcode. The macOS project is generated from shells/macos/project.yml by
+# XcodeGen under D-61 — the spec and the Info.plist are the committed source of truth,
+# and the .xcodeproj is build output like any other.
 .build/
 *.xcuserdatad
 DerivedData/
+/shells/macos/Sift.xcodeproj/
 
 # Per-contributor mise overrides. mise.toml itself is committed and is the definition of
 # every command; this is the local escape hatch and must not be.

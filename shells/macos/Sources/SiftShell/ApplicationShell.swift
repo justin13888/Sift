@@ -35,6 +35,13 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         // without it can be neither quit deliberately nor re-authenticated.
         installStatusItem()
 
+        // The application shell owns the application menu as well as the tray item
+        // (`docs/architecture/ui-shell.md`). It is not decoration: this shell raises Sift to a
+        // regular application whenever a window opens, and a regular application with no main
+        // menu is frontmost with an empty menu bar and no way to quit or close from the
+        // keyboard — which FR-24 does not allow.
+        installApplicationMenu()
+
         var handle: UnsafeMutablePointer<SiftApp>?
         let status = sift_initialize(hostCallbacks(), &handle)
         guard status == Ok else {
@@ -45,8 +52,9 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         }
         app = OpaquePointer(handle)
 
-        // First run has no main window until an account exists: the account-less state *is*
-        // the add-account flow, because an empty inbox tells a new user the product is broken.
+        // Both branches open a window; what differs is what the window is *for*. The
+        // account-less state *is* the add-account flow rather than an empty inbox, because an
+        // empty inbox tells a new user the product is broken.
         if hasAnyAccount() {
             openMainWindow()
         } else {
@@ -88,16 +96,109 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         statusItem = item
     }
 
+    /// The application menu. Deliberately the same three verbs as the tray, plus the window
+    /// commands the platform expects to find here.
+    ///
+    /// "Quit Sift entirely" is worded identically in both places for the reason FR-25 gives:
+    /// closing a window and quitting are distinct actions, and neither may be the silent
+    /// consequence of the other. Two different words for one of them would undo that.
+    private func installApplicationMenu() {
+        let applicationMenu = NSMenu()
+        applicationMenu.addItem(withTitle: "Open Sift", action: #selector(openMainWindow), keyEquivalent: "")
+        applicationMenu.addItem(withTitle: "Pause syncing", action: #selector(pauseSync), keyEquivalent: "")
+        applicationMenu.addItem(.separator())
+        applicationMenu.addItem(withTitle: "Quit Sift entirely", action: #selector(quit), keyEquivalent: "q")
+        for item in applicationMenu.items { item.target = self }
+
+        // Left untargeted on purpose: these travel the responder chain to whichever window is
+        // key, which is the only correct answer when windows are plural.
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenu.addItem(
+            withTitle: "Minimize",
+            action: #selector(NSWindow.performMiniaturize(_:)),
+            keyEquivalent: "m"
+        )
+
+        let mainMenu = NSMenu()
+        // The first submenu is the application menu, and the platform titles it itself.
+        let applicationItem = NSMenuItem()
+        applicationItem.submenu = applicationMenu
+        mainMenu.addItem(applicationItem)
+
+        let windowItem = NSMenuItem()
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = windowMenu
+    }
+
     @objc func openMainWindow() {
-        let window = WindowShell(app: app)
+        // "Open Sift" means *show me Sift*, and it is reachable from the tray, from the
+        // application menu and from FR-23's notification. Windows are plural by design, but a
+        // second identical window ordered in on top of the first is not plurality — it is one
+        // more live observation per click, and on screen it looks like nothing happened.
+        // Opening a genuinely new window is a distinct action and will need a distinct verb.
+        if let existing = windows.last {
+            existing.raise()
+            DispatchQueue.main.async { NSApp.activate(ignoringOtherApps: true) }
+            return
+        }
+
+        let window = WindowShell(app: app) { [weak self] shell in self?.forget(shell) }
         windows.append(window)
+
+        // Raise the policy *before* the window is ordered in. Putting Sift in the dock and the
+        // application switcher is what makes it findable at all, and a window ordered in while
+        // the process is still an accessory is a window the activation machinery treats as
+        // belonging to something the user cannot switch to.
+        syncActivationPolicy()
         window.show()
+
+        // And activate on the next turn of the loop rather than in this one. A policy change is
+        // not complete until the current turn ends, so activating inline is activating something
+        // the system still considers an accessory — it is accepted and does nothing, which is
+        // exactly how "it launched, and nothing came to the front" happens.
+        DispatchQueue.main.async { NSApp.activate(ignoringOtherApps: true) }
+    }
+
+    /// A window shell is finished with.
+    ///
+    /// Not bookkeeping: this array is what `syncActivationPolicy` reads, so a shell left in it
+    /// after its window closed would hold Sift in the dock with nothing on screen — and it
+    /// would hold the shell itself alive along with everything L1 and L3 expect a closing
+    /// window to release.
+    private func forget(_ shell: WindowShell) {
+        windows.removeAll { $0 === shell }
+        syncActivationPolicy()
+    }
+
+    /// `main.swift` starts the process as an accessory and says it is one *"until one opens"*.
+    /// This is where that stops being a comment.
+    ///
+    /// The dock reflects whether a window exists, and closing the last one returns Sift to the
+    /// menu bar rather than quitting it — FR-25, which
+    /// `docs/architecture/process-model.md` calls the single most likely source of user
+    /// distrust in the whole design, and which is only credible if the user can *see* the
+    /// difference between a closed window and a quit application.
+    private func syncActivationPolicy() {
+        NSApp.setActivationPolicy(windows.isEmpty ? .accessory : .regular)
     }
 
     @objc private func pauseSync() { invoke("app.pause-sync") }
     @objc private func quit() { invoke("app.quit"); NSApp.terminate(nil) }
 
-    private func beginAddAccount() { invoke("app.add-account") }
+    private func beginAddAccount() {
+        invoke("app.add-account")
+        // `docs/architecture/ui-shell.md`: **the account-less state is the add-account flow**,
+        // not an empty inbox with a hint in it. So first run is a screen, and this is where it
+        // opens. The surface's *content* is not built — what opens is a window with an empty
+        // view in it, which is honest about the stage rather than invisible about it. A first
+        // run that presents nothing at all is indistinguishable from a launch that failed.
+        openMainWindow()
+    }
+
     private func hasAnyAccount() -> Bool { false }
 
     /// Every mutation this shell performs goes through the action register by identifier.
@@ -114,6 +215,14 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     }
 
     private func present(startupFailure status: SiftStatus) {
+        // This alert is the only thing Sift puts on screen on this path, and an accessory
+        // application has no dock icon and no switcher entry — so a modal it runs can sit
+        // behind whatever is frontmost with no ordinary way to reach it. Becoming regular and
+        // activating first is the difference between a reported failure and a silent one,
+        // which is the whole complaint this shell has just finished answering.
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+
         let alert = NSAlert()
         // D-56: the layer returns identified states and **this shell supplies every word**.
         // No user-visible string crosses the boundary, which is what makes NFR-51's locale

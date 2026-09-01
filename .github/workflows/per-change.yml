@@ -113,9 +113,9 @@ jobs:
   # links the Rust core as a static library. That is why "CI needs a macOS host for even a
   # smoke build" is listed as a cost of the decision rather than an inconvenience.
   #
-  # The task runs all three steps — the static library, the header check, and the Swift
-  # build — because they are one sequence and splitting them here would put the middle one in
-  # two places.
+  # The task runs all four steps — the static library, the header check, the project
+  # generation and the Xcode build — because they are one sequence and splitting them here
+  # would put the middle ones in two places.
   macos-shell:
     name: the macOS shell builds against the generated header
     runs-on: macos-latest

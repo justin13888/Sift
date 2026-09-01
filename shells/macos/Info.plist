@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+
+	<!-- FR-25 and FR-22: Sift is resident with or without a window, so it launches as an
+	     accessory rather than a regular application and is reachable through the menu-bar
+	     item. The shell raises this to a regular application while a window is open and
+	     lowers it again when the last one closes, so the dock reflects what is on screen.
+	     This keeps Sift out of the dock on the way there; it does not keep it out once a
+	     window opens, which today is immediately. -->
+	<key>LSUIElement</key>
+	<true/>
+
+	<!-- D-36 — the authorization callback arrives through the registered URI scheme, delivered
+	     by the platform's own launch machinery. Not a socket: NFR-24 admits none, for any
+	     purpose. The scheme is derived from the bundle identifier because that is what the
+	     providers requiring a custom scheme expect. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>net.justinchung.sift</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>net.justinchung.sift</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

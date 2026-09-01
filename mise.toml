@@ -38,6 +38,16 @@ hk = "1.57.0"
 # the compiled binary.
 "cargo:convco" = "0.7.1"
 
+# D-61 gives the macOS bundle to the platform's own toolchain, and `shells/macos/project.yml`
+# is the committed spec XcodeGen turns into that project. Pinned for the same reason as the
+# rest: a generator release that emits a different project is a change to what gets built, and
+# it should arrive as a commit rather than as a surprise on somebody's machine.
+#
+# `os` is not optional here. XcodeGen ships for darwin only, so without it `mise install` fails
+# outright on Linux — not the macOS leg being skipped with a word, which is what D-61's cost is,
+# but every Linux job failing before it runs anything.
+"aqua:yonaskolb/XcodeGen" = { version = "2.46.0", os = ["macos"] }
+
 [settings]
 # Required for the [hooks] block below; mise gates hooks behind this flag.
 experimental = true
@@ -98,15 +108,16 @@ run = "cargo doc --no-deps --open"
 description = "Check the docs build (no open)"
 run = "cargo doc --no-deps"
 
-# The SwiftPM build tree (shells/macos/.build) is separate from cargo's target/ and nothing
-# else prunes it, so it grows unbounded. `clean-swift` reclaims just that; `clean` is the
-# full reset.
+# The macOS shell's build output is separate from cargo's target/ and nothing else prunes it,
+# so it grows unbounded. `clean-swift` reclaims just that; `clean` is the full reset. Both the
+# build tree and the generated project go: `shells/macos/project.yml` is the source of truth
+# and the .xcodeproj is output, so a stale one is a stale build rather than lost work.
 [tasks.clean-swift]
-description = "Remove the SwiftPM build tree (shells/macos/.build)"
-run = "rm -rf shells/macos/.build"
+description = "Remove the macOS shell build output (.build and the generated project)"
+run = "rm -rf shells/macos/.build shells/macos/Sift.xcodeproj"
 
 [tasks.clean]
-description = "Remove all build artifacts (cargo target/ + SwiftPM .build)"
+description = "Remove all build artifacts (cargo target/ + the macOS shell .build)"
 depends = ["clean-swift"]
 run = "cargo clean"
 
@@ -208,8 +219,8 @@ fi
 
 # ── The shells ────────────────────────────────────────────────────────────────
 
-# `macos` is three steps and a platform guard, so it lives in mise-tasks/ too.
-# `mise run macos -- --run` builds and then launches it.
+# `macos` is four steps in two toolchains and a platform guard, so it lives in mise-tasks/ too.
+# `mise run macos -- --run` builds the bundle and then launches it.
 
 [tasks.linux]
 description = "Build the Linux shell with the toolkit (D-61 — Cargo owns this binary)"

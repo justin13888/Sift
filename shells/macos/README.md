@@ -8,16 +8,72 @@ mise run macos           # build it
 mise run macos -- --run  # build it and launch it
 ```
 
-That task is three commands in two toolchains, and the shape of it *is* D-61:
+That task is four commands in two toolchains, and the shape of it *is* D-61:
 
 ```
 cargo build --release -p sift-abi        # produces libsift_abi.a
 cargo xtask header                       # asserts the committed header matches the ABI
-swift build -c release --package-path shells/macos
+xcodegen generate --spec shells/macos/project.yml --project shells/macos
+xcodebuild -project shells/macos/Sift.xcodeproj -scheme Sift -configuration Release \
+           -derivedDataPath shells/macos/.build/xcode build
 ```
 
-The middle step is not ceremony. `Package.swift` links `-lsift_abi` against a committed
-header, so without it a drifted ABI links successfully against a stale declaration.
+The header step is not ceremony. The project links `-lsift_abi` against a committed header, so
+without it a drifted ABI links successfully against a stale declaration.
+
+`Sift.app` lands in `shells/macos/.build/xcode/Build/Products/<Configuration>/`, so
+`mise run clean-swift` still reclaims the whole build tree.
+
+## Why the project is generated
+
+`shells/macos/project.yml` is the committed spec; `Sift.xcodeproj` is generated from it and is
+not committed. D-61 rejects *"a bespoke script assembling the bundle from parts"*, and nothing
+here assembles one — XcodeGen emits a project, and Xcode compiles, links, assembles, signs and
+stamps the bundle. What D-61 protects is that the Info.plist, the URL types, the entitlements
+and the signing posture live in the platform's own format and are enforced by its own
+machinery, and they do. What it buys is a spec a reviewer can read instead of four hundred
+lines of UUID-keyed plist.
+
+`Info.plist` is committed beside it, because it is the file every one of those obligations
+eventually lands in.
+
+## A development build is signed ad-hoc, and has no team
+
+`docs/product/platform-baseline.md` records the team identifier as **outstanding** — it is
+issued rather than chosen. So the project declares no `DEVELOPMENT_TEAM` and signs ad-hoc,
+which needs no identity and therefore works on a fresh checkout and on CI.
+
+That is also why it declares **no entitlements** yet: the sandbox, the network, the
+user-selected file access, the Keychain access group and the address book all need a real team
+prefix, and the hardened runtime and notarization belong to the Cask path rather than to a
+development build. The set below is what the shipped bundle must carry, not what this one does.
+
+D-46's universal artefact is likewise not built here: `cargo` produces one architecture, so the
+project builds the one it has.
+
+## What `--run` gives you
+
+Sift launches as an accessory — `LSUIElement`, no dock icon — and the menu-bar envelope is the
+always-on surface FR-22 requires. But it **opens a window and joins the dock**, because the
+account-less state *is* the add-account flow rather than an empty inbox, and the shell raises
+Sift to a regular application while any window is open. So it appears in the dock and the
+application switcher, and `--run` prints the bundle path and the pid rather than asserting a
+launch it never confirmed.
+
+`hasAnyAccount()` is still a stub answering false, so that is *every* launch rather than only
+the first. The window-less accessory state is reached by closing the window, not by starting.
+
+`--run` quits whatever is already running under the bundle identifier before launching, because
+`open` resolves a running application by that identifier — so without it you would be looking at
+the previous build, or at an installed copy, with nothing to tell you. It asks for a quit rather
+than signalling one, so D-70's teardown runs.
+
+Closing that window does not quit — FR-25 — it lowers Sift back to the menu bar. "Quit Sift
+entirely" is the deliberate act, worded the same in the tray and in the application menu
+because neither may be the silent consequence of the other.
+
+The window's *content* is not built. It is a titled, empty window: the add-account surface is
+the presentation-layer work that has not happened yet.
 
 ## What this costs, from D-61
 

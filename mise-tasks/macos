@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-#MISE description="Build the macOS shell (D-61 — Swift owns the binary, Rust is the library it links)."
-#USAGE flag "--debug" help="Build the debug profile instead of release"
-#USAGE flag "--run" help="Launch the shell after building"
+#MISE description="Build the macOS shell (D-61 — Xcode owns the bundle, Rust is the library it links)."
+#USAGE flag "--debug" help="Build the debug configuration instead of release"
+#USAGE flag "--release" help="Build the release configuration (the default)"
+#USAGE flag "--run" help="Launch the bundle after building"
 #
 # D-61: **the platform's own application toolchain owns the bundle**, and the Rust core is
 # built into a static library it links. The Rust workspace never produces the `.app`, so this
@@ -12,9 +13,15 @@
 #   - a contributor needs the platform toolchain
 #   - CI needs a macOS host for even a smoke build
 #
-# The header step in the middle is not optional. Package.swift links `-lsift_abi` against a
-# committed header; if the ABI crate has drifted from it, the link would succeed against a
-# stale declaration rather than failing.
+# The header step is not optional. The project links `-lsift_abi` against a committed header;
+# if the ABI crate has drifted from it, the link would succeed against a stale declaration
+# rather than failing.
+#
+# The project itself is generated from `shells/macos/project.yml`, which is the committed spec.
+# That is not D-61's rejected "bespoke script assembling the bundle from parts": nothing here
+# assembles a bundle. XcodeGen emits a project and Xcode does the rest, so the Info.plist, the
+# URL types and the signing posture stay in the platform's own format, enforced by its own
+# machinery.
 set -euo pipefail
 
 cd "${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
@@ -25,34 +32,124 @@ cd "${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
     exit 1
 }
 
-profile="release"
+command -v xcodegen >/dev/null 2>&1 || {
+    echo "macos: xcodegen is not on PATH. It is pinned in mise.toml under D-61 —" >&2
+    echo "       run \`mise install\` and try again." >&2
+    exit 1
+}
+
+configuration="Release"
 launch=false
 for arg in "$@"; do
     case "$arg" in
-        --debug) profile="debug" ;;
-        --release) profile="release" ;;
+        --debug) configuration="Debug" ;;
+        --release) configuration="Release" ;;
         --run) launch=true ;;
         *) echo "macos: unknown argument '$arg' (expected --debug, --release or --run)" >&2; exit 1 ;;
     esac
 done
 
-if [[ "$profile" == "release" ]]; then
+if [[ "$configuration" == "Release" ]]; then
     cargo build --release -p sift-abi
-    swift_flags=(-c release)
 else
     cargo build -p sift-abi
-    swift_flags=()
 fi
+
+# The project links `target/{debug,release}/libsift_abi.a` by configuration. `CARGO_BUILD_TARGET`
+# moves cargo's output under `target/$TARGET/` without moving the link path, so the archive the
+# linker finds would be whatever an earlier untargeted build happened to leave there — which is
+# the stale-declaration failure the header step below exists to prevent, arriving by the other
+# door. Neither is worth diagnosing twice.
+if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
+    echo "macos: CARGO_BUILD_TARGET is set ($CARGO_BUILD_TARGET), so cargo wrote libsift_abi.a" >&2
+    echo "       under target/$CARGO_BUILD_TARGET/ while this project links target/{debug,release}." >&2
+    echo "       Unset it for this task rather than linking whatever is stale there." >&2
+    exit 1
+fi
+
+archive="target/$([[ "$configuration" == "Release" ]] && echo release || echo debug)/libsift_abi.a"
+[[ -f "$archive" ]] || {
+    echo "macos: $archive is missing after the cargo build above." >&2
+    exit 1
+}
 
 # D-60 — the committed header matches the ABI crate. `mise run bless-header` regenerates it.
 cargo xtask header
 
-swift build "${swift_flags[@]}" --package-path shells/macos
+xcodegen generate --spec shells/macos/project.yml --project shells/macos --quiet
+
+# Every build setting lives in project.yml rather than on this command line, for the same
+# reason this task exists at all: a flag written twice is a flag that disagrees with itself.
+xcodebuild \
+    -project shells/macos/Sift.xcodeproj \
+    -scheme Sift \
+    -configuration "$configuration" \
+    -derivedDataPath shells/macos/.build/xcode \
+    build
+
+app="shells/macos/.build/xcode/Build/Products/$configuration/Sift.app"
+# The identifier register in `docs/product/platform-baseline.md`, consumed once for the life
+# of the project. `project.yml` sets the same string; this is how the task addresses it.
+bundle_id="net.justinchung.sift"
+echo "macos: built $app"
 
 if [[ "$launch" == true ]]; then
-    # An accessory application: it appears in the menu bar, not the dock, and opens no window
-    # until an account exists — the account-less state *is* the add-account flow, because an
-    # empty inbox tells a new user the product is broken.
-    echo "macos: launching — look for the envelope in the menu bar, not the dock"
-    exec "shells/macos/.build/$profile/SiftShell"
+    # LaunchServices reports canonical paths; `$PWD` is whatever MISE_PROJECT_ROOT said. A
+    # checkout reached through a symlink makes those two different strings for one directory.
+    bundle="$(cd "$(dirname "$app")" && pwd -P)/$(basename "$app")"
+
+    running_pid() { lsappinfo info -only pid -app "$bundle_id" 2>/dev/null | sed -n 's/^"pid"=\([0-9][0-9]*\).*/\1/p'; }
+    running_bundle() { lsappinfo info -only bundlepath -app "$bundle_id" 2>/dev/null | sed -n 's/^"LSBundlePath"="\(.*\)"$/\1/p'; }
+
+    # **Identity here is the bundle identifier, not a path.** D-45 gives every channel one
+    # identifier, so at most one Sift can meaningfully be running whatever produced it, and
+    # `open` resolves an already-running application by that identifier too. Matching this
+    # build's own path instead would miss the other configuration, an installed copy, or this
+    # very checkout reached through a symlink — and `open` would then bring *that* one forward
+    # while this task reported the build it did not launch.
+    if [[ -n "$(running_pid)" ]]; then
+        echo "macos: quitting the running $bundle_id first"
+        echo "       $(running_bundle)"
+        # A quit request and not a signal, so the ordinary termination path runs and D-70's
+        # bounded teardown happens. This is a mail client; SIGTERM would skip all of it.
+        osascript -e "quit app id \"$bundle_id\"" >/dev/null 2>&1 || true
+        for _ in $(seq 1 100); do
+            if [[ -z "$(running_pid)" ]]; then break; fi
+            sleep 0.1
+        done
+        if [[ -n "$(running_pid)" ]]; then
+            echo "macos: it is still running after ten seconds. Quit it and re-run." >&2
+            exit 1
+        fi
+    fi
+
+    open "$bundle"
+
+    # `open` returns before the process is up, and the failure this task used to have was
+    # claiming a launch it never confirmed. Confirm it, and confirm it is *this* bundle.
+    pid=""
+    for _ in $(seq 1 100); do
+        pid="$(running_pid)"
+        if [[ -n "$pid" ]]; then break; fi
+        sleep 0.1
+    done
+
+    if [[ -z "$pid" ]]; then
+        echo "macos: nothing answered to $bundle_id within ten seconds." >&2
+        echo "       Try \`open '$bundle'\` directly to see what the launch machinery says." >&2
+        exit 1
+    fi
+
+    launched="$(running_bundle)"
+    if [[ "$launched" != "$bundle" ]]; then
+        echo "macos: $bundle_id is running from somewhere else — $launched" >&2
+        echo "       That is not the build this task just produced." >&2
+        exit 1
+    fi
+
+    echo "macos: launched $bundle (pid $pid)"
+    echo "       A window opens and Sift joins the dock while it is there. The envelope is in"
+    echo "       the menu bar too, when the bar has room for it."
+    echo "       Closing the window does not quit — that is FR-25, and the menu-bar item is how"
+    echo "       you get back or leave deliberately."
 fi
