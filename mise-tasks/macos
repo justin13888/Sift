@@ -140,6 +140,14 @@ xcodegen generate --spec shells/macos/project.yml --project shells/macos --quiet
 
 # Every build setting lives in project.yml rather than on this command line, for the same
 # reason this task exists at all: a flag written twice is a flag that disagrees with itself.
+#
+# **`env -u` is doing real work.** `xcodebuild` treats an exported variable as a build-setting
+# override, so a build run from this shell would pick up `SIFT_OAUTH_CLIENT_ID` and
+# `SIFT_OAUTH_SCHEME` whether or not the project wires them — which is exactly how the previous
+# arrangement appeared to work while wiring nothing, and it would make the check below compare
+# this shell against itself. Unsetting them for the build leaves the xcconfig as the only route,
+# so the check afterwards is a statement about the project rather than about this environment.
+env -u SIFT_OAUTH_CLIENT_ID -u SIFT_OAUTH_SCHEME \
 xcodebuild \
     -project shells/macos/Sift.xcodeproj \
     -scheme Sift \
@@ -172,9 +180,20 @@ fi
 # Every scheme the bundle claims, one per line. The derived one has to be among them, and on a
 # build with no client that *is* Sift's own — which is why this compares against the resolved
 # scheme rather than requiring two entries.
-built_schemes="$(plutil -extract CFBundleURLTypes json -o - "$plist" 2>/dev/null \
-    | python3 -c 'import json,sys; [print(s) for t in json.load(sys.stdin) for s in t.get("CFBundleURLSchemes", [])]' \
-    || true)"
+# `plutil` alone, walked by index. Piping the JSON through an interpreter would make a build
+# gate depend on a tool nothing declares, and its absence would fail this check with the wrong
+# reason — a correct bundle rejected for a cause that is not true, which is the class of error
+# this whole task now exists to stop.
+built_schemes=""
+for i in 0 1 2 3 4 5 6 7; do
+    entry="$(plutil -extract "CFBundleURLTypes.$i.CFBundleURLSchemes" raw -o - "$plist" 2>/dev/null || true)"
+    [[ -n "$entry" ]] || continue
+    for j in 0 1 2 3; do
+        scheme="$(plutil -extract "CFBundleURLTypes.$i.CFBundleURLSchemes.$j" raw -o - "$plist" 2>/dev/null || true)"
+        [[ -n "$scheme" ]] || continue
+        built_schemes+="$scheme"$'\n'
+    done
+done
 if ! grep -qxF "$SIFT_OAUTH_SCHEME" <<<"$built_schemes"; then
     echo "macos: the bundle does not register the callback scheme this build derived." >&2
     echo "       expected: $SIFT_OAUTH_SCHEME" >&2
@@ -220,7 +239,13 @@ if [[ "$launch" == true ]]; then
     # removes the disagreement; the shell checks the result at runtime either way.
     lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
     if [[ -x "$lsregister" ]]; then
-        "$lsregister" -f "$bundle"
+        # Guarded: it is a private tool and exits non-zero in ordinary situations, and under
+        # `set -e` that would abort a successful build with no message — the silent failure the
+        # branch below congratulates itself for avoiding.
+        "$lsregister" -f "$bundle" || {
+            echo "macos: lsregister refused to re-register the bundle." >&2
+            echo "       Sift checks the registration itself before starting a sign-in." >&2
+        }
     else
         echo "macos: lsregister is not where it used to be, so the bundle was not re-registered." >&2
         echo "       Sift checks the registration itself before starting a sign-in, so this is" >&2

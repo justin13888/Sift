@@ -360,8 +360,6 @@ pub struct SiftUndoable<'a> {
     pub intent: SiftStr<'a>,
 }
 
-/// D-36 — begin an authorization, and hand back the address to open in a browser.
-///
 /// How many accounts this installation has — including the ones a previous run added.
 ///
 /// **A shell asks rather than counting what it has seen.** The macOS shell kept a counter that
@@ -429,6 +427,8 @@ pub unsafe extern "C" fn sift_callback_scheme(
     }
 }
 
+/// D-36 — begin an authorization, and hand back the address to open in a browser.
+///
 /// **The scheme registration is checked before the user goes anywhere.** Discovering it
 /// afterwards means they have already granted consent and returned to nothing, and the
 /// resulting page is a browser error rather than anything Sift can explain.

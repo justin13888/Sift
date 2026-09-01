@@ -455,11 +455,6 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// The container the application's files live under.
-    ///
-    /// Application Support rather than Caches, because the layout MUST NOT live anywhere the
-    /// operating system may purge on its own. Under the sandbox this already resolves inside
-    /// the app's own container; outside it, the bundle identifier keeps it to itself.
     /// The OAuth client this bundle was built with, or the empty string where there is none.
     ///
     /// A build with none is a legitimate state: it runs against the recorded corpus and says
@@ -482,6 +477,11 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             .filter { !$0.isEmpty }
     }
 
+    /// The container the application's files live under.
+    ///
+    /// Application Support rather than Caches, because the layout MUST NOT live anywhere the
+    /// operating system may purge on its own. Under the sandbox this already resolves inside
+    /// the app's own container; outside it, the bundle identifier keeps it to itself.
     private static func containerRoot() -> String? {
         guard
             let base = FileManager.default.urls(

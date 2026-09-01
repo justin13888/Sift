@@ -26,7 +26,6 @@ final class AddAccountWindow: NSWindowController {
     private let app: OpaquePointer
     private let onAdded: () -> Void
     private let status = NSTextField(labelWithString: "")
-    private var pending: String?
 
     /// The OAuth client this build was configured with, from the bundle.
     ///
@@ -144,14 +143,17 @@ final class AddAccountWindow: NSWindowController {
     }
 
     @objc private func connect() {
-        guard let client = AddAccountWindow.clientID else { return }
+        guard AddAccountWindow.clientID != nil else { return }
 
         // The scheme the callback will arrive on, derived by the layer from the configured
         // client. Not derived here: D-17 exists to stop the two shells growing two answers to
         // which scheme a provider accepts, and this one is not the obvious answer — the client
         // identifier reversed, for the only client type compatible with NFR-24.
         var schemeOut = SiftStr()
-        guard sift_callback_scheme(UnsafeMutablePointer(app), &schemeOut) == Ok else { return }
+        guard sift_callback_scheme(UnsafeMutablePointer(app), &schemeOut) == Ok else {
+            status.stringValue = "Sift could not work out where this sign-in would come back to."
+            return
+        }
         let scheme = SiftText.string(schemeOut)
 
         var url = SiftStr()
@@ -173,7 +175,6 @@ final class AddAccountWindow: NSWindowController {
             return
         }
 
-        pending = client
         status.stringValue = "Waiting for your browser…"
 
         // **The reply comes back to this process, not through the operating system.**
@@ -191,20 +192,28 @@ final class AddAccountWindow: NSWindowController {
         // platform's rather than the operating system's.
         let session = ASWebAuthenticationSession(url: address, callbackURLScheme: scheme) {
             [weak self] callback, error in
-            guard let self else { return }
-            self.session = nil
-            guard let callback else {
-                // A user who closed the browser said no. It must not present as a failure.
-                if let error = error as? ASWebAuthenticationSessionError,
-                    error.code == .canceledLogin
-                {
-                    self.status.stringValue = "Sign-in was cancelled. You can try again."
-                } else {
-                    self.status.stringValue = "That sign-in did not complete. You can try again."
+            // **On the main loop, like every other callback this shell receives from outside
+            // it.** Apple does not document the queue this handler runs on, and what it does is
+            // main-thread-only either way: it sets an AppKit label, and it calls into the layer,
+            // whose boundary is D-48's single-threaded one. The hop also takes the release of
+            // the session out of the session's own completion, which would otherwise free the
+            // block that is still running.
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.session = nil
+                guard let callback else {
+                    // A user who closed the browser said no. It must not present as a failure.
+                    if let error = error as? ASWebAuthenticationSessionError,
+                        error.code == .canceledLogin
+                    {
+                        self.status.stringValue = "Sign-in was cancelled. You can try again."
+                    } else {
+                        self.status.stringValue = "That sign-in did not complete. You can try again."
+                    }
+                    return
                 }
-                return
+                self.callbackArrived(callback.absoluteString)
             }
-            self.callbackArrived(callback.absoluteString)
         }
         session.presentationContextProvider = self
         // Not ephemeral, which is the default and is stated because it is a decision: the

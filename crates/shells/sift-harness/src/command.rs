@@ -131,8 +131,12 @@ fn account(app: &mut App, args: &[&str]) -> Output {
             // a batch answered out of order cannot be arranged against a real account on
             // demand, and a shell drivable only against one would leave every one of them
             // untested end to end.
+            // Recorded as replayed rather than as a provider, because that is what a later
+            // run reconnects it by. Adding it through `add_provider_account` put it in the
+            // container under the kind that means "reach this over the network with a
+            // credential", and a restored corpus account has neither and needs neither.
             let adapter = sift_app::authorize::replayed();
-            let id = app.add_provider_account(name, adapter)?;
+            let id = app.add_account_of_kind(name, adapter, sift_app::REPLAYED_KIND)?;
             Ok(vec![format!("added `{name}` (replayed)  id={id}")])
         }
         ["authorize", name, client_id] => {

@@ -77,6 +77,50 @@ fn a_real_account_in_a_build_with_no_client_says_that_rather_than_nothing() {
 }
 
 #[test]
+fn a_container_written_before_the_corpus_had_its_own_kind_is_not_taken_to_the_network() {
+    // Every replayed account added before `REPLAYED_KIND` existed is recorded as a provider.
+    // Reconnecting one must not build a transport and ask for a refresh: it has no credentials
+    // and never had any, and the honest answer names the account rather than a missing keychain
+    // item. This is what a developer's existing container looks like.
+    let mut app = App::new();
+    let adapter = sift_app::authorize::replayed();
+    app.add_account_of_kind("fixtures", adapter, PROVIDER_KIND)
+        .expect("added");
+    as_if_restarted(&mut app, "fixtures");
+
+    // The reachable assertion without a credential store this test can control: it does not
+    // reconnect, and it does not report a corpus account as something it is not. `App` binds
+    // the platform keychain, so the branch that distinguishes "no credentials" from "no client"
+    // is not covered here — reaching it would prompt on a developer's machine.
+    let why = app
+        .reconnect("fixtures")
+        .expect_err("it cannot be reconnected");
+    assert!(!why.contains("capability shape"), "{why}");
+    assert!(app.account("fixtures").expect("open").adapter.is_none());
+}
+
+#[test]
+fn an_unrecognised_kind_is_treated_as_a_provider_rather_than_as_a_shape() {
+    // The registry column holds a name, and it will hold a real provider kind as soon as there
+    // is a second provider. A `reconnect` that branched on the literal `"provider"` would then
+    // report every real account as a capability shape — so the arm that refuses is the one
+    // that recognises a *shape*, not the one that recognises a provider.
+    let mut app = App::new();
+    let adapter = sift_app::authorize::replayed();
+    app.add_account_of_kind("work", adapter, "some-future-provider")
+        .expect("added");
+    as_if_restarted(&mut app, "work");
+
+    let why = app
+        .reconnect("work")
+        .expect_err("it has no credentials here");
+    assert!(
+        !why.contains("capability shape"),
+        "an account with a provider was reported as a shape: {why}"
+    );
+}
+
+#[test]
 fn a_capability_shape_is_not_something_that_can_be_reconnected() {
     // A shape is a store and a queue with no provider, which the planner tests are driven
     // against. Reconnecting one would mean inventing a provider it never had.

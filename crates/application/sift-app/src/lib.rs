@@ -503,10 +503,15 @@ impl App {
             )
             .map_err(|e| e.to_string())?;
         // A shape account has no provider to enumerate folders, so it is given the one it
-        // needs. **A provider account is not**: D-83 assigns local identity on first
+        // needs. **An account with an adapter is not**: D-83 assigns local identity on first
         // discovery, and pre-seeding a folder here would give the enumeration a row it did
         // not create and a remote identifier it did not choose.
-        if shape != "provider" {
+        //
+        // The test is whether this is a *shape*, not whether it is the literal `"provider"`.
+        // It was the latter, and the recorded corpus getting a kind of its own immediately
+        // put a phantom inbox in front of an adapter that enumerates four folders — which the
+        // harness's own session test caught. A second provider's kind would have done the same.
+        if shape_named(shape).is_ok() {
             store
                 .store
                 .execute(
@@ -779,16 +784,41 @@ impl App {
             .first()
             .ok_or("this build has no provider adapters")?;
 
+        // **Not a `match` over provider names.** The registry column is documented as a name
+        // rather than something to branch on, and it will hold a real provider kind as soon as
+        // there is a second one — so this asks the two questions it can answer instead. Is it
+        // the recorded corpus? Is it one of the capability shapes the planner tests use? Every
+        // other value is an account with a provider behind it, which keeps a future `gmail`
+        // out of the arm that reports it as a shape.
         let adapter = if kind == REPLAYED_KIND {
             descriptor.replayed()
-        } else if kind == PROVIDER_KIND {
+        } else if shape_named(&kind).is_ok() {
+            return Err(format!(
+                "`{name}` is a capability shape rather than an account with a provider"
+            ));
+        } else {
+            // A container written before the corpus had a kind of its own records a fixture
+            // account as a provider. It has no credentials, and asking the store first is what
+            // turns that into a sentence naming the account rather than a store error naming
+            // an item — and what keeps a network transport from being built for a flow that
+            // cannot happen.
+            // The local question first, so a build with no client never reaches the credential
+            // store — which on this platform means never prompting for keychain access to
+            // answer something already decided.
             if self.oauth_client_id.is_empty() {
                 return Err(
-                    "this build has no OAuth client configured, so an account it did not add                      cannot be reached"
+                    "this build has no OAuth client configured, so an account it did not add \
+                     cannot be reached"
                         .to_owned(),
                 );
             }
             let id = self.account(name)?.id;
+            if self.broker.usable(id).is_err() {
+                return Err(format!(
+                    "`{name}` has no stored credentials, so it cannot be reached. \
+                     Remove it and add it again."
+                ));
+            }
             let registration =
                 authorize::registration(authorize::default_kind(), &self.oauth_client_id.clone())?;
             let mut transport = sift_http::Https::to(&registration.profile.token.host)
@@ -800,10 +830,6 @@ impl App {
             descriptor
                 .connect(&pair.access)
                 .map_err(|e| e.to_string())?
-        } else {
-            return Err(format!(
-                "`{name}` is a capability shape rather than an account with a provider"
-            ));
         };
 
         self.account(name)?.adapter = Some(adapter);
