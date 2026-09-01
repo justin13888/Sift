@@ -112,10 +112,24 @@ echo '123456789-abcdef.apps.googleusercontent.com' > shells/macos/oauth-client.t
 mise run macos -- --run
 ```
 
-The build derives the callback scheme from the client (`com.googleusercontent.apps.123456789-abcdef`)
-and registers it in the bundle, and prints both so you can check them against the console.
+The build derives the callback scheme from the client (`com.googleusercontent.apps.123456789-abcdef`),
+registers it in the bundle, then **reads the built bundle back** and fails if it is not there —
+so a build that would have sent you to a browser you could not return from stops here instead.
+It prints the client, the scheme, and the scheme the bundle actually registers:
+
+```
+macos: OAuth client 123456789-abcdef.apps.googleusercontent.com
+       callback scheme com.googleusercontent.apps.123456789-abcdef
+       registers  com.googleusercontent.apps.123456789-abcdef
+```
+
 There is **no client secret** to store: a public client cannot keep one, which is what PKCE
-replaces it with.
+replaces it with. If the console offered you one, you created a *Web application* or *Desktop
+app* client — neither accepts a scheme redirect, and the iOS type has no secret to give.
+
+Sift checks the registration again at launch, and refuses to start a sign-in where its bundle
+does not claim the scheme its client requires — before opening a browser, rather than after you
+have granted consent.
 
 **3. Watch before you write.** The account is added read-only. Let it sync, read some mail,
 archive something, then open **Runtime** (turn it on in Settings first — it is off by default)
