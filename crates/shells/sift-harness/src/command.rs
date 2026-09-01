@@ -21,7 +21,7 @@ pub fn run(app: &mut App, line: &str) -> Output {
     // D-24: the tag is task-scoped and re-established at each boundary, not set once. A
     // command is this shell's equivalent of a stage boundary.
     let subsystem = match verb {
-        "ingest" | "list" | "folders" | "watch" => Subsystem::Store,
+        "ingest" | "list" | "row" | "folders" | "watch" => Subsystem::Store,
         "do" | "queue" | "flush" | "restart" => Subsystem::Mutations,
         "actions" | "select" | "open" => Subsystem::Presentation,
         "sync" => Subsystem::Sync,
@@ -39,6 +39,7 @@ fn dispatch(app: &mut App, verb: &str, rest: &[&str]) -> Output {
         "account" => account(app, &rest),
         "ingest" => ingest(app, &rest),
         "list" => list(app, &rest),
+        "row" => row(app, &rest),
         "select" => select(app, &rest),
         "open" => open(app, &rest),
         "window" => window(app, &rest),
@@ -72,6 +73,7 @@ fn help() -> Vec<String> {
         "net [account]                                    bytes on the wire (FR-36)",
         "ingest <account> <subject>...                    ingest a message (delivered)",
         "list [account]                                   the message list, read THROUGH the overlay",
+        "row <account>                                    FR-6's fields, as a shell receives them",
         "select <id>...                                   set the selection (D-99, keyed on identity)",
         "open <id|#n>                                     open a message in the reader",
         "window <open|close>                              a window exists, or does not",
@@ -201,25 +203,17 @@ fn list(app: &mut App, args: &[&str]) -> Output {
     let mut out = Vec::new();
     for name in names {
         let a = app.account(&name)?;
-        // D-51: everything the user sees reads **through** the overlay. A read path that
-        // forgets shows the server's opinion instead of the user's.
-        let overlay = a.queue.overlay();
-        // Read back out of the store, in D-55's order, rather than out of a map the
-        // harness kept — otherwise the ordering this prints would prove nothing.
-        let rows = sift_app::list_messages(a)?;
-        for (id, subject) in &rows {
-            let pending = overlay.for_message(*id);
-            if pending.iter().any(|i| i.removes_from_view()) {
-                // Optimistically gone. The row left the list before any round trip — NFR-7.
-                continue;
-            }
-            let marks: Vec<&str> = pending.iter().map(Intent::name).collect();
-            let suffix = if marks.is_empty() {
+        // D-51 and D-55 both live in the projection now, rather than being reimplemented
+        // here: a shell that reads through the overlay itself is a shell that can disagree
+        // with the other one about what a person sees.
+        let rows = sift_app::rows::message_rows(a, L_LIST)?;
+        for row in &rows {
+            let suffix = if row.pending.is_empty() {
                 String::new()
             } else {
-                format!("   [pending: {}]", marks.join(", "))
+                format!("   [pending: {}]", row.pending.join(", "))
             };
-            out.push(format!("{name}  {id}  {subject}{suffix}"));
+            out.push(format!("{name}  {}  {}{suffix}", row.id, row.subject));
         }
     }
     if out.is_empty() {
@@ -227,6 +221,45 @@ fn list(app: &mut App, args: &[&str]) -> Output {
     }
     Ok(out)
 }
+
+/// FR-6's row, field by field, as it crosses the boundary.
+///
+/// `list` prints what a person recognises; this prints what a shell is actually handed, so a
+/// test can assert the fields rather than the sentence they were formatted into.
+fn row(app: &mut App, args: &[&str]) -> Output {
+    let [name] = args else {
+        return Err("row <account>".to_owned());
+    };
+    let account = app.account(name)?;
+    let rows = sift_app::rows::message_rows(account, L_LIST)?;
+    let mut out = Vec::new();
+    for r in &rows {
+        out.push(format!(
+            "{}  received={} origination={} unread={} flagged={} attachments={} thread={} \
+             sender={} subject={} snippet={}",
+            r.id,
+            r.received_millis,
+            r.origination_millis,
+            r.unread,
+            r.flagged,
+            r.has_attachments,
+            r.thread_count,
+            r.sender,
+            r.subject,
+            r.snippet,
+        ));
+    }
+    if out.is_empty() {
+        out.push("(empty)".to_owned());
+    }
+    Ok(out)
+}
+
+/// How many rows a harness listing asks for.
+///
+/// A window rather than everything, because the projection is windowed and a harness that
+/// asked for an unbounded set would be exercising a path no shell uses.
+const L_LIST: u32 = 500;
 
 fn parse_id(s: &str) -> Result<LocalId, String> {
     u128::from_str_radix(s, 16)

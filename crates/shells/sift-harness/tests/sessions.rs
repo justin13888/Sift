@@ -574,3 +574,98 @@ fn an_account_with_no_provider_behind_it_still_drives_the_queue() {
     ]);
     assert!(out.contains("1 intent(s) moved to Reconciling"), "{out}");
 }
+
+// ---------------------------------------------------------------------------
+// FR-6's row, as a shell receives it. `list` prints a sentence a person
+// recognises; these assert the fields the sentence was formatted from, because
+// a shell binds to the fields.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_list_is_ordered_by_the_time_the_server_assigned_and_not_the_one_the_sender_claimed() {
+    // D-55. The `Date` header is the sender's claim and is trivially forged; ordering on it
+    // would let anyone put their mail at the top of the list.
+    let mut cmds = live();
+    cmds.extend(["folders mail", "sync mail", "row mail"]);
+    let out = session(&cmds);
+
+    let received: Vec<u64> = out
+        .lines()
+        .filter_map(|l| l.split("received=").nth(1))
+        .filter_map(|r| r.split_whitespace().next())
+        .filter_map(|r| r.parse().ok())
+        .collect();
+    assert_eq!(received.len(), 3, "{out}");
+    assert!(
+        received.windows(2).all(|w| w[0] >= w[1]),
+        "newest first: {received:?}\n{out}"
+    );
+
+    // And the sender's own claim is carried beside it rather than being what was sorted on.
+    assert!(out.contains("origination="), "{out}");
+}
+
+#[test]
+fn a_thread_reports_how_many_messages_it_holds() {
+    // FR-6 lists a thread count among the row's fields, and D-54's reader is native rows
+    // over one body view — so the count is what tells a shell there are rows to draw.
+    let mut cmds = live();
+    cmds.extend(["folders mail", "sync mail", "row mail"]);
+    let out = session(&cmds);
+    assert!(out.contains("thread=2"), "the threaded pair: {out}");
+    assert!(
+        out.contains("thread=1"),
+        "the message that is its own thread: {out}"
+    );
+}
+
+#[test]
+fn read_state_comes_from_the_provider_before_anyone_has_touched_it() {
+    let mut cmds = live();
+    cmds.extend(["folders mail", "sync mail", "row mail"]);
+    let out = session(&cmds);
+    assert!(out.contains("unread=true"), "{out}");
+    assert!(out.contains("unread=false"), "{out}");
+}
+
+#[test]
+fn the_overlay_answers_for_read_state_before_the_server_has_been_told() {
+    // D-51 and NFR-7 together, on a field rather than on the row's presence. Marking a
+    // message read must show as read immediately — and it must do so without the base row
+    // in the store having changed, which is what makes it an overlay rather than a write.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "select #3",
+        "do message.mark-read",
+        "row mail",
+    ]);
+    let out = session(&cmds);
+    let marked = out
+        .lines()
+        .find(|l| l.contains("A receipt") && !l.contains("Re:"))
+        .unwrap_or_else(|| panic!("the row is missing:\n{out}"));
+    assert!(
+        marked.contains("unread=false"),
+        "the gesture had not reached the row:\n{marked}"
+    );
+}
+
+#[test]
+fn every_field_a_shell_draws_is_normalized_before_it_arrives() {
+    // NFR-54. Sender, subject and snippet are all attacker-controlled, and the threat model
+    // notes this path reaches native chrome where no sanitizer invariant sees it. The
+    // normalizer's isolate marks are the evidence it ran.
+    let mut cmds = live();
+    cmds.extend(["folders mail", "sync mail", "row mail"]);
+    let out = session(&cmds);
+    let row = out
+        .lines()
+        .find(|l| l.contains("subject="))
+        .unwrap_or_else(|| panic!("no row:\n{out}"));
+    assert!(
+        row.contains('\u{2068}') && row.contains('\u{2069}'),
+        "attacker-controlled text reached the row unisolated:\n{row}"
+    );
+}

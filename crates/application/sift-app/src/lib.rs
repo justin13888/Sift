@@ -17,6 +17,8 @@
 //! It holds no window, no selection and no observation. Those are the presentation layer's,
 //! which sits above this one.
 
+pub mod rows;
+
 use sift_foundation::identity::{AccountId, AccountOrdinal, LocalId, LocalIdGenerator};
 use sift_mutations::queue::Queue;
 use sift_provider::capability::{
