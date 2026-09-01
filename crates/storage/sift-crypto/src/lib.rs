@@ -4,4 +4,5 @@
 //! drop, which needs a volatile write so it is not elided as dead.
 
 pub mod address;
+pub mod derive;
 pub mod page;

@@ -327,6 +327,55 @@ by attempting to open the files afterwards. Under derivation the key is recomput
 still exists, so removal would have to be proven by the absence of files rather than by the absence of a
 key, which is a strictly weaker claim about a device that may hold backups.
 
+### D-106 — One key per *file*, derived by role from the key its owner holds
+
+**Chosen:** the credential item stays exactly as above — one account key, held directly — and the key a
+file is actually sealed under is **derived from it by role**, one role per file. The key identifier in
+each header is derived from the same owner by a separate context.
+**Rejected:** sealing an account's two files under the account key itself.
+
+**Why, and this corrects a defect rather than refining a preference.** D-76 derives its nonce as
+`page number ‖ write counter`, and the counter is part of *the file's own state* — it lives in that
+file's header and resumes above the persisted high-water mark. Within one file that is exactly right.
+
+But [D-74](data-model.md) gives every account **two** files, and the paragraphs above put one key over
+both. Each file independently issues counter 0 for its page 0, counter 1 for its page 1, and so on. Same
+key, same nonce, different plaintext — which is the one thing AES-GCM must never be asked to do. It costs
+confidentiality (identical keystream, so the two plaintexts are recoverable from each other) and
+authenticity along with it. The additional authenticated data binds the key identifier, which under one
+key is identical for both files, so it does not save it.
+
+It would also not have been noticed. D-76's own text says of this class of mistake that it *"does not
+fail a test, does not corrupt a file, and nothing observable goes wrong"*, and the test that walks the
+counter space walks a single file's, so it passes either way.
+
+Derivation by role closes it: identical `(page, counter)` pairs across the two files are harmless because
+they are under different keys.
+
+**What it does not change.** FR-4's proof is untouched, which is the property the paragraphs above chose
+this hierarchy for. The account key is still the one credential item, derivation is still one-way, and
+destroying that item still makes both files unreadable *by construction* rather than by a promise to
+overwrite them. Nothing here reintroduces the rejected reading: the owner of a derived key is the account
+key, never D-43's per-installation secret, so a lost secret still costs the blob store and not every
+account database.
+
+The same separation applies to the two installation-scoped files, whose owner **is** the per-installation
+secret — and that also domain-separates a secret D-43 otherwise uses both as a BLAKE3 key and as key
+material, with nothing between the two uses.
+
+**The contexts are permanent.** Changing one makes every file under it unreadable, which is a key
+destruction wearing the clothes of a refactor.
+
+**What it costs:** one more derivation per file open, and a closed role set that every new sealed file
+must be added to — an omission being a collision rather than a compile error, which is why the set is an
+enumeration rather than a free-form string.
+
+**Contestable because:** it adds a layer to a hierarchy whose whole argument above was that the simplest
+of three readings is the right one. The answer is that this is not a fourth reading of "wrapped by the
+credential store" — the credential item is unchanged and so is every property claimed for it — it is the
+separation between *what is stored* and *what a given file is sealed under*, which the original text did
+not distinguish because it was written before there were two files per account.
+
 **Rotation is lazy, and bounded by the identifier.** A rotation installs a new key, and pages are
 re-sealed under it as they are next written; both generations are readable while any page carries the old
 identifier, and the old key is destroyed only when none does. Eager rewriting of a 2 GB store on a
