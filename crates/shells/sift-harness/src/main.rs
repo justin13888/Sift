@@ -21,7 +21,6 @@
 //! deliberately terse and diagnostic rather than a rendering of the product.
 
 mod account;
-mod app;
 mod command;
 
 /// The harness installs the tagging allocator, because an attribution surface that is only
@@ -36,7 +35,7 @@ use std::io::{self, BufRead, Write};
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut app = app::App::new();
+    let mut app = sift_app::App::new();
 
     if args.is_empty() {
         return repl(&mut app);
@@ -49,7 +48,7 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn repl(app: &mut app::App) -> io::Result<()> {
+fn repl(app: &mut sift_app::App) -> io::Result<()> {
     let stdin = io::stdin();
     println!("sift-harness — `help` for commands, `quit` to leave");
     loop {
@@ -69,7 +68,7 @@ fn repl(app: &mut app::App) -> io::Result<()> {
     }
 }
 
-fn run_and_print(app: &mut app::App, line: &str) {
+fn run_and_print(app: &mut sift_app::App, line: &str) {
     match command::run(app, line) {
         Ok(output) => {
             for l in output {

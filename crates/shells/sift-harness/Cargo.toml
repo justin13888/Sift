@@ -37,6 +37,9 @@ sift-alloc.workspace = true
 # The register of what a user can add. It sits below every layer D-12's rule covers, so this
 # shell no longer names a provider at all — it resolves an opaque kind through the register.
 sift-registry.workspace = true
+# The assembled application. D-65's harness drives what a shell drives, rather than building
+# a second one beside it.
+sift-app.workspace = true
 sift-http.workspace = true
 sift-credentials.workspace = true
 sift-pipeline.workspace = true

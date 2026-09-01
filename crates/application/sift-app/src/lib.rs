@@ -1,4 +1,21 @@
-//! The application state a shell would hold, minus the window.
+//! The assembled application: accounts, their stores, their queues, and the adapters behind
+//! them.
+//!
+//! # Why this is not in a shell any more
+//!
+//! This was `sift-harness`'s `app` module, and it could not have been anywhere else. It holds
+//! an adapter, and until the error type was erased an adapter could only be held by naming
+//! the provider that defines its error — which D-12 forbids in `application`, `presentation`
+//! and `abi`, and `cargo xtask invariants` enforces. A shell was the one layer left.
+//!
+//! That was survivable while the harness was the only shell. It stops being survivable for
+//! the macOS shell, which is Swift: it cannot construct a Rust adapter, so it cannot assemble
+//! the application, so the application has to already exist below the boundary for it to
+//! reach. Two shells assembling their own would also be two applications, which is the drift
+//! `docs/architecture/shell-boundary.md` calls a defect.
+//!
+//! It holds no window, no selection and no observation. Those are the presentation layer's,
+//! which sits above this one.
 
 use sift_foundation::identity::{AccountId, AccountOrdinal, LocalId, LocalIdGenerator};
 use sift_mutations::queue::Queue;
@@ -7,9 +24,17 @@ use sift_provider::capability::{
     LocationCardinality, Magnitude, PushMechanism, SnippetSource, TagSupport, ThreadOperations,
     TrashSemantics,
 };
+use sift_provider::erased::ErasedAdapter;
 use sift_store::account::{Account, AccountPaths};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+/// The adapter an account is reached through.
+///
+/// Its error is erased, which is what lets this crate hold one at all: a
+/// `Box<dyn Adapter<Error = E>>` would force this layer to name `E`, and naming `E` names the
+/// provider D-12 forbids it from knowing.
+pub type Live = Box<dyn ErasedAdapter>;
 
 /// Insert an ingested message, and put it in the inbox.
 ///
@@ -86,6 +111,14 @@ pub fn list_messages(account: &OpenAccount) -> Result<Vec<(LocalId, String)>, St
 /// callback rather than being something the flush does for itself.
 pub struct Remote<'a>(pub &'a rusqlite::Connection);
 
+impl std::fmt::Debug for Remote<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A connection has no useful debug form and printing one is how a path or a
+        // statement ends up in a log NFR-23 says nothing may reach.
+        f.write_str("Remote(..)")
+    }
+}
+
 impl sift_mutations::flush::Resolve for Remote<'_> {
     fn message(&self, local: LocalId) -> Option<sift_provider::adapter::RemoteMessageId> {
         self.0
@@ -126,7 +159,7 @@ pub struct OpenAccount {
     /// `account` command knows which provider a live one is** — that question is asked once,
     /// when the user adds it, and after that every command plans against what the account
     /// declares.
-    pub adapter: Option<crate::account::Live>,
+    pub adapter: Option<Live>,
     /// The subject of each ingested message, so the harness can print something a person
     /// recognises. A shell would read this from the store; keeping it here keeps the
     /// harness's own printing out of the store's query paths.
@@ -197,11 +230,7 @@ impl App {
     /// Its capability set comes from the adapter rather than from a name, which is the
     /// difference between this and [`Self::add_account`]: a shape is something a test picks,
     /// and this is what an account actually declares.
-    pub fn add_provider_account(
-        &mut self,
-        name: &str,
-        adapter: crate::account::Live,
-    ) -> Result<AccountId, String> {
+    pub fn add_provider_account(&mut self, name: &str, adapter: Live) -> Result<AccountId, String> {
         let capabilities = adapter.capabilities().clone();
         let id = self.create_account(name, capabilities, "provider")?;
         self.accounts

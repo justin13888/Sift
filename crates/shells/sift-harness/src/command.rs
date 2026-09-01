@@ -2,7 +2,7 @@
 //! the action register by identifier — which is what makes this a shell rather than a
 //! script that happens to call the same crates.
 
-use crate::app::App;
+use sift_app::App;
 use sift_credentials::store::CredentialStore as _;
 use sift_foundation::identity::LocalId;
 use sift_mutations::intent::{Intent, State};
@@ -187,7 +187,7 @@ fn ingest(app: &mut App, args: &[&str]) -> Output {
     // Normalized once, here, before anything renders or indexes it — NFR-54.
     let display = sift_foundation::normalize::for_display(&subject);
     let stored = display.as_str().to_owned();
-    crate::app::insert_message(a, id, &stored, id.millis())?;
+    sift_app::insert_message(a, id, &stored, id.millis())?;
     a.subjects.insert(id, stored);
     Ok(vec![format!("{id}  delivered")])
 }
@@ -206,7 +206,7 @@ fn list(app: &mut App, args: &[&str]) -> Output {
         let overlay = a.queue.overlay();
         // Read back out of the store, in D-55's order, rather than out of a map the
         // harness kept — otherwise the ordering this prints would prove nothing.
-        let rows = crate::app::list_messages(a)?;
+        let rows = sift_app::list_messages(a)?;
         for (id, subject) in &rows {
             let pending = overlay.for_message(*id);
             if pending.iter().any(|i| i.removes_from_view()) {
@@ -278,7 +278,7 @@ fn visible_rows(app: &mut App) -> Result<Vec<(String, LocalId)>, String> {
     for name in names {
         let a = app.account(&name)?;
         let overlay = a.queue.overlay();
-        for (id, _) in crate::app::list_messages(a)? {
+        for (id, _) in sift_app::list_messages(a)? {
             if overlay
                 .for_message(id)
                 .iter()
@@ -574,7 +574,7 @@ fn flush(app: &mut App, args: &[&str]) -> Output {
         transaction.commit().map_err(|e| e.to_string())
     };
 
-    let resolve = crate::app::Remote(&account.store.store);
+    let resolve = sift_app::Remote(&account.store.store);
     let outcome = sift_mutations::flush::flush_once(
         adapter.as_ref(),
         &mut account.queue,
@@ -760,7 +760,7 @@ fn sync(app: &mut App, args: &[&str]) -> Output {
     // identity on discovery rather than on first use.
     fn turn(
         adapter: &crate::account::Live,
-        account: &mut crate::app::OpenAccount,
+        account: &mut sift_app::OpenAccount,
         pages: usize,
     ) -> Result<sift_sync::ingest::PageReport, sift_sync::run::RunError> {
         sift_sync::run::discover_folders(adapter.as_ref(), &account.store).and_then(|_| {

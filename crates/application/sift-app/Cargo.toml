@@ -1,0 +1,26 @@
+[package]
+name = "sift-app"
+description = "The assembled application: accounts, their stores, their queues, and the adapters behind them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sift-foundation.workspace = true
+sift-provider.workspace = true
+# The register, so that this layer resolves an opaque kind rather than naming a provider.
+# D-12 bans the name here and `cargo xtask invariants` enforces it.
+sift-registry.workspace = true
+sift-store.workspace = true
+sift-sync.workspace = true
+sift-mutations.workspace = true
+sift-credentials.workspace = true
+# D-21's engine, reached the same way the store reaches it. The application writes through
+# the store's own transactions rather than around them.
+rusqlite = { version = "0.37", features = ["bundled"] }

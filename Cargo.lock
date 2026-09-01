@@ -1676,6 +1676,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sift-app"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "sift-credentials",
+ "sift-foundation",
+ "sift-mutations",
+ "sift-provider",
+ "sift-registry",
+ "sift-store",
+ "sift-sync",
+]
+
+[[package]]
 name = "sift-blobs"
 version = "0.1.0"
 dependencies = [
@@ -1780,6 +1794,7 @@ version = "0.1.0"
 dependencies = [
  "rusqlite",
  "sift-alloc",
+ "sift-app",
  "sift-block",
  "sift-broker",
  "sift-credentials",
