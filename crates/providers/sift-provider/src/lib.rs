@@ -6,6 +6,7 @@
 
 pub mod adapter;
 pub mod capability;
+pub mod erased;
 pub mod oauth;
 pub mod rfc5322;
 
