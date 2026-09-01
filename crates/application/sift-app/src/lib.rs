@@ -22,6 +22,7 @@ pub mod authorize;
 pub mod container;
 pub mod document;
 pub mod rows;
+pub mod settings;
 
 use sift_foundation::condition::AccountCondition;
 use sift_foundation::identity::{AccountId, AccountOrdinal, LocalId, LocalIdGenerator};
@@ -768,6 +769,36 @@ impl App {
             container.set_writes_enabled(id, enabled)?;
         }
         Ok(())
+    }
+
+    /// What a setting currently holds — the recorded value, or D-101's default.
+    ///
+    /// # Errors
+    /// The key is not one this build has.
+    pub fn setting(&self, key: &str) -> Result<settings::Value, String> {
+        let setting = settings::by_key(key)
+            .ok_or_else(|| format!("`{key}` is not a setting this build has"))?;
+        let recorded = self
+            .container
+            .as_ref()
+            .and_then(|c| c.setting(key).ok().flatten());
+        Ok(recorded
+            .and_then(|text| setting.default.parse_like(&text))
+            .unwrap_or_else(|| setting.default.clone()))
+    }
+
+    /// Record a setting.
+    ///
+    /// # Errors
+    /// The key is unknown, the value is not one it can hold, it is security state, or there is
+    /// no container to record it in — which is the scratch mode, and saying so is better than
+    /// accepting a value that will not survive the process.
+    pub fn set_setting(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let container = self
+            .container
+            .as_mut()
+            .ok_or("this session has no container, so a setting would not survive it")?;
+        container.set_setting(key, value)
     }
 
     /// FR-4 — erase an account: its files, its registry row, and every credential item.

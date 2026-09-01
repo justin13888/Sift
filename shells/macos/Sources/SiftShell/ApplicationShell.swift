@@ -232,6 +232,18 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         case "app.quit":
             quit()
             return
+        case "app.open-settings":
+            guard let app else { return }
+            let window = settingsWindow ?? SettingsWindow(app: app)
+            settingsWindow = window
+            window.present()
+            return
+        case "app.open-runtime-panel":
+            guard let app else { return }
+            let panel = runtimePanel ?? RuntimePanel(app: app)
+            runtimePanel = panel
+            panel.present()
+            return
         case "app.close-window":
             NSApp.keyWindow?.performClose(nil)
             return
@@ -323,6 +335,8 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     @objc private func quit() { invoke("app.quit"); NSApp.terminate(nil) }
 
     private var addAccount: AddAccountWindow?
+    private var runtimePanel: RuntimePanel?
+    private var settingsWindow: SettingsWindow?
 
     /// **The account-less state is the add-account flow**, not an empty inbox with a hint in
     /// it. So first run is a screen, and this is where it opens.

@@ -99,6 +99,15 @@ pub(crate) struct Layer {
     /// started the flow, and a shell holding the client identifier and the address would be a
     /// shell that could be asked to complete a flow it did not begin.
     pub(crate) flows: Mutex<Flow>,
+    /// FR-34's tables. Held because their rows are borrowed, and replaced by each call rather
+    /// than accumulated — a debug panel that grew its own memory would be measuring itself.
+    pub(crate) queue_rows: Mutex<Vec<crate::entry::SiftQueued<'static>>>,
+    pub(crate) memory_rows: Mutex<Vec<crate::entry::SiftSubsystemBytes<'static>>>,
+    pub(crate) stage_rows: Mutex<Vec<crate::repr::SiftStr<'static>>>,
+    pub(crate) setting_rows: Mutex<Vec<crate::entry::SiftSetting<'static>>>,
+    /// The text the setting rows borrow. Held separately because the rows are `repr(C)` and
+    /// cannot own a `String`.
+    pub(crate) setting_values: Mutex<Vec<String>>,
 }
 
 /// One authorization in progress. Empty means none.

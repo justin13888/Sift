@@ -133,7 +133,15 @@ impl Container {
                  only_row       INTEGER PRIMARY KEY CHECK (only_row = 1),
                  next           INTEGER NOT NULL
              ) STRICT;
-             INSERT OR IGNORE INTO ordinal_watermark (only_row, next) VALUES (1, 0);",
+             INSERT OR IGNORE INTO ordinal_watermark (only_row, next) VALUES (1, 0);
+             CREATE TABLE IF NOT EXISTS setting (
+                 -- D-101's stable keys. A row exists only where the user has changed
+                 -- something: the default is in the code, and a table pre-filled with
+                 -- defaults would make a later change to one of them invisible to everyone
+                 -- who had ever opened the settings screen.
+                 key            TEXT PRIMARY KEY NOT NULL,
+                 value          TEXT NOT NULL
+             ) STRICT;",
         )
         .map_err(|e| format!("the registry schema: {e}"))?;
         Ok(conn)
@@ -246,6 +254,61 @@ impl Container {
         if changed == 0 {
             return Err(format!("no account {id} in the registry"));
         }
+        Ok(())
+    }
+
+    /// One installation setting, or `None` where the user has not changed it.
+    ///
+    /// **Absent means "the default", not "false".** A row exists only where somebody set
+    /// something, so a later change to a default reaches every installation that never touched
+    /// it — which is the point of not pre-filling the table.
+    ///
+    /// # Errors
+    /// The registry could not be read.
+    pub fn setting(&self, key: &str) -> Result<Option<String>, String> {
+        match self
+            .registry
+            .query_row("SELECT value FROM setting WHERE key = ?1", [key], |r| {
+                r.get::<_, String>(0)
+            }) {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Record an installation setting.
+    ///
+    /// # Errors
+    /// The registry refused, or the key is not one D-101 enumerates — an unknown key is a
+    /// refusal rather than a row, because a settings store that accepts anything is one that
+    /// accumulates keys nothing reads.
+    pub fn set_setting(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let setting = crate::settings::by_key(key)
+            .ok_or_else(|| format!("`{key}` is not a setting this build has"))?;
+        if setting.scope != crate::settings::Scope::Installation {
+            return Err(format!(
+                "`{key}` is an account setting, not an installation one"
+            ));
+        }
+        if setting.is_security_state {
+            // The per-sender lists are records of decisions made in context. They are shown
+            // and revoked from the surface where the decision was made, not bulk-edited here.
+            return Err(format!(
+                "`{key}` is security state and is not set through settings"
+            ));
+        }
+        setting
+            .default
+            .parse_like(value)
+            .ok_or_else(|| format!("`{value}` is not a value `{key}` can hold"))?;
+        self.registry
+            .execute(
+                "INSERT INTO setting (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![key, value],
+            )
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 

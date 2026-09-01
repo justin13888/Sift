@@ -156,6 +156,11 @@ pub unsafe extern "C" fn sift_initialize(
                 plans: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 next_plan: std::sync::Mutex::new(1),
                 flows: std::sync::Mutex::new(crate::layer::Flow::default()),
+                queue_rows: std::sync::Mutex::new(Vec::new()),
+                memory_rows: std::sync::Mutex::new(Vec::new()),
+                stage_rows: std::sync::Mutex::new(Vec::new()),
+                setting_rows: std::sync::Mutex::new(Vec::new()),
+                setting_values: std::sync::Mutex::new(Vec::new()),
             });
             Ok(Box::into_raw(layer).cast::<SiftApp>())
         })
@@ -405,6 +410,270 @@ pub unsafe extern "C" fn sift_complete_authorization(
             flows.client_id.clear();
             flows.url.clear();
             Ok(SiftId::from_u128(id.as_u128()))
+        })
+    }
+}
+
+/// D-101's settings: every one, with its scope, its default and what it currently holds.
+///
+/// **Enumerated across the boundary rather than known by each shell.** The surface is written
+/// twice, in Swift and in GTK, and a default chosen independently by two shells is two
+/// products — the ones that matter most being the ones that look least like decisions: the
+/// dark transform is off, the debug surfaces are off, and there is no data cap.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_settings(
+    app: *mut SiftApp,
+    out: *mut SiftRows<'static, SiftSetting<'static>>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let session = layer.session.lock().map_err(|_| ())?;
+            let held: Vec<(&'static sift_app::settings::Setting, String)> =
+                sift_app::settings::SETTINGS
+                    .iter()
+                    .map(|s| {
+                        let value = session
+                            .app()
+                            .setting(s.key)
+                            .unwrap_or_else(|_| s.default.clone());
+                        (s, value.as_text())
+                    })
+                    .collect();
+            drop(session);
+
+            let mut table = layer.setting_rows.lock().map_err(|_| ())?;
+            let mut values = layer.setting_values.lock().map_err(|_| ())?;
+            *values = held.iter().map(|(_, v)| v.clone()).collect();
+            *table = held
+                .iter()
+                .zip(values.iter())
+                .map(|((s, _), value)| SiftSetting {
+                    key: SiftStr::new(s.key),
+                    owner: SiftStr::new(s.owner),
+                    default: SiftStr::new(match &s.default {
+                        sift_app::settings::Value::Flag(true) => "true",
+                        sift_app::settings::Value::Flag(false) => "false",
+                        _ => "",
+                    }),
+                    value: SiftStr::new(extend(value)),
+                    kind: match s.default {
+                        sift_app::settings::Value::Flag(_) => SIFT_SETTING_FLAG,
+                        sift_app::settings::Value::Number(_) => SIFT_SETTING_NUMBER,
+                        sift_app::settings::Value::Text(_) => SIFT_SETTING_TEXT,
+                    },
+                    account_scoped: u8::from(s.scope == sift_app::settings::Scope::Account),
+                    security_state: u8::from(s.is_security_state),
+                })
+                .collect();
+            Ok(SiftRows::new(extend_rows(&table)))
+        })
+    }
+}
+
+/// Record a setting.
+///
+/// # Safety
+/// `app` must be valid; both strings must point to their lengths in UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_set_setting(
+    app: *mut SiftApp,
+    key: *const u8,
+    key_len: usize,
+    value: *const u8,
+    value_len: usize,
+) -> SiftStatus {
+    guard(|| {
+        // SAFETY: the caller's obligation.
+        let (key, value) = unsafe { (borrowed(key, key_len)?, borrowed(value, value_len)?) };
+        // SAFETY: as above.
+        let layer = (unsafe { layer(app) }).ok_or(())?;
+        let mut session = layer.session.lock().map_err(|_| ())?;
+        session.app_mut().set_setting(key, value).map_err(|_| ())
+    })
+}
+
+/// A boolean.
+pub const SIFT_SETTING_FLAG: u32 = 0;
+/// A count, a byte budget, or a duration in milliseconds. The unit is the setting's.
+pub const SIFT_SETTING_NUMBER: u32 = 1;
+pub const SIFT_SETTING_TEXT: u32 = 2;
+
+/// One setting, as D-101 enumerates it.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftSetting<'a> {
+    /// Stable, and never renumbered.
+    pub key: SiftStr<'a>,
+    /// Which requirement or decision owns it, so a settings screen can say *why* a thing is
+    /// there and a reviewer can find the argument rather than the value.
+    pub owner: SiftStr<'a>,
+    /// The shipped default, for flags. Empty for the other kinds, whose defaults are numbers
+    /// and lists a screen shows differently anyway.
+    pub default: SiftStr<'a>,
+    /// What it currently holds.
+    pub value: SiftStr<'a>,
+    pub kind: u32,
+    /// Whether it goes with the account under FR-4, rather than surviving every removal.
+    pub account_scoped: u8,
+    /// **Security state rather than a preference.** A record of decisions the user made in
+    /// context. A shell shows these and revokes from them; it does not offer bulk editing of
+    /// them in a screen away from any message.
+    pub security_state: u8,
+}
+
+/// FR-34's queue: what is durably enqueued, per account, by state.
+///
+/// **This is the surface a person uses to check that nothing was sent.** An account that is
+/// watched but not written to accumulates intents here, and being able to look at them — and
+/// see that every one is `Pending` — is what makes the read-only posture something a user can
+/// verify rather than something they are told.
+///
+/// The rows borrow from the layer and are replaced by the next call.
+///
+/// # Safety
+/// `app` and `out` must be valid; `account` must point to `account_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_queue(
+    app: *mut SiftApp,
+    account: *const u8,
+    account_len: usize,
+    out: *mut SiftRows<'static, SiftQueued<'static>>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let name = borrowed(account, account_len)?;
+            let layer = layer(app).ok_or(())?;
+            let held: Vec<(SiftId, &'static str, &'static str, u32, u64)> = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                let account = session.app_mut().account(name).map_err(|_| ())?;
+                account
+                    .queue
+                    .entries()
+                    .iter()
+                    .map(|e| {
+                        (
+                            SiftId::from_u128(e.message.as_u128()),
+                            e.intent.name(),
+                            e.state.name(),
+                            e.attempts,
+                            e.sequence,
+                        )
+                    })
+                    .collect()
+            };
+            let mut table = layer.queue_rows.lock().map_err(|_| ())?;
+            *table = held
+                .into_iter()
+                .map(|(message, intent, state, attempts, sequence)| SiftQueued {
+                    message,
+                    // Both are `'static` names from the register rather than borrowed text,
+                    // so unlike every other row here these outlive the table they sit in.
+                    intent: SiftStr::new(intent),
+                    state: SiftStr::new(state),
+                    attempts,
+                    sequence,
+                })
+                .collect();
+            Ok(SiftRows::new(extend_rows(&table)))
+        })
+    }
+}
+
+/// One durably enqueued intent, as FR-34 shows it.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftQueued<'a> {
+    pub message: SiftId,
+    /// FR-13's closed set, by name.
+    pub intent: SiftStr<'a>,
+    /// D-85's six states. `Pending` for everything on an account that is watched and not
+    /// written to — which is the whole point of being able to read this.
+    pub state: SiftStr<'a>,
+    pub attempts: u32,
+    /// Intents against one message apply strictly in this order. Always, including through
+    /// batching, retry and a restart.
+    pub sequence: u64,
+}
+
+/// FR-34's per-subsystem live bytes, and the residual nothing claimed.
+///
+/// The residual is reported rather than distributed. D-24's attribution is a tagging
+/// allocator, and a number that added up perfectly would mean the tagging was being papered
+/// over — an unattributed remainder is what an honest measurement of it looks like.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_memory(
+    app: *mut SiftApp,
+    out: *mut SiftRows<'static, SiftSubsystemBytes<'static>>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let mut table = layer.memory_rows.lock().map_err(|_| ())?;
+            *table = sift_subsystem::Subsystem::ALL
+                .iter()
+                .map(|s| SiftSubsystemBytes {
+                    name: SiftStr::new(s.name()),
+                    // Signed on the way across, because it is signed underneath: a subsystem
+                    // that frees in one task what another allocated reads negative, and
+                    // clamping it to zero would hide the one number that says the tagging is
+                    // wrong.
+                    live_bytes: sift_alloc::live_bytes(*s),
+                })
+                .collect();
+            table.push(SiftSubsystemBytes {
+                name: SiftStr::new("attributed"),
+                live_bytes: sift_alloc::total_attributed(),
+            });
+            Ok(SiftRows::new(extend_rows(&table)))
+        })
+    }
+}
+
+/// One subsystem's live bytes.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftSubsystemBytes<'a> {
+    pub name: SiftStr<'a>,
+    /// **Signed.** A subsystem that frees in one task what another allocated reads negative,
+    /// and clamping that to zero would hide the one number that says the tagging is wrong.
+    pub live_bytes: i64,
+}
+
+/// FR-33's debug view: which stages ran, over a document already open.
+///
+/// Available in release builds behind a preference, per FR-33 — the gating is the shell's,
+/// because the preference is the shell's.
+///
+/// # Safety
+/// `app` and `out` must be valid; `token` must point to `token_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_document_stages(
+    app: *mut SiftApp,
+    token: *const u8,
+    token_len: usize,
+    out: *mut SiftRows<'static, SiftStr<'static>>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let name = borrowed(token, token_len)?;
+            let layer = layer(app).ok_or(())?;
+            let open = layer.documents.lock().map_err(|_| ())?;
+            let held = open.get(name).ok_or(())?;
+            let mut table = layer.stage_rows.lock().map_err(|_| ())?;
+            *table = held
+                .document
+                .stages
+                .iter()
+                .map(|s| SiftStr::new(extend(s)))
+                .collect();
+            Ok(SiftRows::new(extend_rows(&table)))
         })
     }
 }
@@ -2290,6 +2559,71 @@ mod tests {
         );
         let _ = unsafe { sift_shutdown(app) };
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// FR-34's queue, across the boundary — and the sentence a person opens the runtime panel
+    /// to read: everything is `Pending`, so nothing has been sent.
+    #[test]
+    fn the_queue_shows_a_watched_accounts_triage_as_recorded_and_unsent() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        let _ = unsafe { sift_select(app, &raw const message, 1) };
+        assert_eq!(do_action(app, "message.archive"), SiftStatus::Ok);
+
+        let name = "mail";
+        let mut rows = SiftRows::empty();
+        assert_eq!(
+            unsafe { sift_queue(app, name.as_ptr(), name.len(), &raw mut rows) },
+            SiftStatus::Ok
+        );
+        assert_eq!(rows.len(), 1);
+        // SAFETY: the table is held by the layer until the next call.
+        let row = &unsafe { rows.as_slice() }[0];
+        assert_eq!(text(row.intent), "archive");
+        assert_eq!(
+            text(row.state),
+            "Pending",
+            "an account that is only watched must show nothing as issued"
+        );
+        assert_eq!(row.message, message);
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// D-24's attribution is a tagging allocator, so the numbers do not add up to the process
+    /// total — and reporting them as though they did would paper over exactly the gap the
+    /// tagging exists to measure.
+    #[test]
+    fn memory_is_reported_per_subsystem_and_the_total_is_reported_beside_it() {
+        let app = start(drop_it, scratch_str());
+        let mut rows = SiftRows::empty();
+        assert_eq!(unsafe { sift_memory(app, &raw mut rows) }, SiftStatus::Ok);
+        // SAFETY: the table is held by the layer.
+        let listed = unsafe { rows.as_slice() };
+        assert_eq!(listed.len(), sift_subsystem::Subsystem::ALL.len() + 1);
+        assert_eq!(text(listed[listed.len() - 1].name), "attributed");
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// FR-33 item 1: which stages ran, for a message that is open.
+    #[test]
+    fn the_debug_view_can_read_which_stages_ran_over_an_open_document() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        let token = text(open(app, message).token);
+
+        let mut rows = SiftRows::empty();
+        assert_eq!(
+            unsafe { sift_document_stages(app, token.as_ptr(), token.len(), &raw mut rows) },
+            SiftStatus::Ok
+        );
+        // SAFETY: the document is open.
+        let stages: Vec<String> = unsafe { rows.as_slice() }
+            .iter()
+            .map(|s| text(*s))
+            .collect();
+        assert!(stages.contains(&"sanitize".to_owned()), "{stages:?}");
+        assert!(stages.contains(&"filter".to_owned()), "{stages:?}");
+        let _ = unsafe { sift_shutdown(app) };
     }
 
     #[test]

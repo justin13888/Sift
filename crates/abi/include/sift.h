@@ -24,6 +24,18 @@
 #include <stdlib.h>
 
 /**
+ * A boolean.
+ */
+#define SIFT_SETTING_FLAG 0
+
+/**
+ * A count, a byte budget, or a duration in milliseconds. The unit is the setting's.
+ */
+#define SIFT_SETTING_NUMBER 1
+
+#define SIFT_SETTING_TEXT 2
+
+/**
  * The declared media type is an executable one.
  */
 #define SIFT_WARN_DECLARED 1
@@ -289,6 +301,147 @@ typedef struct {
    */
   SiftStr intent;
 } SiftUndoable;
+
+/**
+ * One setting, as D-101 enumerates it.
+ */
+typedef struct {
+  /**
+   * Stable, and never renumbered.
+   */
+  SiftStr key;
+  /**
+   * Which requirement or decision owns it, so a settings screen can say *why* a thing is
+   * there and a reviewer can find the argument rather than the value.
+   */
+  SiftStr owner;
+  /**
+   * The shipped default, for flags. Empty for the other kinds, whose defaults are numbers
+   * and lists a screen shows differently anyway.
+   */
+  SiftStr default_;
+  /**
+   * What it currently holds.
+   */
+  SiftStr value;
+  uint32_t kind;
+  /**
+   * Whether it goes with the account under FR-4, rather than surviving every removal.
+   */
+  uint8_t account_scoped;
+  /**
+   * **Security state rather than a preference.** A record of decisions the user made in
+   * context. A shell shows these and revokes from them; it does not offer bulk editing of
+   * them in a screen away from any message.
+   */
+  uint8_t security_state;
+} SiftSetting;
+
+/**
+ * A contiguous, borrowed array of fixed-layout records.
+ *
+ * The alternative — an opaque row handle with a per-field accessor — was excluded
+ * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
+ * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
+ * hundred thousand boundary crossings per fling, against one delivery.
+ *
+ * # Safety
+ *
+ * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
+ * pointing into layer-owned storage with the same lifetime.
+ */
+typedef struct {
+  const SiftSetting *ptr;
+  size_t len;
+} SiftRows_SiftSetting;
+
+/**
+ * One durably enqueued intent, as FR-34 shows it.
+ */
+typedef struct {
+  SiftId message;
+  /**
+   * FR-13's closed set, by name.
+   */
+  SiftStr intent;
+  /**
+   * D-85's six states. `Pending` for everything on an account that is watched and not
+   * written to — which is the whole point of being able to read this.
+   */
+  SiftStr state;
+  uint32_t attempts;
+  /**
+   * Intents against one message apply strictly in this order. Always, including through
+   * batching, retry and a restart.
+   */
+  uint64_t sequence;
+} SiftQueued;
+
+/**
+ * A contiguous, borrowed array of fixed-layout records.
+ *
+ * The alternative — an opaque row handle with a per-field accessor — was excluded
+ * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
+ * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
+ * hundred thousand boundary crossings per fling, against one delivery.
+ *
+ * # Safety
+ *
+ * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
+ * pointing into layer-owned storage with the same lifetime.
+ */
+typedef struct {
+  const SiftQueued *ptr;
+  size_t len;
+} SiftRows_SiftQueued;
+
+/**
+ * One subsystem's live bytes.
+ */
+typedef struct {
+  SiftStr name;
+  /**
+   * **Signed.** A subsystem that frees in one task what another allocated reads negative,
+   * and clamping that to zero would hide the one number that says the tagging is wrong.
+   */
+  int64_t live_bytes;
+} SiftSubsystemBytes;
+
+/**
+ * A contiguous, borrowed array of fixed-layout records.
+ *
+ * The alternative — an opaque row handle with a per-field accessor — was excluded
+ * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
+ * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
+ * hundred thousand boundary crossings per fling, against one delivery.
+ *
+ * # Safety
+ *
+ * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
+ * pointing into layer-owned storage with the same lifetime.
+ */
+typedef struct {
+  const SiftSubsystemBytes *ptr;
+  size_t len;
+} SiftRows_SiftSubsystemBytes;
+
+/**
+ * A contiguous, borrowed array of fixed-layout records.
+ *
+ * The alternative — an opaque row handle with a per-field accessor — was excluded
+ * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
+ * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
+ * hundred thousand boundary crossings per fling, against one delivery.
+ *
+ * # Safety
+ *
+ * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
+ * pointing into layer-owned storage with the same lifetime.
+ */
+typedef struct {
+  const SiftStr *ptr;
+  size_t len;
+} SiftRows_SiftStr;
 
 /**
  * D-49's eight conditions, in precedence order. Lower is worse.
@@ -805,6 +958,75 @@ SiftStatus sift_complete_authorization(SiftApp *app,
                                        const uint8_t *display_name,
                                        size_t display_name_len,
                                        SiftId *out);
+
+/**
+ * D-101's settings: every one, with its scope, its default and what it currently holds.
+ *
+ * **Enumerated across the boundary rather than known by each shell.** The surface is written
+ * twice, in Swift and in GTK, and a default chosen independently by two shells is two
+ * products — the ones that matter most being the ones that look least like decisions: the
+ * dark transform is off, the debug surfaces are off, and there is no data cap.
+ *
+ * # Safety
+ * `app` and `out` must be valid.
+ */
+SiftStatus sift_settings(SiftApp *app, SiftRows_SiftSetting *out);
+
+/**
+ * Record a setting.
+ *
+ * # Safety
+ * `app` must be valid; both strings must point to their lengths in UTF-8.
+ */
+SiftStatus sift_set_setting(SiftApp *app,
+                            const uint8_t *key,
+                            size_t key_len,
+                            const uint8_t *value,
+                            size_t value_len);
+
+/**
+ * FR-34's queue: what is durably enqueued, per account, by state.
+ *
+ * **This is the surface a person uses to check that nothing was sent.** An account that is
+ * watched but not written to accumulates intents here, and being able to look at them — and
+ * see that every one is `Pending` — is what makes the read-only posture something a user can
+ * verify rather than something they are told.
+ *
+ * The rows borrow from the layer and are replaced by the next call.
+ *
+ * # Safety
+ * `app` and `out` must be valid; `account` must point to `account_len` bytes of UTF-8.
+ */
+SiftStatus sift_queue(SiftApp *app,
+                      const uint8_t *account,
+                      size_t account_len,
+                      SiftRows_SiftQueued *out);
+
+/**
+ * FR-34's per-subsystem live bytes, and the residual nothing claimed.
+ *
+ * The residual is reported rather than distributed. D-24's attribution is a tagging
+ * allocator, and a number that added up perfectly would mean the tagging was being papered
+ * over — an unattributed remainder is what an honest measurement of it looks like.
+ *
+ * # Safety
+ * `app` and `out` must be valid.
+ */
+SiftStatus sift_memory(SiftApp *app, SiftRows_SiftSubsystemBytes *out);
+
+/**
+ * FR-33's debug view: which stages ran, over a document already open.
+ *
+ * Available in release builds behind a preference, per FR-33 — the gating is the shell's,
+ * because the preference is the shell's.
+ *
+ * # Safety
+ * `app` and `out` must be valid; `token` must point to `token_len` bytes of UTF-8.
+ */
+SiftStatus sift_document_stages(SiftApp *app,
+                                const uint8_t *token,
+                                size_t token_len,
+                                SiftRows_SiftStr *out);
 
 /**
  * D-49's annunciator: the one condition worth drawing, across every account.
