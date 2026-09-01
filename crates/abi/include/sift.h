@@ -249,12 +249,30 @@ typedef struct {
   SiftSchedule schedule;
   void *schedule_context;
   /**
-   * D-36 and D-71: whether the callback scheme is registered with the system.
+   * The OAuth client this bundle was configured with — empty where there is none.
    *
-   * Checked **before** an authorization begins rather than after, because discovering it
-   * afterwards means the user has already been sent to a browser and returned to nothing.
+   * **Configuration, not a secret.** A public client's identifier appears in every
+   * authorization URL it generates, which is why PKCE exists; D-88 forbids an embedded
+   * secret outright. It is stated once, here, rather than repeated at every call, because
+   * the layer needs it for three things a shell should not be answering separately.
    */
-  uint8_t scheme_is_registered;
+  SiftStr oauth_client_id;
+  /**
+   * Every URI scheme this shell's bundle claims, separated by newlines — D-36 and D-109.
+   *
+   * **A fact, not a conclusion, and the difference is the bug this replaced.** The macOS
+   * shell used to pass a boolean saying the scheme was registered, hardcoded to true beside
+   * a comment asserting the Info.plist did it. A configuration shipped without the derived
+   * scheme, the layer was told otherwise, D-71's refusal could not fire, and the failure
+   * surfaced as a browser page after the user had granted consent.
+   *
+   * A bundle is what registers a scheme, so only a shell can report this. Deciding what it
+   * *means* — which scheme this client requires, and whether it is among them — is the
+   * layer's, where the derivation already lives and where one rule serves both shells.
+   *
+   * A URI scheme cannot contain a newline, so this needs no escaping.
+   */
+  SiftStr registered_schemes;
 } SiftInit;
 
 /**
@@ -960,6 +978,31 @@ SiftStatus sift_undoable(SiftApp *app, SiftUndoable *out);
 /**
  * D-36 — begin an authorization, and hand back the address to open in a browser.
  *
+ * The URI scheme this client's authorization callback comes back on — D-36 and D-109.
+ *
+ * # Why a shell asks rather than derives
+ *
+ * It is one rule, and it is not the obvious one: a provider that lets an application name its
+ * own redirect gets Sift's scheme, and one that does not — Google's iOS/macOS client type is
+ * the case that forced this — accepts exactly one, the client identifier reversed. D-17 exists
+ * to stop two shells growing two answers to a question like that, so the derivation stays in
+ * `sift-foundation` and this is how a shell reaches it.
+ *
+ * It is derived from the client this installation was configured with, which the layer was
+ * given at initialization — so a shell that asks this and a flow that declares a redirect
+ * cannot answer differently.
+ *
+ * A shell needs it to tell the platform which scheme a callback will arrive on. It is empty
+ * where no client is configured, and a shell must not begin an authorization in that case.
+ *
+ * The string lives in the layer until the next call that asks for one.
+ *
+ * # Safety
+ * `app` and `out` must be valid.
+ */
+SiftStatus sift_callback_scheme(SiftApp *app, SiftStr *out);
+
+/**
  * **The scheme registration is checked before the user goes anywhere.** Discovering it
  * afterwards means they have already granted consent and returned to nothing, and the
  * resulting page is a browser error rather than anything Sift can explain.
@@ -968,13 +1011,14 @@ SiftStatus sift_undoable(SiftApp *app, SiftUndoable *out);
  * verifier behind it is: PKCE binds the exchange to the process that started it, and a shell
  * holding the state would be a shell that could be asked to complete a flow it did not begin.
  *
+ * The client is the one this installation was configured with, stated at initialization. It
+ * is not a parameter because it was one: a shell repeating it at every call is a shell that
+ * can disagree with the bundle it is running out of.
+ *
  * # Safety
- * `app` and `out` must be valid; `client_id` must point to `client_id_len` bytes of UTF-8.
+ * `app` and `out` must be valid.
  */
-SiftStatus sift_begin_authorization(SiftApp *app,
-                                    const uint8_t *client_id,
-                                    size_t client_id_len,
-                                    SiftStr *out);
+SiftStatus sift_begin_authorization(SiftApp *app, SiftStr *out);
 
 /**
  * Finish an authorization from the address the system handed back, and add the account.

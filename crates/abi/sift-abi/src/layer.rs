@@ -55,11 +55,27 @@ pub struct SiftInit {
     /// D-48's hop.
     pub schedule: SiftSchedule,
     pub schedule_context: *mut core::ffi::c_void,
-    /// D-36 and D-71: whether the callback scheme is registered with the system.
+    /// The OAuth client this bundle was configured with — empty where there is none.
     ///
-    /// Checked **before** an authorization begins rather than after, because discovering it
-    /// afterwards means the user has already been sent to a browser and returned to nothing.
-    pub scheme_is_registered: u8,
+    /// **Configuration, not a secret.** A public client's identifier appears in every
+    /// authorization URL it generates, which is why PKCE exists; D-88 forbids an embedded
+    /// secret outright. It is stated once, here, rather than repeated at every call, because
+    /// the layer needs it for three things a shell should not be answering separately.
+    pub oauth_client_id: crate::repr::SiftStr<'static>,
+    /// Every URI scheme this shell's bundle claims, separated by newlines — D-36 and D-109.
+    ///
+    /// **A fact, not a conclusion, and the difference is the bug this replaced.** The macOS
+    /// shell used to pass a boolean saying the scheme was registered, hardcoded to true beside
+    /// a comment asserting the Info.plist did it. A configuration shipped without the derived
+    /// scheme, the layer was told otherwise, D-71's refusal could not fire, and the failure
+    /// surfaced as a browser page after the user had granted consent.
+    ///
+    /// A bundle is what registers a scheme, so only a shell can report this. Deciding what it
+    /// *means* — which scheme this client requires, and whether it is among them — is the
+    /// layer's, where the derivation already lives and where one rule serves both shells.
+    ///
+    /// A URI scheme cannot contain a newline, so this needs no escaping.
+    pub registered_schemes: crate::repr::SiftStr<'static>,
 }
 
 /// The layer, as one process holds it.
@@ -132,6 +148,11 @@ pub(crate) struct SearchResult {
 pub(crate) struct Flow {
     pub(crate) client_id: String,
     pub(crate) url: String,
+    /// The callback scheme last asked for, kept alive for the string handed back.
+    ///
+    /// Separate from a flow's own lifetime on purpose: a shell asks for this *before* it
+    /// begins anything, to find out whether it can receive a callback at all.
+    pub(crate) scheme: String,
 }
 
 /// A message's attachment listing, and the rows borrowed from it.

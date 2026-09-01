@@ -221,13 +221,26 @@ pub struct App {
     pub selection: Vec<LocalId>,
     pub open_message: Option<LocalId>,
     pub has_window: bool,
-    /// D-71 — whether this shell's bundle registers the callback scheme with the system.
+    /// D-71 — whether the callback scheme this installation needs is one this shell claims.
     ///
-    /// The shell owns this fact and the layer is told, because a bundle is what registers a
-    /// scheme and the layer is not one. It gates the *start* of an authorization rather than
-    /// the end: discovering it afterwards means the user has already granted consent and come
-    /// back to nothing.
+    /// A bundle is what registers a scheme and the layer is not one, so the *fact* is the
+    /// shell's. The **conclusion** is not, and that distinction was bought: the macOS shell
+    /// used to pass a constant `true` beside a comment asserting its Info.plist registered the
+    /// scheme, and when a configuration shipped without it the layer was told the opposite of
+    /// the truth, D-71's refusal could not fire, and a user granted consent and came back to
+    /// nothing. Across the ABI a shell now reports the schemes it claims and the layer decides.
+    ///
+    /// It gates the *start* of an authorization rather than the end, which is the whole point:
+    /// discovering it afterwards means the browser page is the first anyone hears of it.
     pub scheme_is_registered: bool,
+    /// The OAuth client this installation is configured with — empty where there is none.
+    ///
+    /// Per-installation configuration rather than a secret: a public client's identifier
+    /// appears in every authorization URL it generates, which is why PKCE exists. The layer
+    /// holds it because three things need it and none of them should hold their own copy —
+    /// the scheme derivation, the authorization it begins, and the refresh that reconnects an
+    /// account the last run left behind.
+    pub oauth_client_id: String,
     pub root: Option<PathBuf>,
     /// The installation container, where one has been opened.
     ///
@@ -268,6 +281,7 @@ impl App {
             open_message: None,
             has_window: false,
             scheme_is_registered: false,
+            oauth_client_id: String::new(),
             root: None,
             container: None,
             next_intent: 0,

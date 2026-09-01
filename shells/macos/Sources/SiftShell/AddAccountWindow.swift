@@ -1,4 +1,5 @@
 import AppKit
+import AuthenticationServices
 import CSift
 
 /// The account-less state, which **is** the add-account flow rather than an empty inbox.
@@ -33,9 +34,12 @@ final class AddAccountWindow: NSWindowController {
     /// runs against the recorded corpus, which is how Sift is meant to be looked at before a
     /// real mailbox is connected.
     private static var clientID: String? {
-        let value = Bundle.main.object(forInfoDictionaryKey: "SiftOAuthClientID") as? String
-        return (value?.isEmpty ?? true) ? nil : value
+        let value = ApplicationShell.configuredClientID
+        return value.isEmpty ? nil : value
     }
+
+    /// Held for the life of the flow, because the session is cancelled when it is released.
+    private var session: ASWebAuthenticationSession?
 
     init(app: OpaquePointer, onAdded: @escaping () -> Void) {
         self.app = app
@@ -141,29 +145,85 @@ final class AddAccountWindow: NSWindowController {
 
     @objc private func connect() {
         guard let client = AddAccountWindow.clientID else { return }
+
+        // The scheme the callback will arrive on, derived by the layer from the configured
+        // client. Not derived here: D-17 exists to stop the two shells growing two answers to
+        // which scheme a provider accepts, and this one is not the obvious answer — the client
+        // identifier reversed, for the only client type compatible with NFR-24.
+        var schemeOut = SiftStr()
+        guard sift_callback_scheme(UnsafeMutablePointer(app), &schemeOut) == Ok else { return }
+        let scheme = SiftText.string(schemeOut)
+
         var url = SiftStr()
-        let began = SiftText.withBytes(client) { ptr, len in
-            sift_begin_authorization(UnsafeMutablePointer(app), ptr, len, &url) == Ok
-        }
+        let began = sift_begin_authorization(UnsafeMutablePointer(app), &url) == Ok
         guard began, let address = URL(string: SiftText.string(url)) else {
-            // The layer refuses to begin where the callback scheme is not registered, which is
-            // checked *before* the user goes anywhere — coming back from a browser to nothing
-            // is the failure this ordering exists to prevent.
+            // D-36 and D-71: the layer refuses to begin where the bundle does not claim the
+            // scheme this client requires, and it refuses *here*, before the user goes
+            // anywhere. Coming back from a browser to nothing is the failure this ordering
+            // exists to prevent, and it is the failure that happened when this shell asserted
+            // the registration instead of reporting what its bundle actually claims.
+            let claimed = ApplicationShell.claimedURLSchemes()
             status.stringValue = """
-                Sift could not start the sign-in. The callback scheme this build registers may \
-                not match the OAuth client it was configured with.
+                Sift did not start the sign-in, because this build cannot receive the reply. \
+                The client it was configured with returns through \u{201C}\(scheme)\u{201D}, and this \
+                bundle registers \(claimed.isEmpty ? "no schemes at all" : claimed.joined(separator: ", ")). \
+                Rebuild with `mise run macos`, which now refuses to produce a bundle that \
+                disagrees with its own client.
                 """
             return
         }
+
         pending = client
         status.stringValue = "Waiting for your browser…"
-        NSWorkspace.shared.open(address)
+
+        // **The reply comes back to this process, not through the operating system.**
+        // `ASWebAuthenticationSession` is the platform's own API for a redirect into a scheme
+        // an application owns: the same system browser, sharing its cookies — so FR-2's reason
+        // for refusing an embedded view holds, since Sift never sees the password — and the
+        // callback URL is handed straight to this closure.
+        //
+        // What that removes is the hand-back: a browser following a server redirect into a
+        // custom scheme, LaunchServices resolving it, and Sift being alive to receive it. Each
+        // of those is a way for a completed consent to arrive nowhere, and the last one cannot
+        // succeed at all, because the PKCE verifier lives in the process that began the flow.
+        // D-36 is unchanged in what it declares — the redirect is still the registered scheme,
+        // never a loopback, and NFR-24 still admits no socket. Only the return route is the
+        // platform's rather than the operating system's.
+        let session = ASWebAuthenticationSession(url: address, callbackURLScheme: scheme) {
+            [weak self] callback, error in
+            guard let self else { return }
+            self.session = nil
+            guard let callback else {
+                // A user who closed the browser said no. It must not present as a failure.
+                if let error = error as? ASWebAuthenticationSessionError,
+                    error.code == .canceledLogin
+                {
+                    self.status.stringValue = "Sign-in was cancelled. You can try again."
+                } else {
+                    self.status.stringValue = "That sign-in did not complete. You can try again."
+                }
+                return
+            }
+            self.callbackArrived(callback.absoluteString)
+        }
+        session.presentationContextProvider = self
+        // The provider is asked for consent every time, so nothing is carried over from a
+        // previous grant — which is what makes `prompt=consent` produce a refresh token.
+        session.prefersEphemeralWebBrowserSession = false
+        self.session = session
+        guard session.start() else {
+            status.stringValue = "Sift could not open a browser for the sign-in."
+            self.session = nil
+            return
+        }
     }
 
-    /// The callback, handed here by the application shell from the registered URI scheme.
+    /// The callback, from the authentication session or from the registered URI scheme.
     ///
-    /// **Not a socket.** NFR-24 admits none for any purpose, and this is the whole of how an
-    /// authorization returns.
+    /// **Not a socket.** NFR-24 admits none for any purpose. The session above is the route a
+    /// sign-in started here takes; this stays reachable from `application(_:open:)` because the
+    /// bundle still registers the scheme under D-109 and a callback arriving that way should be
+    /// answered rather than dropped.
     func callbackArrived(_ url: String) {
         var id = SiftId.zero
         let name = "Mail"
@@ -199,5 +259,17 @@ final class AddAccountWindow: NSWindowController {
         }
         close()
         onAdded()
+    }
+}
+
+
+// MARK: - Where the authentication session puts its window
+
+extension AddAccountWindow: ASWebAuthenticationPresentationContextProviding {
+    /// Sift launches as an accessory, and an accessory presenting a sheet on no window puts it
+    /// somewhere the user cannot reach. This screen always has a window, and it is the right
+    /// one: the sign-in belongs to the account being added.
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        window ?? NSApp.keyWindow ?? NSWindow()
     }
 }

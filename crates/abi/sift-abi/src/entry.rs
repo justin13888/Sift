@@ -143,7 +143,22 @@ pub unsafe extern "C" fn sift_initialize(
             // not have — and the collision surfaces as an account that silently fails to be
             // added and a first-run screen where a mailbox should be. Which is how it was
             // found.
-            app.scheme_is_registered = init.scheme_is_registered != 0;
+            // D-36, D-71 and D-109 in one place, and deliberately *here* rather than in the
+            // shell that reported the facts. The shell says which client it was configured
+            // with and which schemes its bundle claims; which scheme this client requires is
+            // the derivation in `sift-foundation`, and whether it is among them is arithmetic.
+            // A shell has nothing left to assert, which is what stops the previous failure —
+            // a hardcoded `true` beside a bundle that registered no such scheme — recurring.
+            let client_id = init.oauth_client_id.as_str().unwrap_or("");
+            app.oauth_client_id = client_id.to_owned();
+            let required = sift_foundation::identifiers::callback_scheme_for(client_id);
+            app.scheme_is_registered = !client_id.is_empty()
+                && init
+                    .registered_schemes
+                    .as_str()
+                    .unwrap_or("")
+                    .lines()
+                    .any(|claimed| claimed.trim() == required);
             if std::env::var_os("SIFT_EPHEMERAL").is_none() {
                 app.open_container(std::path::Path::new(root))
                     .map_err(|_| ())?;
@@ -347,6 +362,50 @@ pub struct SiftUndoable<'a> {
 
 /// D-36 — begin an authorization, and hand back the address to open in a browser.
 ///
+/// The URI scheme this client's authorization callback comes back on — D-36 and D-109.
+///
+/// # Why a shell asks rather than derives
+///
+/// It is one rule, and it is not the obvious one: a provider that lets an application name its
+/// own redirect gets Sift's scheme, and one that does not — Google's iOS/macOS client type is
+/// the case that forced this — accepts exactly one, the client identifier reversed. D-17 exists
+/// to stop two shells growing two answers to a question like that, so the derivation stays in
+/// `sift-foundation` and this is how a shell reaches it.
+///
+/// It is derived from the client this installation was configured with, which the layer was
+/// given at initialization — so a shell that asks this and a flow that declares a redirect
+/// cannot answer differently.
+///
+/// A shell needs it to tell the platform which scheme a callback will arrive on. It is empty
+/// where no client is configured, and a shell must not begin an authorization in that case.
+///
+/// The string lives in the layer until the next call that asks for one.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_callback_scheme(
+    app: *mut SiftApp,
+    out: *mut SiftStr<'static>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let client_id = {
+                let session = layer.session.lock().map_err(|_| ())?;
+                session.app().oauth_client_id.clone()
+            };
+            let mut flows = layer.flows.lock().map_err(|_| ())?;
+            flows.scheme = if client_id.is_empty() {
+                String::new()
+            } else {
+                sift_foundation::identifiers::callback_scheme_for(&client_id)
+            };
+            Ok(SiftStr::new(extend(&flows.scheme)))
+        })
+    }
+}
+
 /// **The scheme registration is checked before the user goes anywhere.** Discovering it
 /// afterwards means they have already granted consent and returned to nothing, and the
 /// resulting page is a browser error rather than anything Sift can explain.
@@ -355,28 +414,39 @@ pub struct SiftUndoable<'a> {
 /// verifier behind it is: PKCE binds the exchange to the process that started it, and a shell
 /// holding the state would be a shell that could be asked to complete a flow it did not begin.
 ///
+/// The client is the one this installation was configured with, stated at initialization. It
+/// is not a parameter because it was one: a shell repeating it at every call is a shell that
+/// can disagree with the bundle it is running out of.
+///
 /// # Safety
-/// `app` and `out` must be valid; `client_id` must point to `client_id_len` bytes of UTF-8.
+/// `app` and `out` must be valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sift_begin_authorization(
     app: *mut SiftApp,
-    client_id: *const u8,
-    client_id_len: usize,
     out: *mut SiftStr<'static>,
 ) -> SiftStatus {
     unsafe {
         guard_out(out, || {
-            let client_id = borrowed(client_id, client_id_len)?;
             let layer = layer(app).ok_or(())?;
-            let url = {
+            let (client_id, url) = {
                 let mut session = layer.session.lock().map_err(|_| ())?;
                 let app = session.app_mut();
+                let client_id = app.oauth_client_id.clone();
+                if client_id.is_empty() {
+                    return Err(());
+                }
                 let registered = app.scheme_is_registered;
-                sift_app::authorize::begin(&mut app.broker, client_id, registered, now_millis())
-                    .map_err(|_| ())?
+                let url = sift_app::authorize::begin(
+                    &mut app.broker,
+                    &client_id,
+                    registered,
+                    now_millis(),
+                )
+                .map_err(|_| ())?;
+                (client_id, url)
             };
             let mut flows = layer.flows.lock().map_err(|_| ())?;
-            flows.client_id = client_id.to_owned();
+            flows.client_id = client_id;
             flows.url = url;
             Ok(SiftStr::new(extend(&flows.url)))
         })
@@ -1956,7 +2026,8 @@ mod tests {
             container_root: SiftStr::new(root),
             schedule,
             schedule_context: core::ptr::null_mut(),
-            scheme_is_registered: 0,
+            oauth_client_id: SiftStr::new(""),
+            registered_schemes: SiftStr::new(""),
         };
         let status = unsafe { sift_initialize(callbacks(), init, &raw mut app) };
         assert_eq!(status, SiftStatus::Ok);
@@ -1985,6 +2056,116 @@ mod tests {
         }
     }
 
+    /// A layer configured the way a bundle configures one: a client, and the schemes that
+    /// bundle claims.
+    fn start_configured(client: &'static str, schemes: &'static str) -> *mut SiftApp {
+        ephemeral();
+        let mut app: *mut SiftApp = core::ptr::null_mut();
+        let init = SiftInit {
+            container_root: SiftStr::new(scratch_str()),
+            schedule: drop_it,
+            schedule_context: core::ptr::null_mut(),
+            oauth_client_id: SiftStr::new(client),
+            registered_schemes: SiftStr::new(schemes),
+        };
+        let status = unsafe { sift_initialize(callbacks(), init, &raw mut app) };
+        assert_eq!(status, SiftStatus::Ok);
+        app
+    }
+
+    fn scheme_of(app: *mut SiftApp) -> String {
+        let mut out = SiftStr::new("");
+        assert_eq!(
+            unsafe { sift_callback_scheme(app, &raw mut out) },
+            SiftStatus::Ok
+        );
+        // SAFETY: the layer holds the string until the next call that asks for one, and this
+        // test makes no such call before reading it.
+        unsafe { out.as_str() }
+            .expect("the scheme is UTF-8")
+            .to_owned()
+    }
+
+    #[test]
+    fn the_callback_scheme_a_shell_is_given_is_the_one_the_flow_declares() {
+        // D-17: one derivation. A shell that computed this itself would be a second answer to
+        // the question of which scheme a provider accepts, and the two would drift the first
+        // time a provider changed its mind — silently, because the symptom is a browser page
+        // the user reaches *after* granting consent.
+        for client in [
+            "123456-abcdef.apps.googleusercontent.com",
+            "a-client-that-names-its-own-redirect",
+        ] {
+            let app = start_configured(client, "");
+            let scheme = scheme_of(app);
+            assert_eq!(
+                scheme,
+                sift_foundation::identifiers::callback_scheme_for(client)
+            );
+            // And it is the prefix of the redirect the authorization URL actually carries, so
+            // a shell registering this scheme registers the address the provider will use.
+            assert!(
+                sift_app::authorize::redirect_uri(client).starts_with(&format!("{scheme}:")),
+                "{scheme} is not what the redirect is built from"
+            );
+            assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+        }
+    }
+
+    #[test]
+    fn a_bundle_that_does_not_claim_the_scheme_cannot_begin_an_authorization() {
+        // **This is the bug.** The shell used to pass a hardcoded `true` here, so a bundle
+        // shipped without the derived scheme still opened a browser, and the user granted
+        // consent and came back to a page saying no application would open the address.
+        let client = "123456-abcdef.apps.googleusercontent.com";
+        let app = start_configured(client, "net.justinchung.sift");
+        let mut url = SiftStr::new("");
+        assert_eq!(
+            unsafe { sift_begin_authorization(app, &raw mut url) },
+            SiftStatus::Failed,
+            "an authorization began against a scheme the bundle does not claim"
+        );
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    #[test]
+    fn the_same_bundle_claiming_the_derived_scheme_may_begin_one() {
+        // The other half, so the refusal above is the check working rather than the flow
+        // being broken for some unrelated reason.
+        let client = "123456-abcdef.apps.googleusercontent.com";
+        let app = start_configured(
+            client,
+            "net.justinchung.sift\ncom.googleusercontent.apps.123456-abcdef",
+        );
+        let mut url = SiftStr::new("");
+        assert_eq!(
+            unsafe { sift_begin_authorization(app, &raw mut url) },
+            SiftStatus::Ok
+        );
+        // SAFETY: the layer holds the URL until the flow ends or another begins.
+        let url = unsafe { url.as_str() }.expect("the URL is UTF-8");
+        assert!(
+            url.contains("code_challenge") && !url.contains("client_secret"),
+            "{url}"
+        );
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    #[test]
+    fn a_build_with_no_client_configured_refuses_rather_than_asking_for_nothing() {
+        // A build with no client runs against the recorded corpus and says so. Beginning an
+        // authorization with an empty client identifier would produce an authorization URL a
+        // provider rejects, which is a worse way to say the same thing.
+        let app = start_configured("", "net.justinchung.sift");
+        assert_eq!(scheme_of(app), "");
+        let mut url = SiftStr::new("");
+        assert_eq!(
+            unsafe { sift_begin_authorization(app, &raw mut url) },
+            SiftStatus::Failed
+        );
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
     #[test]
     fn initialization_returns_a_status_rather_than_a_sentinel() {
         // No entry point encodes failure in its return value's domain.
@@ -2003,7 +2184,8 @@ mod tests {
             container_root: SiftStr::new(""),
             schedule: drop_it,
             schedule_context: core::ptr::null_mut(),
-            scheme_is_registered: 0,
+            oauth_client_id: SiftStr::new(""),
+            registered_schemes: SiftStr::new(""),
         };
         assert_eq!(
             unsafe { sift_initialize(callbacks(), init, &raw mut app) },

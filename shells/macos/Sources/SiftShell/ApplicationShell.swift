@@ -22,6 +22,10 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// The container path's bytes. The layer copies during `sift_initialize`; this simply
     /// keeps them alive for the duration of that call.
     private var containerRoot: [UInt8] = []
+
+    /// The same, for the two facts the layer is given about this bundle's OAuth configuration.
+    private var oauthClientID: [UInt8] = []
+    private var registeredSchemes: [UInt8] = []
     private var statusItem: NSStatusItem?
     private var windows: [MainWindowController] = []
 
@@ -58,21 +62,33 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             return
         }
         containerRoot = Array(root.utf8)
+        // D-36, D-71 and D-109: **read out of the bundle, not asserted about it.** This used
+        // to be `scheme_is_registered: 1` beside a comment saying the Info.plist registered
+        // the scheme. A configuration shipped without it, the layer was told otherwise, and
+        // the refusal that exists to happen before a browser opens could not happen at all.
+        //
+        // What a shell can honestly report is what its own bundle claims. Which scheme the
+        // configured client requires, and whether it is among them, is the layer's to decide.
+        oauthClientID = Array(Self.configuredClientID.utf8)
+        registeredSchemes = Array(Self.claimedURLSchemes().joined(separator: "\n").utf8)
         let status = containerRoot.withUnsafeBufferPointer { bytes -> SiftStatus in
-            let init_ = SiftInit(
-                container_root: SiftStr(ptr: bytes.baseAddress, len: bytes.count),
-                // D-48's hop, and the shell's whole obligation for it: post it, do not run
-                // it. Running it inline would hand a callback back from inside the call
-                // that caused it, which is the reentrancy D-48 forbids.
-                schedule: { _, run, ticket in
-                    DispatchQueue.main.async { run?(ticket) }
-                },
-                schedule_context: nil,
-                // D-36 and D-71. The Info.plist registers the scheme, so this bundle has
-                // somewhere for an authorization to return to.
-                scheme_is_registered: 1
-            )
-            return sift_initialize(hostCallbacks(), init_, &handle)
+            oauthClientID.withUnsafeBufferPointer { client in
+                registeredSchemes.withUnsafeBufferPointer { schemes in
+                    let init_ = SiftInit(
+                        container_root: SiftStr(ptr: bytes.baseAddress, len: bytes.count),
+                        // D-48's hop, and the shell's whole obligation for it: post it, do not
+                        // run it. Running it inline would hand a callback back from inside the
+                        // call that caused it, which is the reentrancy D-48 forbids.
+                        schedule: { _, run, ticket in
+                            DispatchQueue.main.async { run?(ticket) }
+                        },
+                        schedule_context: nil,
+                        oauth_client_id: SiftStr(ptr: client.baseAddress, len: client.count),
+                        registered_schemes: SiftStr(ptr: schemes.baseAddress, len: schemes.count)
+                    )
+                    return sift_initialize(hostCallbacks(), init_, &handle)
+                }
+            }
         }
         guard status == Ok else {
             // A caught panic is its own status, everywhere. Reporting it as an ordinary
@@ -441,6 +457,28 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// Application Support rather than Caches, because the layout MUST NOT live anywhere the
     /// operating system may purge on its own. Under the sandbox this already resolves inside
     /// the app's own container; outside it, the bundle identifier keeps it to itself.
+    /// The OAuth client this bundle was built with, or the empty string where there is none.
+    ///
+    /// A build with none is a legitimate state: it runs against the recorded corpus and says
+    /// so. The key is written by the build from `shells/macos/oauth-client.txt`.
+    static var configuredClientID: String {
+        Bundle.main.object(forInfoDictionaryKey: "SiftOAuthClientID") as? String ?? ""
+    }
+
+    /// Every URI scheme this bundle's `CFBundleURLTypes` claims.
+    ///
+    /// **The fact the layer is given.** Read from the running bundle rather than from what the
+    /// build intended, because the two disagreeing is exactly the failure this replaced — a
+    /// bundle whose Info.plist key expanded to nothing is a bundle with the key *removed*, and
+    /// nothing said so until a browser did.
+    static func claimedURLSchemes() -> [String] {
+        let types = Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes") as? [[String: Any]]
+        return (types ?? [])
+            .compactMap { $0["CFBundleURLSchemes"] as? [String] }
+            .flatMap { $0 }
+            .filter { !$0.isEmpty }
+    }
+
     private static func containerRoot() -> String? {
         guard
             let base = FileManager.default.urls(
