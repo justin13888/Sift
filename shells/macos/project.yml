@@ -1,0 +1,86 @@
+# D-61 — **the platform's own application toolchain owns the bundle**, and the Rust core is
+# built into a static library it links. This file is the committed source of truth for that
+# project; `Sift.xcodeproj` is generated from it by XcodeGen and is not committed.
+#
+# **Why generated rather than a committed `.xcodeproj`.** D-61 rejects "a bespoke script
+# assembling the bundle from parts", and nothing here assembles one: XcodeGen emits a project,
+# and Xcode remains the thing that compiles, links, assembles, signs and stamps the bundle.
+# What D-61 protects is that the Info.plist, the URL types, the entitlements and the signing
+# posture live in the platform's own project format and are enforced by its own machinery, and
+# they do. What is bought is a spec a reviewer can read: the alternative is four hundred lines
+# of UUID-keyed plist that no diff explains and every merge fights over.
+
+name: Sift
+
+options:
+  bundleIdPrefix: net.justinchung
+  # D-46's floor. Structural rather than conservative: the modern sandbox-legal
+  # background-residency mechanism registers the *main application*, while the older one
+  # requires a separate helper executable inside the bundle — a second process, which would
+  # make D-2 false on the App Store channel.
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    # The identifier register in `docs/product/platform-baseline.md` — consumed once, for the
+    # life of the project, and never changed after first submission to any channel.
+    PRODUCT_BUNDLE_IDENTIFIER: net.justinchung.sift
+    PRODUCT_NAME: Sift
+    INFOPLIST_FILE: Info.plist
+    GENERATE_INFOPLIST_FILE: NO
+
+    # D-62 — one user-facing version identifying a source revision, the same on every channel,
+    # and a build number space that begins at 1 and is never reused or decreased.
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+    SWIFT_VERSION: "5.9"
+
+    # D-60 — the Swift shell reaches the C ABI through a module map over the generated header.
+    # This is what makes `import CSift` resolve; the map itself points at the one artefact both
+    # sides compile against, in the Rust workspace.
+    SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/CSift
+
+    # D-61's static library. One archive, one symbol surface, nothing resolved at runtime —
+    # which is what keeps D-59's ABI leaf genuinely a leaf.
+    OTHER_LDFLAGS: -lsift_abi
+
+    # `cargo` builds one architecture, so the project builds the one it has. D-46's universal
+    # artefact is not addressed here and is not addressed anywhere else yet either.
+    ONLY_ACTIVE_ARCH: YES
+
+    # **Ad-hoc, and deliberately.** `docs/product/platform-baseline.md` records the team
+    # identifier as *outstanding* — it is issued rather than chosen, and it does not exist yet.
+    # Baking in whatever certificate happens to be on a contributor's machine would settle that
+    # open question by side effect and would break every build that does not have it, CI first.
+    # Ad-hoc signing needs no identity and works on any machine.
+    #
+    # No entitlements are declared for the same reason: the sandbox, the network, the
+    # user-selected file access, the Keychain access group and the address book all need a real
+    # team prefix, and the hardened runtime and notarization belong to the Cask path rather
+    # than to a development build.
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    ENABLE_HARDENED_RUNTIME: NO
+
+  configs:
+    # Each configuration links the archive its own `cargo` profile produced. Pointing both `-L`
+    # paths at the linker unconditionally — which is what `Package.swift` used to do — lets a
+    # release build resolve `libsift_abi.a` out of `target/debug` when the release archive is
+    # missing, and say nothing about it.
+    Debug:
+      LIBRARY_SEARCH_PATHS: [$(inherited), $(SRCROOT)/../../target/debug]
+    Release:
+      LIBRARY_SEARCH_PATHS: [$(inherited), $(SRCROOT)/../../target/release]
+
+targets:
+  Sift:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/SiftShell
+    scheme:
+      gatherCoverageData: false
