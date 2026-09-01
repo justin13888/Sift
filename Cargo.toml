@@ -57,6 +57,8 @@ members = [
 
     # Presentation — windowing, selection, formatting, merge and diff.
     "crates/presentation/sift-presentation",
+    # The observation registry, above the application and below the ABI.
+    "crates/presentation/sift-session",
 
     # ABI — the C entry points of D-17, and nothing else. A leaf.
     "crates/abi/sift-abi",
@@ -138,6 +140,7 @@ sift-governor   = { path = "crates/application/sift-governor" }
 sift-lifecycle  = { path = "crates/application/sift-lifecycle" }
 sift-app        = { path = "crates/application/sift-app" }
 sift-presentation = { path = "crates/presentation/sift-presentation" }
+sift-session    = { path = "crates/presentation/sift-session" }
 sift-abi        = { path = "crates/abi/sift-abi" }
 
 [profile.release]

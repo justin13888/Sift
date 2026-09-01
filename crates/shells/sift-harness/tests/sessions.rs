@@ -669,3 +669,95 @@ fn every_field_a_shell_draws_is_normalized_before_it_arrives() {
         "attacker-controlled text reached the row unisolated:\n{row}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// D-18, driven the way a shell drives it: register an observation, and be told
+// what changed rather than being handed the set again.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_observation_is_told_what_changed_and_not_what_the_world_holds() {
+    let mut cmds = live();
+    cmds.extend([
+        "observe mail",
+        "poll",
+        "folders mail",
+        "sync mail",
+        "poll",
+        "poll",
+    ]);
+    let out = session(&cmds);
+
+    // Nothing had arrived yet, so there was nothing to say. A registry that answered with
+    // an empty window here would have a shell repainting a list on every unrelated signal.
+    assert!(out.contains("-- 0 delivery(ies)"), "{out}");
+    // Then three rows arrived, as inserts at their post-batch indices.
+    assert!(out.contains("Insert { to: 0 }"), "{out}");
+    assert!(out.contains("Insert { to: 2 }"), "{out}");
+    // And the poll after that is quiet, because nothing changed between them.
+    assert!(
+        out.trim_end().ends_with("-- 0 delivery(ies)"),
+        "a quiet poll produced a delivery:\n{out}"
+    );
+}
+
+#[test]
+fn a_triage_gesture_reaches_the_observation_as_a_delete_before_any_round_trip() {
+    // NFR-7 and D-51 arriving at a shell through D-18 rather than through a re-read. The
+    // row leaves the window because the overlay removes it, and it leaves as a *delete* at
+    // a stated index, which is what a table view needs to animate one row going.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "observe mail",
+        "poll",
+        "select #1",
+        "do message.archive",
+        "poll",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("Delete { from: 0 }"), "{out}");
+}
+
+#[test]
+fn a_change_that_keeps_a_rows_identity_is_an_update_and_not_a_delete_and_an_insert() {
+    // The distinction D-18 exists to preserve. Marking read changes what the row draws and
+    // not which row it is — so the cell is updated in place, selection survives, and the
+    // list does not animate a row leaving and another arriving.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "observe mail",
+        "poll",
+        "select #2",
+        "do message.mark-read",
+        "poll",
+    ]);
+    let out = session(&cmds);
+    let after = out.rsplit("mark-read enqueued").next().unwrap_or("");
+    assert!(after.contains("Update { at: 1 }"), "{out}");
+    assert!(
+        !after.contains("Delete") && !after.contains("Insert"),
+        "an in-place change was expressed as a departure and an arrival:\n{out}"
+    );
+}
+
+#[test]
+fn cancelling_one_observation_leaves_the_other_delivering() {
+    // The defect the ABI carried while an observation had no identity of its own: cancelling
+    // by generation would have taken every observation or none of them.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "observe mail",
+        "observe *",
+        "poll",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("observing mail as #1"), "{out}");
+    assert!(out.contains("observing * as #2"), "{out}");
+    assert!(out.contains("-- 2 delivery(ies)"), "both were told: {out}");
+}

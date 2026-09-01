@@ -35,7 +35,7 @@ use std::io::{self, BufRead, Write};
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut app = sift_app::App::new();
+    let mut app = sift_session::Session::new(sift_app::App::new());
 
     if args.is_empty() {
         return repl(&mut app);
@@ -48,7 +48,7 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn repl(app: &mut sift_app::App) -> io::Result<()> {
+fn repl(app: &mut sift_session::Session) -> io::Result<()> {
     let stdin = io::stdin();
     println!("sift-harness — `help` for commands, `quit` to leave");
     loop {
@@ -68,7 +68,7 @@ fn repl(app: &mut sift_app::App) -> io::Result<()> {
     }
 }
 
-fn run_and_print(app: &mut sift_app::App, line: &str) {
+fn run_and_print(app: &mut sift_session::Session, line: &str) {
     match command::run(app, line) {
         Ok(output) => {
             for l in output {

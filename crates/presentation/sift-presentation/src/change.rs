@@ -91,7 +91,7 @@ impl<T> Batch<T> {
     }
 }
 
-/// Diff one window into another.
+/// Diff one window into another, for rows that can describe themselves.
 ///
 /// The batch is ordered deletes, then updates, then moves and inserts. That order is not
 /// cosmetic: `apply` resolves every pre-batch index against the original window in one pass
@@ -99,15 +99,31 @@ impl<T> Batch<T> {
 /// changes to come first to be reading the same window the indices are stated in.
 #[must_use]
 pub fn diff<T: Identified + Clone>(old: &[T], new: &[T]) -> Batch<T> {
+    diff_by(old, new, T::identity, T::content)
+}
+
+/// Diff one window into another, given how to read identity and content out of a row.
+///
+/// The extractor form exists because the row a shell actually draws is the **application**
+/// layer's, and this trait is the presentation layer's — so no crate is allowed to implement
+/// one for the other. Passing the two functions is the answer that does not require moving a
+/// type across a layer boundary to satisfy an orphan rule.
+#[must_use]
+pub fn diff_by<T: Clone>(
+    old: &[T],
+    new: &[T],
+    identity: impl Fn(&T) -> u128,
+    content: impl Fn(&T) -> u64,
+) -> Batch<T> {
     let old_at: BTreeMap<u128, usize> = old
         .iter()
         .enumerate()
-        .map(|(i, r)| (r.identity(), i))
+        .map(|(i, r)| (identity(r), i))
         .collect();
     let new_at: BTreeMap<u128, usize> = new
         .iter()
         .enumerate()
-        .map(|(i, r)| (r.identity(), i))
+        .map(|(i, r)| (identity(r), i))
         .collect();
 
     let mut changes = Vec::new();
@@ -118,7 +134,7 @@ pub fn diff<T: Identified + Clone>(old: &[T], new: &[T]) -> Batch<T> {
     let mut gone: Vec<u32> = old
         .iter()
         .enumerate()
-        .filter(|(_, r)| !new_at.contains_key(&r.identity()))
+        .filter(|(_, r)| !new_at.contains_key(&identity(r)))
         .map(|(i, _)| u32::try_from(i).unwrap_or(u32::MAX))
         .collect();
     gone.sort_unstable_by(|a, b| b.cmp(a));
@@ -128,12 +144,12 @@ pub fn diff<T: Identified + Clone>(old: &[T], new: &[T]) -> Batch<T> {
     let survivors: Vec<(usize, usize)> = old
         .iter()
         .enumerate()
-        .filter_map(|(i, r)| new_at.get(&r.identity()).map(|j| (i, *j)))
+        .filter_map(|(i, r)| new_at.get(&identity(r)).map(|j| (i, *j)))
         .collect();
 
     // Contents that changed while identity did not.
     for (old_i, new_j) in &survivors {
-        if old[*old_i].content() != new[*new_j].content() {
+        if content(&old[*old_i]) != content(&new[*new_j]) {
             changes.push(Change::Update {
                 at: u32::try_from(*old_i).unwrap_or(u32::MAX),
             });
@@ -157,7 +173,7 @@ pub fn diff<T: Identified + Clone>(old: &[T], new: &[T]) -> Batch<T> {
     // order and the incoming rows are consumed in batch order.
     let mut incoming = Vec::new();
     for (j, row) in new.iter().enumerate() {
-        if !old_at.contains_key(&row.identity()) {
+        if !old_at.contains_key(&identity(row)) {
             changes.push(Change::Insert {
                 to: u32::try_from(j).unwrap_or(u32::MAX),
             });

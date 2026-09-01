@@ -1807,6 +1807,7 @@ dependencies = [
  "sift-provider",
  "sift-registry",
  "sift-scheduler",
+ "sift-session",
  "sift-store",
  "sift-subsystem",
  "sift-sync",
@@ -1948,6 +1949,16 @@ name = "sift-scheduler"
 version = "0.1.0"
 dependencies = [
  "sift-foundation",
+]
+
+[[package]]
+name = "sift-session"
+version = "0.1.0"
+dependencies = [
+ "sift-app",
+ "sift-foundation",
+ "sift-presentation",
+ "sift-provider",
 ]
 
 [[package]]

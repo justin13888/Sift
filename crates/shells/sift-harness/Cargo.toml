@@ -40,6 +40,8 @@ sift-registry.workspace = true
 # The assembled application. D-65's harness drives what a shell drives, rather than building
 # a second one beside it.
 sift-app.workspace = true
+# D-18's registry, which is what a shell actually binds to.
+sift-session.workspace = true
 sift-http.workspace = true
 sift-credentials.workspace = true
 sift-pipeline.workspace = true

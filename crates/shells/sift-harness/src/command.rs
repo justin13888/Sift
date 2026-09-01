@@ -7,11 +7,12 @@ use sift_credentials::store::CredentialStore as _;
 use sift_foundation::identity::LocalId;
 use sift_mutations::intent::{Intent, State};
 use sift_presentation::action::{self, Context, MutationKind};
+use sift_session::{Session, Watching};
 use sift_subsystem::Subsystem;
 
 type Output = Result<Vec<String>, String>;
 
-pub fn run(app: &mut App, line: &str) -> Output {
+pub fn run(session: &mut Session, line: &str) -> Output {
     let mut parts = line.split_whitespace();
     let Some(verb) = parts.next() else {
         return Ok(vec![]);
@@ -22,6 +23,7 @@ pub fn run(app: &mut App, line: &str) -> Output {
     // command is this shell's equivalent of a stage boundary.
     let subsystem = match verb {
         "ingest" | "list" | "row" | "folders" | "watch" => Subsystem::Store,
+        "observe" | "poll" => Subsystem::Presentation,
         "do" | "queue" | "flush" | "restart" => Subsystem::Mutations,
         "actions" | "select" | "open" => Subsystem::Presentation,
         "sync" => Subsystem::Sync,
@@ -29,11 +31,19 @@ pub fn run(app: &mut App, line: &str) -> Output {
         "net" => Subsystem::Network,
         _ => Subsystem::Shell,
     };
-    sift_alloc::tagged(subsystem, || dispatch(app, verb, &rest))
+    sift_alloc::tagged(subsystem, || dispatch(session, verb, &rest))
 }
 
-fn dispatch(app: &mut App, verb: &str, rest: &[&str]) -> Output {
+fn dispatch(session: &mut Session, verb: &str, rest: &[&str]) -> Output {
     let rest = rest.to_vec();
+    // The two verbs that are the session's rather than the application's: D-18's registry
+    // sits above the application and is what a shell actually binds to.
+    match verb {
+        "observe" => return observe(session, &rest),
+        "poll" => return poll(session),
+        _ => {}
+    }
+    let app = session.app_mut();
     match verb {
         "help" => Ok(help()),
         "account" => account(app, &rest),
@@ -73,6 +83,8 @@ fn help() -> Vec<String> {
         "net [account]                                    bytes on the wire (FR-36)",
         "ingest <account> <subject>...                    ingest a message (delivered)",
         "list [account]                                   the message list, read THROUGH the overlay",
+        "observe <account|*> [limit]                      register a D-18 observation; prints its handle",
+        "poll                                             deliver what changed since the last poll",
         "row <account>                                    FR-6's fields, as a shell receives them",
         "select <id>...                                   set the selection (D-99, keyed on identity)",
         "open <id|#n>                                     open a message in the reader",
@@ -219,6 +231,49 @@ fn list(app: &mut App, args: &[&str]) -> Output {
     if out.is_empty() {
         out.push("(empty)".to_owned());
     }
+    Ok(out)
+}
+
+/// Register a D-18 observation, the way a shell does when a list appears on screen.
+fn observe(session: &mut Session, args: &[&str]) -> Output {
+    let (target, limit) = match args {
+        [target] => (*target, L_LIST),
+        [target, limit] => (
+            *target,
+            limit.parse().map_err(|_| "limit must be a number")?,
+        ),
+        _ => return Err("observe <account|*> [limit]".to_owned()),
+    };
+    // `*` is D-4's unified inbox: every account, merged, on one comparator.
+    let account = if target == "*" {
+        None
+    } else {
+        Some(session.app_mut().account(target)?.id)
+    };
+    let id = session.observe(Watching::Messages { account, limit });
+    Ok(vec![format!("observing {} as #{}", target, id.0)])
+}
+
+/// Deliver what changed, the way the boundary does on the next turn of the shell's loop.
+///
+/// A poll that changed nothing prints nothing but the count, which is the property D-18
+/// exists for: the common case is a signal that touched no window anybody is watching.
+fn poll(session: &mut Session) -> Output {
+    let deliveries = session.poll()?;
+    let mut out = Vec::new();
+    for d in &deliveries {
+        out.push(format!(
+            "#{} generation={} {} change(s), {} incoming",
+            d.observation.0,
+            d.generation.0,
+            d.batch.changes.len(),
+            d.batch.incoming.len()
+        ));
+        for change in &d.batch.changes {
+            out.push(format!("   {change:?}"));
+        }
+    }
+    out.push(format!("-- {} delivery(ies)", deliveries.len()));
     Ok(out)
 }
 
