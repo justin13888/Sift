@@ -152,6 +152,24 @@ pub fn apply<T: Clone>(
     Ok(result)
 }
 
+/// The presentation layer's diff, in the vocabulary the boundary carries.
+///
+/// The two enums are deliberately separate types rather than one shared one: `cbindgen` is
+/// configured with `parse_deps = false`, so a type defined in `sift-presentation` would not
+/// reach the committed header D-60 holds. This conversion is where they are held equal, and
+/// the tests below are what hold them equal.
+impl From<sift_presentation::change::Change> for SiftChange {
+    fn from(c: sift_presentation::change::Change) -> Self {
+        use sift_presentation::change::Change as C;
+        match c {
+            C::Insert { to } => Self::Insert { to },
+            C::Delete { from } => Self::Delete { from },
+            C::Move { from, to } => Self::Move { from, to },
+            C::Update { at } => Self::Update { at },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +314,130 @@ mod tests {
             apply(&window(), &forward, &["new"]).unwrap(),
             apply(&window(), &reordered, &["new"]).unwrap()
         );
+    }
+}
+
+/// The diff and the reference reading of it, checked against each other.
+///
+/// This is the only place in the workspace that can see both `apply` — the normative
+/// statement of what a batch *means* — and `sift_presentation::change::diff`, which produces
+/// them. Testing either alone proves nothing about the pair: a diff and an apply that agree
+/// on a wrong reading of the index spaces would both pass their own tests and corrupt every
+/// list in the product.
+#[cfg(test)]
+mod round_trip {
+    use super::*;
+    use sift_presentation::change::{Identified, diff};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Row(u128, u64);
+
+    impl Identified for Row {
+        fn identity(&self) -> u128 {
+            self.0
+        }
+        fn content(&self) -> u64 {
+            self.1
+        }
+    }
+
+    /// xorshift64*, so the corpus is a thousand cases rather than the six somebody thought of,
+    /// and is the same thousand on every machine and every run.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn below(&mut self, n: usize) -> usize {
+            if n == 0 {
+                0
+            } else {
+                (self.next() % n as u64) as usize
+            }
+        }
+    }
+
+    fn identities(rows: &[Row]) -> Vec<u128> {
+        rows.iter().map(|r| r.0).collect()
+    }
+
+    #[test]
+    fn applying_a_diff_to_the_old_window_yields_the_new_one() {
+        let mut rng = Rng(0x5EED_1234_9ABC_DEF1);
+
+        for case in 0..2000 {
+            // A pool of identities, a window drawn from it, and a second window drawn from
+            // the same pool — so arrivals, departures, reorderings and content changes all
+            // occur, in combination, without any of them being arranged by hand.
+            let pool: usize = 1 + rng.below(12);
+            let take = |rng: &mut Rng| -> Vec<Row> {
+                let mut seen = std::collections::BTreeSet::new();
+                let n = rng.below(pool + 1);
+                let mut out = Vec::new();
+                for _ in 0..n {
+                    let id = rng.below(pool) as u128;
+                    if seen.insert(id) {
+                        out.push(Row(id, rng.next() % 3));
+                    }
+                }
+                out
+            };
+            let old = take(&mut rng);
+            let new = take(&mut rng);
+
+            let batch = diff(&old, &new);
+            let changes: Vec<SiftChange> = batch.changes.iter().copied().map(Into::into).collect();
+
+            let got = apply(&identities(&old), &changes, &identities(&batch.incoming))
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "case {case}: batch rejected: {e:?}\n  old {:?}\n  new {:?}\n  {changes:?}",
+                        identities(&old),
+                        identities(&new)
+                    )
+                });
+
+            assert_eq!(
+                got,
+                identities(&new),
+                "case {case}\n  old {:?}\n  new {:?}\n  {changes:?}",
+                identities(&old),
+                identities(&new)
+            );
+        }
+    }
+
+    #[test]
+    fn a_reordering_is_expressed_without_a_single_delete_or_insert() {
+        // The property D-18 actually needs, over a corpus rather than one arrangement: when
+        // the set is unchanged and only the order differs, nothing may leave or arrive.
+        let mut rng = Rng(0xC0FF_EE00_1234_5678);
+        for _ in 0..500 {
+            let n = 1 + rng.below(10);
+            let old: Vec<Row> = (0..n).map(|i| Row(i as u128, 0)).collect();
+            let mut new = old.clone();
+            for i in (1..new.len()).rev() {
+                new.swap(i, rng.below(i + 1));
+            }
+
+            let batch = diff(&old, &new);
+            assert!(
+                !batch.changes.iter().any(|c| matches!(
+                    c,
+                    sift_presentation::change::Change::Delete { .. }
+                        | sift_presentation::change::Change::Insert { .. }
+                )),
+                "a permutation produced a delete or an insert: {:?}",
+                batch.changes
+            );
+
+            let changes: Vec<SiftChange> = batch.changes.iter().copied().map(Into::into).collect();
+            let got = apply(&identities(&old), &changes, &[]).expect("batch");
+            assert_eq!(got, identities(&new));
+        }
     }
 }
