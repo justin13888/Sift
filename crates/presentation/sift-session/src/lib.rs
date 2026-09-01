@@ -22,6 +22,8 @@
 //! cancel had to wait for. Waiting is the deadlock D-48 names: the thread calling cancel is
 //! the thread that would have to drain the delivery.
 
+pub mod gesture;
+
 use std::collections::BTreeMap;
 
 use sift_app::App;

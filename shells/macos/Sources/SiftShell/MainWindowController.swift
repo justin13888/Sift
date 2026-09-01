@@ -81,7 +81,16 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 
         // The reader follows the list's selection. D-54: native rows over one body view, and
         // the body view belongs to the reader rather than to the row.
-        list.onSelect = { [weak self] row in self?.reader.show(row, app: self?.app) }
+        list.onSelect = { [weak self] row in
+            guard let self else { return }
+            self.reader.show(row, app: self.app)
+            // D-99's selection has to cross, or every message-scoped action stays hidden and
+            // the whole Message menu is empty. Keyed on identity rather than index: a row that
+            // moves under a selection is the same message, and a selection that followed the
+            // index would silently retarget the gesture.
+            var ids = row.map { [$0.id] } ?? []
+            _ = sift_select(UnsafeMutablePointer(self.app), &ids, ids.count)
+        }
 
         // D-4's unified inbox is the zero anchor: every account, merged on one comparator.
         list.observe(app: app, account: .zero)
@@ -89,6 +98,9 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 
         window.makeKeyAndOrderFront(nil)
         self.window = window
+        // Every `Window`-scoped action in the register turns on this, so a layer that was
+        // never told a window exists offers a menu to nobody.
+        _ = sift_set_window_present(UnsafeMutablePointer(app), 1)
     }
 
     /// Bring an existing window forward. "Open Sift" means *show me Sift*, not *make another*.
@@ -101,6 +113,10 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         // these observations can arrive, on any thread, ever. Tearing the views down first
         // would leave a delivery in flight with somewhere to land and nothing there.
         list.cancel()
+        // FR-25: the window is gone and the process is not. The layer is told, so the actions
+        // that need a window stop being offered — including through the tray, which is the
+        // surface that is still there.
+        _ = sift_set_window_present(UnsafeMutablePointer(app), 0)
         window = nil
         onClose?()
     }

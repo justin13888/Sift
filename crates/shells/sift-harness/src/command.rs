@@ -6,7 +6,7 @@ use sift_app::App;
 use sift_credentials::store::CredentialStore as _;
 use sift_foundation::identity::LocalId;
 use sift_mutations::intent::{Intent, State};
-use sift_presentation::action::{self, Context, MutationKind};
+use sift_presentation::action;
 use sift_session::{Session, Watching};
 use sift_subsystem::Subsystem;
 
@@ -41,6 +41,10 @@ fn dispatch(session: &mut Session, verb: &str, rest: &[&str]) -> Output {
     match verb {
         "observe" => return observe(session, &rest),
         "poll" => return poll(session),
+        // D-98's register is presentation-layer, so invoking one is the session's rather than
+        // the application's — and a shell binds to the session anyway.
+        "do" => return invoke(session, &rest),
+        "actions" => return actions(session),
         _ => {}
     }
     let app = session.app_mut();
@@ -53,8 +57,6 @@ fn dispatch(session: &mut Session, verb: &str, rest: &[&str]) -> Output {
         "select" => select(app, &rest),
         "open" => open(app, &rest),
         "window" => window(app, &rest),
-        "actions" => actions(app),
-        "do" => invoke(app, &rest),
         "queue" => queue(app, &rest),
         "flush" => flush(app, &rest),
         "restart" => restart(app, &rest),
@@ -440,158 +442,52 @@ fn window(app: &mut App, args: &[&str]) -> Output {
     }
 }
 
-fn context<'a>(
-    app: &App,
-    caps: &'a Option<sift_provider::capability::Capabilities>,
-) -> Context<'a> {
-    Context {
-        selection_len: app.selection.len(),
-        has_open_message: app.open_message.is_some(),
-        has_window: app.has_window,
-        capabilities: caps.as_ref(),
-    }
-}
-
-fn actions(app: &mut App) -> Output {
-    let caps = app.selection_capabilities();
-    let ctx = context(app, &caps);
-    let mut out: Vec<String> = action::palette(&ctx)
-        .iter()
-        .map(|a| a.id.to_owned())
-        .collect();
-    out.push(format!(
+fn actions(session: &mut Session) -> Output {
+    let mut out = vec![format!(
         "-- {} of {} available",
-        out.len(),
+        session.palette().len(),
         action::ACTIONS.len()
-    ));
+    )];
+    out.extend(session.palette().iter().map(|a| format!("  {}", a.id)));
     Ok(out)
 }
 
-fn invoke(app: &mut App, args: &[&str]) -> Output {
+fn invoke(session: &mut Session, args: &[&str]) -> Output {
     let [id, extra @ ..] = args else {
         return Err("do <action-id> [arg]".to_owned());
     };
-    let Some(action) = action::by_id(id) else {
-        return Err(format!("no action `{id}` in the register"));
-    };
+    let parameter = extra.iter().find(|a| !a.starts_with("--")).copied();
+    let confirmed = extra.contains(&"--confirmed");
 
-    let caps = app.selection_capabilities();
-    let ctx = context(app, &caps);
-    if !action.is_available(&ctx) {
-        // Not "disabled": absent. D-98 makes an unavailable action absent from the palette,
-        // and a shell would show nothing at all. A harness that also said nothing would be
-        // useless, so it says which of the two gates closed — which is exactly the
-        // information D-98 concedes a user does not get ("one keystroke does nothing in one
-        // account with no visible reason").
-        let reason = if caps.is_none() && action.mutates.is_some() {
-            "nothing in the selection belongs to an account, so no capabilities are known"
-        } else if action.mutates.is_some() && caps.is_some() {
-            "the account's declared capabilities do not permit it"
-        } else {
-            "its scope is not satisfied — check the selection, the open message, or the window"
-        };
-        return Err(format!("`{id}` is not available: {reason}"));
+    // D-98 makes an unavailable action **absent**, and a shell shows nothing at all. A harness
+    // that also said nothing would be useless, so it reports which of the two gates closed —
+    // which is exactly the information D-98 concedes a user does not get.
+    if let Some(why) = session.why_unavailable(id) {
+        return Err(format!("`{id}` is not available: {}", why.explain()));
     }
+    let gesture = session.invoke(id, parameter, confirmed, now_millis())?;
 
-    let Some(kind) = action.mutates else {
+    if !gesture.mutates {
         return Ok(vec![format!(
-            "{id}: no mutation (a navigation or a surface)"
+            "{}: no mutation (a navigation or a surface)",
+            gesture.action
         )]);
-    };
-
-    let intent = build_intent(kind, extra)?;
-    if intent.requires_confirmation() {
-        // FR-14's single exception. Confirmed before it is issued rather than undone after,
-        // and never applied optimistically ahead of the server.
-        let confirmed = extra.contains(&"--confirmed");
-        if !confirmed {
-            return Err(format!(
-                "`{id}` requires confirmation before it is issued — repeat with --confirmed"
-            ));
-        }
     }
-
-    let now = now_millis();
-    let mut out = Vec::new();
-    let selection = app.selection.clone();
-    // D-85's undo group is assigned **at the gesture**, which is what makes FR-17's bulk
-    // operation one undoable unit rather than a hundred.
-    let undo_group = app.next_intent_id();
-    for message in selection {
-        let Some(owner) = app
-            .owner_of(message)
-            .cloned()
-            .or_else(|| app.owner_of_stored(message))
-        else {
-            out.push(format!("{message}: no account holds this message"));
-            continue;
-        };
-        let intent_id = app.next_intent_id();
-        let a = app.account(&owner)?;
-        let sequence = a.queue.enqueue(intent_id, message, intent.clone(), now);
-
-        // **Journal first, store second** — D-74's ordering, and the reverse would lose a
-        // mutation the user watched succeed. The failure this order can leave is an intent
-        // enqueued whose optimistic effect was never applied, which is invisible and
-        // self-correcting because the overlay is derived from the queue.
-        let durable =
-            a.store.journal.execute(
-                "INSERT INTO intent (id, undo_group, message_id, operation, intent_version,
-                                 state, created_millis, per_message_seq, expires_millis)
-             VALUES (?1, ?2, ?3, ?4, 1, 'Pending', ?5, ?6, ?7)",
-                rusqlite::params![
-                    intent_id.to_be_bytes().to_vec(),
-                    undo_group.to_be_bytes().to_vec(),
-                    message.to_bytes().to_vec(),
-                    intent.name(),
-                    i64::try_from(now).unwrap_or(i64::MAX),
-                    i64::try_from(sequence).unwrap_or(i64::MAX),
-                    i64::try_from(now.saturating_add(
-                        sift_foundation::limits::L17_INTENT_EXPIRY.as_millis() as u64
-                    ))
-                    .unwrap_or(i64::MAX),
-                ],
-            );
-        if let Err(e) = durable {
-            return Err(format!("the journal refused the intent: {e}"));
-        }
-        out.push(format!("{message}: {} enqueued", intent.name()));
-    }
+    let mut out: Vec<String> = gesture
+        .enqueued
+        .iter()
+        .map(|m| format!("{m}: {} enqueued", gesture.intent.unwrap_or_default()))
+        .collect();
+    out.extend(gesture.skipped.iter().map(|(m, why)| format!("{m}: {why}")));
     out.push(format!(
         "-- optimistic: {}",
-        if intent.applies_optimistically() {
+        if gesture.optimistic {
             "yes, before any round trip"
         } else {
             "no"
         }
     ));
     Ok(out)
-}
-
-fn build_intent(kind: MutationKind, extra: &[&str]) -> Result<Intent, String> {
-    let arg = extra.iter().find(|a| !a.starts_with("--"));
-    Ok(match kind {
-        MutationKind::Archive => Intent::Archive,
-        MutationKind::DeleteToTrash => Intent::DeleteToTrash,
-        MutationKind::PermanentlyDelete => Intent::PermanentlyDelete,
-        MutationKind::MoveTo => Intent::MoveTo {
-            folder: arg
-                .ok_or("move-to needs a folder")?
-                .parse()
-                .map_err(|_| "folder must be a number")?,
-        },
-        MutationKind::Flag => Intent::Flag,
-        MutationKind::MarkRead => Intent::MarkRead,
-        MutationKind::MarkUnread => Intent::MarkUnread,
-        MutationKind::AddTag => Intent::AddTag {
-            name: (*arg.ok_or("add-tag needs a name")?).to_owned(),
-        },
-        MutationKind::RemoveTag => Intent::RemoveTag {
-            name: (*arg.ok_or("remove-tag needs a name")?).to_owned(),
-        },
-        MutationKind::ReportJunk => Intent::ReportJunk,
-        MutationKind::ReportNotJunk => Intent::ReportNotJunk,
-    })
 }
 
 fn queue(app: &mut App, args: &[&str]) -> Output {

@@ -1962,8 +1962,10 @@ dependencies = [
 name = "sift-session"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "sift-app",
  "sift-foundation",
+ "sift-mutations",
  "sift-presentation",
  "sift-provider",
 ]

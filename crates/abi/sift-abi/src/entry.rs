@@ -181,34 +181,153 @@ pub unsafe extern "C" fn sift_invoke_action(
     app: *mut SiftApp,
     id: *const u8,
     id_len: usize,
+    parameter: *const u8,
+    parameter_len: usize,
+    confirmed: u8,
+    out: *mut SiftGesture,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let name = borrowed(id, id_len)?;
+            // An identifier the register does not know is an identified failure rather than a
+            // panic: a shell built against a newer register is a version skew D-2 removed as
+            // a category, but the boundary still answers honestly rather than aborting.
+            action::by_id(name).ok_or(())?;
+            let parameter = if parameter.is_null() {
+                None
+            } else {
+                Some(borrowed(parameter, parameter_len)?)
+            };
+            let layer = layer(app).ok_or(())?;
+
+            let gesture = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                session
+                    .invoke(name, parameter, confirmed != 0, now_millis())
+                    .map_err(|_| ())?
+            };
+
+            // Anything that could have changed a window is followed by a delivery, posted
+            // rather than run: running it here would hand the shell a callback from inside
+            // the call that caused it, which is the reentrancy D-48 forbids.
+            crate::layer::post(
+                layer,
+                Task::Deliver {
+                    layer: app as usize,
+                },
+            );
+            Ok(SiftGesture {
+                mutated: u8::from(gesture.mutates),
+                enqueued: u32::try_from(gesture.enqueued.len()).unwrap_or(u32::MAX),
+                skipped: u32::try_from(gesture.skipped.len()).unwrap_or(u32::MAX),
+                optimistic: u8::from(gesture.optimistic),
+            })
+        })
+    }
+}
+
+/// What one gesture did, as the shell needs to know it.
+///
+/// The undo affordance keys on `enqueued`: a gesture that enqueued nothing has nothing to take
+/// back, and offering undo for it would be a control that does nothing.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftGesture {
+    /// Zero for a navigation or a surface. **Not a failure** — reporting a navigation as
+    /// "0 enqueued" would read as one.
+    pub mutated: u8,
+    pub enqueued: u32,
+    /// Messages whose account is gone. The rest of a bulk gesture is still the user's, so
+    /// these are skipped rather than fatal.
+    pub skipped: u32,
+    /// Whether the overlay hides it before any round trip — NFR-7's 16 ms.
+    pub optimistic: u8,
+}
+
+/// Whether an action is available right now.
+///
+/// D-98 makes an unavailable action **absent rather than disabled**, so this is what decides
+/// whether a shell draws the menu item at all. A greyed item tells a user the action exists
+/// and they cannot have it; an absent one tells them nothing, which is the trade D-98 takes
+/// deliberately and records the cost of.
+///
+/// # Safety
+/// `app` and `out` must be valid; `id` must point to `id_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_action_available(
+    app: *mut SiftApp,
+    id: *const u8,
+    id_len: usize,
+    out: *mut u8,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let name = borrowed(id, id_len)?;
+            action::by_id(name).ok_or(())?;
+            let layer = layer(app).ok_or(())?;
+            let session = layer.session.lock().map_err(|_| ())?;
+            Ok(u8::from(session.action_available(name)))
+        })
+    }
+}
+
+/// D-99's selection, set from the shell.
+///
+/// Keyed on **identity**, never on index: a row that moves under a selection is the same
+/// message, and a selection that followed the index would silently retarget the gesture.
+///
+/// # Safety
+/// `app` must be valid; `ids` must point to `count` identifiers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_select(
+    app: *mut SiftApp,
+    ids: *const SiftId,
+    count: usize,
 ) -> SiftStatus {
     guard(|| {
-        if id.is_null() {
+        if ids.is_null() && count > 0 {
             return Err(());
         }
-        // SAFETY: the caller's obligation. Validity was established where normalization
-        // happened and is not re-checked here.
-        let bytes = unsafe { core::slice::from_raw_parts(id, id_len) };
-        let name = core::str::from_utf8(bytes).map_err(|_| ())?;
-        // An identifier the register does not know is an identified failure rather than a
-        // panic: a shell built against a newer register is a version skew D-2 removed as a
-        // category, but the boundary still answers honestly rather than aborting.
-        action::by_id(name).ok_or(())?;
         // SAFETY: the caller's obligation.
-        let Some(layer) = (unsafe { layer(app) }) else {
-            return Err(());
+        let selected = if count == 0 {
+            &[][..]
+        } else {
+            unsafe { core::slice::from_raw_parts(ids, count) }
         };
-        // Anything that could have changed a window is followed by a delivery, posted
-        // rather than run: running it here would hand the shell a callback from inside the
-        // call that caused it, which is the reentrancy D-48 forbids.
-        crate::layer::post(
-            layer,
-            Task::Deliver {
-                layer: app as usize,
-            },
-        );
+        // SAFETY: the caller's obligation.
+        let layer = (unsafe { layer(app) }).ok_or(())?;
+        let mut session = layer.session.lock().map_err(|_| ())?;
+        session.app_mut().selection = selected
+            .iter()
+            .map(|id| sift_foundation::identity::LocalId::from_u128(id.to_u128()))
+            .collect();
         Ok(())
     })
+}
+
+/// Tell the layer whether a window exists.
+///
+/// FR-25 makes closing a window and quitting different acts, so "a window exists" is a fact
+/// the shell owns and the layer is told — every `Window`-scoped action in the register turns
+/// on it, and a layer that assumed one would offer a menu to nobody.
+///
+/// # Safety
+/// `app` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_set_window_present(app: *mut SiftApp, present: u8) -> SiftStatus {
+    guard(|| {
+        // SAFETY: the caller's obligation.
+        let layer = (unsafe { layer(app) }).ok_or(())?;
+        let mut session = layer.session.lock().map_err(|_| ())?;
+        session.app_mut().has_window = present != 0;
+        Ok(())
+    })
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Observe a window of the message list — D-18.
@@ -1172,10 +1291,18 @@ mod tests {
     }
 
     fn scratch() -> std::path::PathBuf {
+        // A clock is **not** a unique identifier. `as_nanos` reports at whatever resolution the
+        // platform has, and two of these tests running in parallel on the same machine can and
+        // do read the same value — which gives two layers one container, two accounts one set
+        // of files, and a failure that appears about once in five runs. The counter is what
+        // makes it unique; the clock is only there to keep the names readable.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        let d = std::env::temp_dir().join(format!("sift-abi-{}-{unique}", std::process::id()));
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("sift-abi-{}-{unique}-{n}", std::process::id()));
         std::fs::create_dir_all(&d).expect("scratch");
         d
     }
@@ -1192,6 +1319,27 @@ mod tests {
         assert_eq!(status, SiftStatus::Ok);
         assert!(!app.is_null(), "initialization handed back no layer");
         app
+    }
+
+    /// Invoke by identifier, with no parameter and no confirmation — what a menu item does.
+    fn do_action(app: *mut SiftApp, id: &str) -> SiftStatus {
+        let mut gesture = SiftGesture {
+            mutated: 0,
+            enqueued: 0,
+            skipped: 0,
+            optimistic: 0,
+        };
+        unsafe {
+            sift_invoke_action(
+                app,
+                id.as_ptr(),
+                id.len(),
+                core::ptr::null(),
+                0,
+                0,
+                &raw mut gesture,
+            )
+        }
     }
 
     #[test]
@@ -1220,22 +1368,126 @@ mod tests {
         assert!(app.is_null(), "a refused initialization wrote a handle");
     }
 
+    /// A selection-scoped action with nothing selected is **not available**, and invoking it
+    /// is an identified failure.
+    ///
+    /// This test used to assert `Ok`, and it passed for the wrong reason: the entry point
+    /// validated the identifier and did nothing at all. An action that never runs is
+    /// unfalsifiably "accepted".
     #[test]
-    fn an_action_the_register_knows_is_accepted() {
+    fn a_selection_action_with_nothing_selected_is_refused_rather_than_accepted() {
         let app = start(drop_it, scratch_str());
+        assert_eq!(do_action(app, "message.archive"), SiftStatus::Failed);
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// The gesture, end to end across the boundary: select, archive, and see it durably
+    /// enqueued and applied optimistically before any round trip.
+    #[test]
+    fn invoking_an_action_enqueues_a_gesture_and_hides_the_row_before_any_round_trip() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        assert_eq!(
+            unsafe { sift_select(app, &raw const message, 1) },
+            SiftStatus::Ok
+        );
+
+        let mut available = 0u8;
         let id = "message.archive";
-        let status = unsafe { sift_invoke_action(app, id.as_ptr(), id.len()) };
-        assert_eq!(status, SiftStatus::Ok);
+        assert_eq!(
+            unsafe { sift_action_available(app, id.as_ptr(), id.len(), &raw mut available) },
+            SiftStatus::Ok
+        );
+        assert_eq!(available, 1, "a selected message with a provider behind it");
+
+        let mut gesture = SiftGesture {
+            mutated: 0,
+            enqueued: 0,
+            skipped: 0,
+            optimistic: 0,
+        };
+        assert_eq!(
+            unsafe {
+                sift_invoke_action(
+                    app,
+                    id.as_ptr(),
+                    id.len(),
+                    core::ptr::null(),
+                    0,
+                    0,
+                    &raw mut gesture,
+                )
+            },
+            SiftStatus::Ok
+        );
+        assert_eq!(gesture.mutated, 1);
+        assert_eq!(gesture.enqueued, 1);
+        assert_eq!(gesture.skipped, 0);
+        assert_eq!(gesture.optimistic, 1, "NFR-7: reflected before any network");
+
+        // D-51: everything the user sees reads *through* the overlay, so the archived row is
+        // absent from the projection rather than marked in it.
+        let mut oldest = Oldest {
+            at: u64::MAX,
+            id: 0,
+        };
+        let mut observation = SiftObservation::NONE;
+        let _ = unsafe {
+            sift_observe_messages(
+                app,
+                SiftId::from_u128(0),
+                50,
+                keep_oldest,
+                (&raw mut oldest).cast::<c_void>(),
+                &raw mut observation,
+            )
+        };
+        assert_ne!(
+            oldest.id,
+            message.to_u128(),
+            "the archived message is still the oldest row visible"
+        );
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// FR-14's single exception, on the boundary. Permanent deletion is confirmed **before**
+    /// it is issued rather than undone after, because there is nothing to undo once it has
+    /// happened — so an unconfirmed invocation must fail rather than enqueue.
+    #[test]
+    fn permanent_deletion_is_refused_without_confirmation() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        let _ = unsafe { sift_select(app, &raw const message, 1) };
+        // The replayed provider declares it cannot permanently delete at all, which is the
+        // stronger of the two refusals and the one that fires first. Either way the gesture
+        // does not reach the queue, which is the property.
+        assert_eq!(
+            do_action(app, "message.permanently-delete"),
+            SiftStatus::Failed
+        );
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// A `Window`-scoped action is unavailable until the shell says a window exists. FR-25
+    /// makes closing a window and quitting different acts, so this is a fact the shell owns.
+    #[test]
+    fn a_window_scoped_action_waits_for_the_shell_to_say_there_is_a_window() {
+        let app = start(drop_it, scratch_str());
+        let id = "navigate.unified-inbox";
+        let mut available = 1u8;
+        let _ = unsafe { sift_action_available(app, id.as_ptr(), id.len(), &raw mut available) };
+        assert_eq!(available, 0, "no window has been declared");
+
+        assert_eq!(unsafe { sift_set_window_present(app, 1) }, SiftStatus::Ok);
+        let _ = unsafe { sift_action_available(app, id.as_ptr(), id.len(), &raw mut available) };
+        assert_eq!(available, 1);
         let _ = unsafe { sift_shutdown(app) };
     }
 
     #[test]
     fn an_action_invoked_without_a_layer_is_a_failure_rather_than_a_crash() {
         let id = "message.archive";
-        assert_eq!(
-            unsafe { sift_invoke_action(core::ptr::null_mut(), id.as_ptr(), id.len()) },
-            SiftStatus::Failed
-        );
+        assert_eq!(do_action(core::ptr::null_mut(), id), SiftStatus::Failed);
     }
 
     #[test]
@@ -1314,20 +1566,52 @@ mod tests {
         // Not a panic, and not a silent success. A shell built against a newer register is a
         // version skew D-2 removed as a category, but the boundary still answers honestly.
         let id = "message.compose";
-        let status = unsafe { sift_invoke_action(core::ptr::null_mut(), id.as_ptr(), id.len()) };
+        let status = do_action(core::ptr::null_mut(), id);
         assert_eq!(status, SiftStatus::Failed);
     }
 
     #[test]
     fn invalid_utf8_on_the_boundary_fails_rather_than_panicking() {
         let bytes = [0xFFu8, 0xFE];
-        let status = unsafe { sift_invoke_action(core::ptr::null_mut(), bytes.as_ptr(), 2) };
+        let mut gesture = SiftGesture {
+            mutated: 0,
+            enqueued: 0,
+            skipped: 0,
+            optimistic: 0,
+        };
+        let status = unsafe {
+            sift_invoke_action(
+                core::ptr::null_mut(),
+                bytes.as_ptr(),
+                2,
+                core::ptr::null(),
+                0,
+                0,
+                &raw mut gesture,
+            )
+        };
         assert_eq!(status, SiftStatus::Failed);
     }
 
     #[test]
     fn a_null_string_is_a_failure_rather_than_a_dereference() {
-        let status = unsafe { sift_invoke_action(core::ptr::null_mut(), core::ptr::null(), 0) };
+        let mut gesture = SiftGesture {
+            mutated: 0,
+            enqueued: 0,
+            skipped: 0,
+            optimistic: 0,
+        };
+        let status = unsafe {
+            sift_invoke_action(
+                core::ptr::null_mut(),
+                core::ptr::null(),
+                0,
+                core::ptr::null(),
+                0,
+                0,
+                &raw mut gesture,
+            )
+        };
         assert_eq!(status, SiftStatus::Failed);
     }
 

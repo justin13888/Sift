@@ -245,6 +245,30 @@ typedef struct {
 } SiftApp;
 
 /**
+ * What one gesture did, as the shell needs to know it.
+ *
+ * The undo affordance keys on `enqueued`: a gesture that enqueued nothing has nothing to take
+ * back, and offering undo for it would be a control that does nothing.
+ */
+typedef struct {
+  /**
+   * Zero for a navigation or a surface. **Not a failure** — reporting a navigation as
+   * "0 enqueued" would read as one.
+   */
+  uint8_t mutated;
+  uint32_t enqueued;
+  /**
+   * Messages whose account is gone. The rest of a bulk gesture is still the user's, so
+   * these are skipped rather than fatal.
+   */
+  uint32_t skipped;
+  /**
+   * Whether the overlay hides it before any round trip — NFR-7's 16 ms.
+   */
+  uint8_t optimistic;
+} SiftGesture;
+
+/**
  * Which observation a delivery belongs to.
  *
  * **Distinct from [`Generation`], and the two cannot be one value.** A generation is a
@@ -638,7 +662,49 @@ SiftStatus sift_shutdown(SiftApp *app);
  * # Safety
  * `app` must be valid; `id` must point to `id_len` bytes of UTF-8.
  */
-SiftStatus sift_invoke_action(SiftApp *app, const uint8_t *id, size_t id_len);
+SiftStatus sift_invoke_action(SiftApp *app,
+                              const uint8_t *id,
+                              size_t id_len,
+                              const uint8_t *parameter,
+                              size_t parameter_len,
+                              uint8_t confirmed,
+                              SiftGesture *out);
+
+/**
+ * Whether an action is available right now.
+ *
+ * D-98 makes an unavailable action **absent rather than disabled**, so this is what decides
+ * whether a shell draws the menu item at all. A greyed item tells a user the action exists
+ * and they cannot have it; an absent one tells them nothing, which is the trade D-98 takes
+ * deliberately and records the cost of.
+ *
+ * # Safety
+ * `app` and `out` must be valid; `id` must point to `id_len` bytes of UTF-8.
+ */
+SiftStatus sift_action_available(SiftApp *app, const uint8_t *id, size_t id_len, uint8_t *out);
+
+/**
+ * D-99's selection, set from the shell.
+ *
+ * Keyed on **identity**, never on index: a row that moves under a selection is the same
+ * message, and a selection that followed the index would silently retarget the gesture.
+ *
+ * # Safety
+ * `app` must be valid; `ids` must point to `count` identifiers.
+ */
+SiftStatus sift_select(SiftApp *app, const SiftId *ids, size_t count);
+
+/**
+ * Tell the layer whether a window exists.
+ *
+ * FR-25 makes closing a window and quitting different acts, so "a window exists" is a fact
+ * the shell owns and the layer is told — every `Window`-scoped action in the register turns
+ * on it, and a layer that assumed one would offer a menu to nobody.
+ *
+ * # Safety
+ * `app` must be valid.
+ */
+SiftStatus sift_set_window_present(SiftApp *app, uint8_t present);
 
 /**
  * Observe a window of the message list — D-18.

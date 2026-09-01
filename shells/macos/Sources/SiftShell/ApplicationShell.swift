@@ -39,11 +39,10 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         // without it can be neither quit deliberately nor re-authenticated.
         installStatusItem()
 
-        // The application shell owns the application menu as well as the tray item
-        // (`docs/architecture/ui-shell.md`). It is not decoration: this shell raises Sift to a
-        // regular application whenever a window opens, and a regular application with no main
-        // menu is frontmost with an empty menu bar and no way to quit or close from the
-        // keyboard — which FR-24 does not allow.
+        // A minimal bar first, so that a launch which fails before the layer exists is still
+        // quittable from the keyboard — FR-24 does not allow an application that is frontmost
+        // with no way out of it. The register-driven bar replaces this once there is a layer
+        // to ask about availability.
         installApplicationMenu()
 
         var handle: UnsafeMutablePointer<SiftApp>?
@@ -82,6 +81,7 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             return
         }
         app = OpaquePointer(handle)
+        installRegisterMenu()
 
         addFixtureAccountIfAsked()
 
@@ -165,6 +165,82 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
 
         NSApp.mainMenu = mainMenu
         NSApp.windowsMenu = windowMenu
+    }
+
+    // MARK: - D-98's register
+
+    private var menuBar: MenuBar?
+    private var palette: CommandPalette?
+
+    /// Replace the bootstrap menu with one built from the register.
+    ///
+    /// The reconciliation is checked rather than assumed. An action the layer offers that this
+    /// shell binds to nothing is a capability the user cannot reach; one bound here that the
+    /// layer does not have is an item that fails when pressed. Neither is tolerable, and
+    /// neither announces itself, so the check runs at every launch and the disagreement is
+    /// reported where a developer will see it rather than swallowed.
+    private func installRegisterMenu() {
+        guard let app else { return }
+        let bar = MenuBar(app: app) { [weak self] id in self?.invoke(id) }
+        let (unbound, unknown) = bar.install()
+        menuBar = bar
+        palette = CommandPalette(app: app) { [weak self] id in self?.invoke(id) }
+
+        #if DEBUG
+        if !unbound.isEmpty || !unknown.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "The menu and the action register disagree."
+            alert.informativeText = """
+                Actions the layer offers with no menu item: \(unbound.joined(separator: ", "))
+                Menu items the layer does not know: \(unknown.joined(separator: ", "))
+                """
+            alert.runModal()
+        }
+        #endif
+    }
+
+    /// Invoke an action by identifier — the one path every gesture takes.
+    ///
+    /// D-98 makes the action set an ABI surface; the palette is a filtered view of the same
+    /// register, and `sift-harness` drives the application through this same entry point
+    /// rather than a test-only door. That is what makes FR-24's testability claim real.
+    ///
+    /// Menus, keys and the palette all arrive here, because three ways to reach an action must
+    /// not be three implementations of it. The few actions the shell owns outright — opening
+    /// the palette, quitting — are handled before the boundary, and everything else crosses.
+    func invoke(_ id: String) {
+        switch id {
+        case "app.command-palette":
+            palette?.present(over: NSApp.keyWindow)
+            return
+        case "app.quit":
+            quit()
+            return
+        case "app.close-window":
+            NSApp.keyWindow?.performClose(nil)
+            return
+        case "app.new-window", "read.open-message":
+            openMainWindow()
+            return
+        default:
+            break
+        }
+        guard let app else { return }
+        var gesture = SiftGesture()
+        let status = SiftText.withBytes(id) { ptr, len in
+            sift_invoke_action(
+                UnsafeMutablePointer(app), ptr, len, nil, 0, 0, &gesture)
+        }
+        guard status == Ok else {
+            // D-98 hides an unavailable action, so reaching one through a key equivalent that
+            // the platform matched before the menu rebuilt is the case left over. Saying
+            // nothing is the right answer: the action is absent, and an alert would announce
+            // a capability the user does not have.
+            NSSound.beep()
+            return
+        }
+        // The list is an observation, so the optimistic effect arrives through D-48's hop
+        // rather than being applied here. Nothing to do but let it.
     }
 
     @objc func openMainWindow() {
@@ -285,19 +361,6 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             return nil
         }
         return root.path
-    }
-
-    /// Every mutation this shell performs goes through the action register by identifier.
-    ///
-    /// D-98 makes the action set an ABI surface; the palette is a filtered view of the same
-    /// register, and `sift-harness` drives the application through this same entry point
-    /// rather than a test-only door. That is what makes FR-24's testability claim real.
-    func invoke(_ id: String) {
-        guard let app else { return }
-        var bytes = Array(id.utf8)
-        _ = bytes.withUnsafeMutableBufferPointer { buffer in
-            sift_invoke_action(UnsafeMutablePointer(app), buffer.baseAddress, buffer.count)
-        }
     }
 
     private func present(startupFailure status: SiftStatus) {
