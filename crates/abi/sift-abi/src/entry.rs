@@ -23,7 +23,7 @@
 
 use crate::barrier::{guard, guard_out};
 use crate::host::SiftHostCallbacks;
-use crate::layer::{Layer, OpenDocument, SiftInit, Sink, Task};
+use crate::layer::{Layer, OpenAttachments, OpenDocument, SiftInit, Sink, Task};
 use crate::repr::{Generation, SiftId, SiftObservation, SiftRows, SiftStatus, SiftStr};
 use core::ffi::c_void;
 use sift_presentation::action;
@@ -134,6 +134,9 @@ pub unsafe extern "C" fn sift_initialize(
                 schedule_context: init.schedule_context as usize,
                 sinks: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 documents: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                attachments: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                plans: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                next_plan: std::sync::Mutex::new(1),
             });
             Ok(Box::into_raw(layer).cast::<SiftApp>())
         })
@@ -506,11 +509,140 @@ pub struct SiftDocument<'a> {
     pub html: SiftStr<'a>,
     /// D-28's per-document capability token. Every address in `html` is under it.
     pub token: SiftStr<'a>,
-    /// How many fetching positions were refused. For the reader's **native** chrome — a
-    /// count drawn inside the document is one a sender can counterfeit.
+    /// Every position in the document that would fetch something, refused or not.
+    ///
+    /// Beside the refusal count rather than inferred from it: "three images, all three
+    /// withheld" and "three images, one withheld" are different sentences, and only the pair
+    /// distinguishes them.
+    pub fetching_positions: u32,
+    /// How many were refused. For the reader's **native** chrome — a count drawn inside the
+    /// document is one a sender can counterfeit, and so is a control drawn inside it.
     pub blocked: u32,
     /// How many navigation targets the body carries.
     pub links: u32,
+    /// Whether "always load from this sender" has anything to key a durable allowance on.
+    /// Where this is zero the control is **absent** rather than disabled: an allowance keyed
+    /// on nothing applies to everyone, which is the opposite of what the control says.
+    pub may_always_allow: u8,
+    /// Whether FR-42's destination exists. Read it with [`sift_document_unsubscribe`].
+    pub has_unsubscribe: u8,
+}
+
+/// One refused fetching position, and the rule that refused it.
+///
+/// The strings borrow from the open document and die with it.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftWithheld<'a> {
+    /// Where it appeared, so the disclosure says *what* was lost rather than only how much.
+    pub element: SiftStr<'a>,
+    pub attribute: SiftStr<'a>,
+    /// The address, decoded and bidi-stripped. Safe to render in native chrome.
+    pub displayed: SiftStr<'a>,
+    /// Why. Where no filter list is loaded this says so, rather than naming a rule that did
+    /// not run — a user who believes a rule matched believes in a protection that is absent.
+    pub rule: SiftStr<'a>,
+}
+
+impl SiftWithheld<'static> {
+    /// # Safety
+    /// The borrowed document must outlive every use of the result.
+    unsafe fn of(w: &sift_app::document::Withheld) -> Self {
+        unsafe {
+            Self {
+                element: SiftStr::new(extend(&w.element)),
+                attribute: SiftStr::new(extend(&w.attribute)),
+                displayed: SiftStr::new(extend(&w.displayed)),
+                rule: SiftStr::new(extend(&w.rule)),
+            }
+        }
+    }
+}
+
+/// One navigation target, as FR-30 requires it be shown.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftLink<'a> {
+    /// Punycode-decoded and bidi-**stripped** — the opposite of what NFR-54 does to a display
+    /// name, because a URL's component order carries meaning and prose's does not.
+    pub displayed: SiftStr<'a>,
+    /// What will actually be opened.
+    pub target: SiftStr<'a>,
+    /// The wrapper this was recovered from, or null where there was none. Never followed to
+    /// find out where it goes — following it *is* the tracking event.
+    pub wrapper: SiftStr<'a>,
+    /// A `mailto:`, shown and reported as needing a mail handler rather than omitted.
+    pub needs_a_mail_handler: u8,
+}
+
+impl SiftLink<'static> {
+    /// # Safety
+    /// The borrowed document must outlive every use of the result.
+    unsafe fn of(l: &sift_app::document::Link) -> Self {
+        unsafe {
+            Self {
+                displayed: SiftStr::new(extend(&l.displayed)),
+                target: SiftStr::new(extend(&l.target)),
+                wrapper: l
+                    .wrapper
+                    .as_deref()
+                    .map_or_else(SiftStr::null, |w| SiftStr::new(extend(w))),
+                needs_a_mail_handler: u8::from(l.needs_a_mail_handler),
+            }
+        }
+    }
+}
+
+/// One attachment, as FR-10 lists it. Nothing here has been downloaded.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftAttachment<'a> {
+    /// The identifier a save takes. Opaque above the adapter.
+    pub part: SiftStr<'a>,
+    /// What the sender declared. Advisory, and one of three sources.
+    pub media_type: SiftStr<'a>,
+    /// The sender's name, normalized for chrome under NFR-54.
+    pub display_name: SiftStr<'a>,
+    /// The name a save would derive under NFR-53. Shown beside the sender's where they
+    /// differ, because a name that changed silently is one the user did not agree to.
+    pub file_name: SiftStr<'a>,
+    /// What the provider says it costs. Advisory: L-13 bounds what is transferred.
+    pub declared_size: u64,
+    /// [`SIFT_WARN_DECLARED`], [`SIFT_WARN_EXTENSION`] and [`SIFT_WARN_DISAGREES`], or-ed.
+    /// Non-zero means FR-10's explicit warning is required before opening.
+    pub warning: u32,
+}
+
+/// The declared media type is an executable one.
+pub const SIFT_WARN_DECLARED: u32 = 1;
+/// The name ends in an extension the platform will execute. **This is the source that decides
+/// what actually happens**, and the one a type check never sees.
+pub const SIFT_WARN_EXTENSION: u32 = 2;
+/// The sources disagree, which FR-10 makes suspicious in its own right: a sender who labels
+/// an executable as a document has said something about their intent.
+pub const SIFT_WARN_DISAGREES: u32 = 4;
+
+const fn warning_bits(w: sift_app::attachment::Warning) -> u32 {
+    (if w.declared { SIFT_WARN_DECLARED } else { 0 })
+        | (if w.extension { SIFT_WARN_EXTENSION } else { 0 })
+        | (if w.disagrees { SIFT_WARN_DISAGREES } else { 0 })
+}
+
+impl SiftAttachment<'static> {
+    /// # Safety
+    /// The borrowed listing must outlive every use of the result.
+    unsafe fn of(a: &sift_app::attachment::Attachment) -> Self {
+        unsafe {
+            Self {
+                part: SiftStr::new(extend(&a.part)),
+                media_type: SiftStr::new(extend(&a.media_type)),
+                display_name: SiftStr::new(extend(a.display_name.as_str())),
+                file_name: SiftStr::new(extend(&a.file_name)),
+                declared_size: a.declared_size,
+                warning: warning_bits(a.warning),
+            }
+        }
+    }
 }
 
 /// Open a message's body: fetch its chosen part and run the seven stages over it.
@@ -543,22 +675,288 @@ pub unsafe extern "C" fn sift_open_document(
                     .map_err(|_| ())?
             };
             let blocked = u32::try_from(document.blocked).unwrap_or(u32::MAX);
+            let positions = u32::try_from(document.fetching_positions).unwrap_or(u32::MAX);
             let links = u32::try_from(document.links.len()).unwrap_or(u32::MAX);
+            let may_always_allow = u8::from(document.may_always_allow);
+            let has_unsubscribe = u8::from(document.unsubscribe.is_some());
+            let token = document.token.clone();
+
             // The strings outlive the call, so they are held by the layer and keyed on the
             // token the shell is about to be given. Closing the document is what frees them,
             // which is the same gesture that revokes the token — one lifetime, not two.
             let mut open = layer.documents.lock().map_err(|_| ())?;
-            let entry = open
-                .entry(document.token.clone())
-                .or_insert_with(|| OpenDocument {
-                    html: document.html,
-                    token: document.token.clone(),
-                });
+            let entry = open.entry(token.clone()).or_insert_with(|| {
+                let mut held = OpenDocument {
+                    document,
+                    withheld: Vec::new(),
+                    links: Vec::new(),
+                };
+                // SAFETY: the rows borrow from `held.document`, which is moved into the map
+                // in this same expression and removed only by `sift_close_document` — the
+                // call that also tells the shell to stop using them.
+                held.withheld = held
+                    .document
+                    .withheld
+                    .iter()
+                    .map(|w| SiftWithheld::of(w))
+                    .collect();
+                held.links = held
+                    .document
+                    .links
+                    .iter()
+                    .map(|l| SiftLink::of(l))
+                    .collect();
+                held
+            });
             Ok(SiftDocument {
-                html: SiftStr::new(extend(&entry.html)),
-                token: SiftStr::new(extend(&entry.token)),
+                html: SiftStr::new(extend(&entry.document.html)),
+                token: SiftStr::new(extend(&entry.document.token)),
+                fetching_positions: positions,
                 blocked,
                 links,
+                may_always_allow,
+                has_unsubscribe,
+            })
+        })
+    }
+}
+
+/// FR-29's disclosure: every refused position in an open document, and the rule behind it.
+///
+/// The rows borrow from the document and are valid until [`sift_close_document`]. That is one
+/// lifetime rather than two that can disagree — the revocation that kills the addresses is the
+/// same call that frees the rows describing them.
+///
+/// # Safety
+/// `app` and `out` must be valid; `token` must point to `token_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_document_withheld(
+    app: *mut SiftApp,
+    token: *const u8,
+    token_len: usize,
+    out: *mut SiftRows<'static, SiftWithheld<'static>>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let name = borrowed(token, token_len)?;
+            let open = layer.documents.lock().map_err(|_| ())?;
+            let held = open.get(name).ok_or(())?;
+            Ok(SiftRows::new(extend_rows(&held.withheld)))
+        })
+    }
+}
+
+/// FR-30: every navigation target, with the destination the confirmation sheet must show.
+///
+/// # Safety
+/// `app` and `out` must be valid; `token` must point to `token_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_document_links(
+    app: *mut SiftApp,
+    token: *const u8,
+    token_len: usize,
+    out: *mut SiftRows<'static, SiftLink<'static>>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let name = borrowed(token, token_len)?;
+            let open = layer.documents.lock().map_err(|_| ())?;
+            let held = open.get(name).ok_or(())?;
+            Ok(SiftRows::new(extend_rows(&held.links)))
+        })
+    }
+}
+
+/// FR-42: the unsubscribe destination, where the message declares one.
+///
+/// Fails where there is none, which the shell already knows from `has_unsubscribe` — the two
+/// agree by construction because both read the same field.
+///
+/// **Sift never issues the request.** The historical form is a message, which the no-send
+/// constraint forbids outright; the modern form is an HTTP request to an address carrying a
+/// per-recipient token, which is precisely what FR-29 treats as evidence that a resource is
+/// tracking the reader. This hands the shell a destination to open in a browser, and nothing
+/// on this boundary can be made to fetch it.
+///
+/// # Safety
+/// `app` and `out` must be valid; `token` must point to `token_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_document_unsubscribe(
+    app: *mut SiftApp,
+    token: *const u8,
+    token_len: usize,
+    out: *mut SiftLink<'static>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let name = borrowed(token, token_len)?;
+            let open = layer.documents.lock().map_err(|_| ())?;
+            let held = open.get(name).ok_or(())?;
+            let link = held.document.unsubscribe.as_ref().ok_or(())?;
+            Ok(SiftLink::of(link))
+        })
+    }
+}
+
+/// FR-10's list. **Nothing is downloaded** — this reads the structure the sync already has.
+///
+/// The rows are held per message and replaced on each call, so a shell that lists twice sees
+/// the second listing rather than two.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_message_attachments(
+    app: *mut SiftApp,
+    message: SiftId,
+    out: *mut SiftRows<'static, SiftAttachment<'static>>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let listed = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                session
+                    .app_mut()
+                    .attachments(sift_foundation::identity::LocalId::from_u128(
+                        message.to_u128(),
+                    ))
+                    .map_err(|_| ())?
+            };
+            let mut open = layer.attachments.lock().map_err(|_| ())?;
+            let entry = open.entry(message.to_u128()).or_insert(OpenAttachments {
+                listed: Vec::new(),
+                rows: Vec::new(),
+            });
+            entry.listed = listed;
+            entry.rows.clear();
+            // SAFETY: the rows borrow from `entry.listed`, which the layer owns and replaces
+            // only here — and a replacement is a new listing the shell asked for.
+            entry.rows = entry.listed.iter().map(|a| SiftAttachment::of(a)).collect();
+            Ok(SiftRows::new(extend_rows(&entry.rows)))
+        })
+    }
+}
+
+/// NFR-53's plan: where an attachment would be written, resolved and shown before the write.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftSavePlan<'a> {
+    /// Names the plan. [`sift_write_attachment`] takes this rather than a path, so the path
+    /// that is written is the one that was shown — re-deriving at write time is exactly how
+    /// those two come apart.
+    pub plan: u64,
+    /// The **exact** final path, including any disambiguating suffix.
+    pub final_path: SiftStr<'a>,
+    /// Whether the derived name differs from the sender's, which is worth saying out loud.
+    pub renamed: u8,
+    pub declared_size: u64,
+}
+
+/// Resolve where an attachment would be written. **Writes nothing.**
+///
+/// Two calls rather than one, because the requirement is that the exact path be shown
+/// *before* the write. One call that saved and then reported would satisfy every test and
+/// none of the requirement.
+///
+/// The directory is the user's and comes from the platform's own chooser; Sift decides only
+/// the name, and decides it under NFR-53.
+///
+/// # Safety
+/// `app` and `out` must be valid; `part` and `directory` must point to their lengths in UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_plan_attachment_save(
+    app: *mut SiftApp,
+    message: SiftId,
+    part: *const u8,
+    part_len: usize,
+    directory: *const u8,
+    directory_len: usize,
+    out: *mut SiftSavePlan<'static>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let part = borrowed(part, part_len)?;
+            let directory = borrowed(directory, directory_len)?;
+            let plan = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                session
+                    .app_mut()
+                    .plan_attachment_save(
+                        sift_foundation::identity::LocalId::from_u128(message.to_u128()),
+                        part,
+                        std::path::Path::new(directory),
+                    )
+                    .map_err(|_| ())?
+            };
+            let handle = {
+                let mut next = layer.next_plan.lock().map_err(|_| ())?;
+                let handle = *next;
+                *next += 1;
+                handle
+            };
+            let renamed = u8::from(plan.renamed);
+            let declared_size = plan.declared_size;
+            let mut plans = layer.plans.lock().map_err(|_| ())?;
+            let held = plans.entry(handle).or_insert(plan);
+            // The path is not valid UTF-8 on every platform; a path that cannot be shown is a
+            // path that cannot be written under a requirement to show it first.
+            let shown = held.final_path.to_str().ok_or(())?;
+            Ok(SiftSavePlan {
+                plan: handle,
+                final_path: SiftStr::new(extend(shown)),
+                renamed,
+                declared_size,
+            })
+        })
+    }
+}
+
+/// What a completed save wrote, and what the bytes turned out to be.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftSaveOutcome {
+    pub written: u64,
+    /// The warning bits again, now including the source that only exists once the content
+    /// does. A `.pdf` whose bytes begin `MZ` is the case FR-10 wrote the rule for.
+    pub warning: u32,
+}
+
+/// Fetch the part and write it to the planned path.
+///
+/// **Nothing is overwritten**, and that is held at the syscall rather than by a check — a
+/// check before a write is a race, and the file that appears between the two is the one
+/// somebody cared about.
+///
+/// The plan is consumed, so one plan writes one file. A shell that wants a second copy asks
+/// for a second plan, which resolves a second path.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_write_attachment(
+    app: *mut SiftApp,
+    plan: u64,
+    out: *mut SiftSaveOutcome,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let plan = layer
+                .plans
+                .lock()
+                .map_err(|_| ())?
+                .remove(&plan)
+                .ok_or(())?;
+            let mut session = layer.session.lock().map_err(|_| ())?;
+            let (written, warning) = session.app_mut().write_attachment(&plan).map_err(|_| ())?;
+            Ok(SiftSaveOutcome {
+                written,
+                warning: warning_bits(warning),
             })
         })
     }
@@ -672,6 +1070,27 @@ pub unsafe extern "C" fn sift_resolve_resource(
 /// # Safety
 /// The caller must not let the returned reference outlive the entry in `Layer::documents`
 /// that owns it — which is what `sift_close_document` is for.
+/// Borrow a caller's string, which is a pointer and a length and never NUL-terminated.
+///
+/// # Safety
+/// `p` must point to `len` bytes, or be null.
+unsafe fn borrowed<'a>(p: *const u8, len: usize) -> Result<&'a str, ()> {
+    if p.is_null() {
+        return Err(());
+    }
+    // SAFETY: the caller's obligation.
+    let bytes = unsafe { core::slice::from_raw_parts(p, len) };
+    core::str::from_utf8(bytes).map_err(|_| ())
+}
+
+/// # Safety
+/// The rows must live in layer-owned storage freed only by the call that tells the shell to
+/// stop reading them.
+unsafe fn extend_rows<T>(rows: &[T]) -> &'static [T] {
+    // SAFETY: the caller's obligation.
+    unsafe { &*(std::ptr::from_ref::<[T]>(rows)) }
+}
+
 unsafe fn extend(s: &str) -> &'static str {
     // SAFETY: the string lives in the layer's document table and is removed only by
     // `sift_close_document`, which is also what tells the shell to stop using it.
@@ -981,6 +1400,348 @@ mod tests {
             unsafe { sift_cancel_observation(core::ptr::null_mut(), SiftObservation::NONE) },
             SiftStatus::Failed
         );
+    }
+
+    // -----------------------------------------------------------------------------------
+    // The reader's chrome, across the boundary a shell actually calls.
+    //
+    // The AppKit code that draws these is not testable here; what *is* testable is that the
+    // boundary hands it the right answers, which is where a mistake would be silent. The
+    // replayed corpus carries a deliberately hostile message — a click wrapper, a homograph
+    // host, a `mailto:` unsubscribe, and an attachment declared `application/pdf`, named with
+    // U+202E so it renders `invoice.pdf`, carrying a PE header.
+    // -----------------------------------------------------------------------------------
+
+    /// Where [`keep_oldest`] accumulates. Travels as the callback's context.
+    struct Oldest {
+        at: u64,
+        id: u128,
+    }
+
+    extern "C" fn keep_oldest(
+        context: *mut c_void,
+        _: SiftObservation,
+        _: Generation,
+        rows: SiftRows<'_, SiftMessageRow<'_>>,
+    ) {
+        // SAFETY: the context is a live `Oldest` for the duration of the call that posted
+        // this delivery, and the rows are live for the duration of the callback.
+        let oldest = unsafe { &mut *context.cast::<Oldest>() };
+        for row in unsafe { rows.as_slice() } {
+            if row.received_millis < oldest.at {
+                oldest.at = row.received_millis;
+                oldest.id = u128::from_be_bytes(row.id.bytes);
+            }
+        }
+    }
+
+    /// Add the replayed account, sync it, and hand back the hostile message's identity.
+    ///
+    /// The layer must have been started with [`run_inline`], because the delivery this reads
+    /// arrives through D-48's hop and a schedule that drops the ticket delivers nothing.
+    fn hostile_message(app: *mut SiftApp) -> SiftId {
+        let name = "mail";
+        let mut account = SiftId::from_u128(0);
+        assert_eq!(
+            unsafe { sift_add_replayed_account(app, name.as_ptr(), name.len(), &raw mut account) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sift_sync_account(app, name.as_ptr(), name.len()) },
+            SiftStatus::Ok
+        );
+
+        // The oldest of the three, which is the hostile one. Read through the same row
+        // projection the list draws from rather than through a test-only path — the point of
+        // driving the boundary is that nothing here is a second way in.
+        //
+        // The accumulator travels as the callback's own context rather than as a static,
+        // because these tests run in parallel and a static would make them one test with a
+        // race in it.
+        let mut oldest = Oldest {
+            at: u64::MAX,
+            id: 0,
+        };
+        let mut observation = SiftObservation::NONE;
+        assert_eq!(
+            unsafe {
+                sift_observe_messages(
+                    app,
+                    SiftId::from_u128(0),
+                    50,
+                    keep_oldest,
+                    (&raw mut oldest).cast::<c_void>(),
+                    &raw mut observation,
+                )
+            },
+            SiftStatus::Ok
+        );
+        assert_ne!(oldest.at, u64::MAX, "the observation delivered no rows");
+        let _ = unsafe { sift_cancel_observation(app, observation) };
+        SiftId::from_u128(oldest.id)
+    }
+
+    fn open(app: *mut SiftApp, message: SiftId) -> SiftDocument<'static> {
+        let mut document = SiftDocument {
+            html: SiftStr::null(),
+            token: SiftStr::null(),
+            fetching_positions: 0,
+            blocked: 0,
+            links: 0,
+            may_always_allow: 0,
+            has_unsubscribe: 0,
+        };
+        assert_eq!(
+            unsafe { sift_open_document(app, message, 0, &raw mut document) },
+            SiftStatus::Ok
+        );
+        document
+    }
+
+    fn text(s: SiftStr<'_>) -> String {
+        // SAFETY: every call site reads a value whose document or listing is still open,
+        // which is the liveness half the accessor cannot check for itself.
+        unsafe { s.as_str() }.unwrap_or_default().to_owned()
+    }
+
+    #[test]
+    fn a_documents_counts_distinguish_all_withheld_from_some_withheld() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        let document = open(app, message);
+
+        assert!(
+            document.fetching_positions > 0,
+            "there is something to refuse"
+        );
+        assert_eq!(
+            document.fetching_positions, document.blocked,
+            "with no filter list loaded, an absent authority denies every one"
+        );
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    #[test]
+    fn the_withheld_disclosure_names_the_shed_rather_than_a_rule_that_never_ran() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        let document = open(app, message);
+        let token = text(document.token);
+
+        let mut rows = SiftRows::empty();
+        assert_eq!(
+            unsafe { sift_document_withheld(app, token.as_ptr(), token.len(), &raw mut rows) },
+            SiftStatus::Ok
+        );
+        assert_eq!(rows.len(), document.blocked as usize);
+
+        // SAFETY: the document is open.
+        let row = &unsafe { rows.as_slice() }[0];
+        assert_eq!(text(row.element), "img");
+        assert_eq!(text(row.attribute), "src");
+        assert!(text(row.displayed).contains("beacon.tracker.test"));
+        assert!(
+            text(row.rule).contains("no filter list is loaded"),
+            "a user who believes a rule matched believes in a protection that is absent"
+        );
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// The control is **absent** rather than disabled. An allowance keyed on nothing applies
+    /// to every sender, which is the opposite of what the button says it does.
+    #[test]
+    fn the_durable_allowance_is_not_offered_when_there_is_nothing_to_key_it_on() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        assert_eq!(open(app, message).may_always_allow, 0);
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    #[test]
+    fn a_link_crosses_with_its_wrapper_and_its_real_destination() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        let document = open(app, message);
+        let token = text(document.token);
+
+        let mut rows = SiftRows::empty();
+        assert_eq!(
+            unsafe { sift_document_links(app, token.as_ptr(), token.len(), &raw mut rows) },
+            SiftStatus::Ok
+        );
+        assert_eq!(rows.len(), document.links as usize);
+        // SAFETY: the document is open.
+        let links = unsafe { rows.as_slice() };
+
+        let wrapped = links
+            .iter()
+            .find(|l| !l.wrapper.is_null())
+            .expect("the wrapped link");
+        assert_eq!(text(wrapped.target), "https://example.test/offer");
+        assert!(text(wrapped.wrapper).contains("click.tracker.test"));
+
+        // The falsifier: a wrapper carrying nothing recoverable stays unresolved. A Sift that
+        // resolved wrappers by *fetching* them would resolve this one too.
+        let opaque = links
+            .iter()
+            .find(|l| text(l.target).contains("/x/9f2c41"))
+            .expect("the opaque wrapper");
+        assert!(
+            opaque.wrapper.is_null(),
+            "it claims to have unwrapped nothing"
+        );
+
+        // A punycode label is marked rather than rendered: a user cannot compare two strings
+        // they are only shown one of.
+        let homograph = links
+            .iter()
+            .find(|l| text(l.target).contains("xn--"))
+            .expect("the homograph host");
+        assert!(text(homograph.displayed).contains("[80ak6aa92e]"));
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// FR-42. Shown, reported as needing a mail handler, and never sent — nothing on this
+    /// boundary can be made to issue the request.
+    #[test]
+    fn the_unsubscribe_destination_crosses_and_says_it_needs_a_mail_handler() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        let document = open(app, message);
+        assert_eq!(document.has_unsubscribe, 1);
+        let token = text(document.token);
+
+        let mut link = SiftLink {
+            displayed: SiftStr::null(),
+            target: SiftStr::null(),
+            wrapper: SiftStr::null(),
+            needs_a_mail_handler: 0,
+        };
+        assert_eq!(
+            unsafe { sift_document_unsubscribe(app, token.as_ptr(), token.len(), &raw mut link) },
+            SiftStatus::Ok
+        );
+        assert!(text(link.target).starts_with("mailto:"));
+        assert_eq!(link.needs_a_mail_handler, 1);
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// The rows borrow from the document, and closing it is what tells the shell to stop
+    /// reading them. A read after the close must fail rather than hand back a dangling slice.
+    #[test]
+    fn closing_a_document_takes_its_rows_with_it() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        let token = text(open(app, message).token);
+
+        assert_eq!(
+            unsafe { sift_close_document(app, token.as_ptr(), token.len()) },
+            SiftStatus::Ok
+        );
+        let mut rows = SiftRows::empty();
+        assert_eq!(
+            unsafe { sift_document_withheld(app, token.as_ptr(), token.len(), &raw mut rows) },
+            SiftStatus::Failed
+        );
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// FR-10's three sources, and the one a type check never sees. The declared type is
+    /// `application/pdf`, the name renders `invoice.pdf`, and the extension the platform acts
+    /// on is `.exe`.
+    #[test]
+    fn an_attachment_crosses_with_the_warning_a_type_check_would_have_missed() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+
+        let mut rows = SiftRows::empty();
+        assert_eq!(
+            unsafe { sift_message_attachments(app, message, &raw mut rows) },
+            SiftStatus::Ok
+        );
+        assert_eq!(rows.len(), 1);
+        // SAFETY: the listing is held by the layer until the next call for this message.
+        let row = &unsafe { rows.as_slice() }[0];
+
+        assert_eq!(text(row.media_type), "application/pdf");
+        assert_eq!(text(row.file_name), "invoicefdp.exe");
+        assert!(
+            !text(row.file_name).contains('\u{202E}'),
+            "the override is gone from the name a save would use"
+        );
+        assert!(
+            text(row.display_name).contains('\u{202E}'),
+            "and is *kept* in the display name, which NFR-54 isolates rather than strips"
+        );
+        assert_ne!(row.warning & SIFT_WARN_EXTENSION, 0);
+        assert_ne!(row.warning & SIFT_WARN_DISAGREES, 0);
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// NFR-53: the exact final path is resolved and shown **before** the write, and the write
+    /// takes the plan rather than a path — so what is written is what was shown.
+    #[test]
+    fn planning_a_save_writes_nothing_and_naming_the_plan_is_what_writes() {
+        let directory = scratch();
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        let part = "2";
+        let path = directory.to_str().expect("utf-8");
+
+        let mut plan = SiftSavePlan {
+            plan: 0,
+            final_path: SiftStr::null(),
+            renamed: 0,
+            declared_size: 0,
+        };
+        assert_eq!(
+            unsafe {
+                sift_plan_attachment_save(
+                    app,
+                    message,
+                    part.as_ptr(),
+                    part.len(),
+                    path.as_ptr(),
+                    path.len(),
+                    &raw mut plan,
+                )
+            },
+            SiftStatus::Ok
+        );
+        let shown = text(plan.final_path);
+        assert!(shown.ends_with("invoicefdp.exe"), "{shown}");
+        assert_eq!(plan.renamed, 1, "the name was derived, and it says so");
+        assert_eq!(
+            std::fs::read_dir(&directory).expect("readable").count(),
+            0,
+            "planning wrote a file"
+        );
+
+        let mut outcome = SiftSaveOutcome {
+            written: 0,
+            warning: 0,
+        };
+        assert_eq!(
+            unsafe { sift_write_attachment(app, plan.plan, &raw mut outcome) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            std::fs::read(std::path::Path::new(&shown))
+                .expect("written")
+                .get(..2),
+            Some(b"MZ".as_slice()),
+            "written to exactly the path that was shown"
+        );
+        // The content is the fourth source, and it only exists once the bytes are here.
+        assert_ne!(outcome.warning & SIFT_WARN_DECLARED, 0);
+
+        // The plan is consumed: one plan writes one file, so a repeat cannot overwrite it.
+        assert_eq!(
+            unsafe { sift_write_attachment(app, plan.plan, &raw mut outcome) },
+            SiftStatus::Failed
+        );
+        let _ = unsafe { sift_shutdown(app) };
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]

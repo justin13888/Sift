@@ -24,6 +24,23 @@
 #include <stdlib.h>
 
 /**
+ * The declared media type is an executable one.
+ */
+#define SIFT_WARN_DECLARED 1
+
+/**
+ * The name ends in an extension the platform will execute. **This is the source that decides
+ * what actually happens**, and the one a type check never sees.
+ */
+#define SIFT_WARN_EXTENSION 2
+
+/**
+ * The sources disagree, which FR-10 makes suspicious in its own right: a sender who labels
+ * an executable as a document has said something about their intent.
+ */
+#define SIFT_WARN_DISAGREES 4
+
+/**
  * The result of every entry point.
  *
  * **No entry point encodes failure in its return value's domain.** Sentinel returns,
@@ -364,15 +381,198 @@ typedef struct {
    */
   SiftStr token;
   /**
-   * How many fetching positions were refused. For the reader's **native** chrome — a
-   * count drawn inside the document is one a sender can counterfeit.
+   * Every position in the document that would fetch something, refused or not.
+   *
+   * Beside the refusal count rather than inferred from it: "three images, all three
+   * withheld" and "three images, one withheld" are different sentences, and only the pair
+   * distinguishes them.
+   */
+  uint32_t fetching_positions;
+  /**
+   * How many were refused. For the reader's **native** chrome — a count drawn inside the
+   * document is one a sender can counterfeit, and so is a control drawn inside it.
    */
   uint32_t blocked;
   /**
    * How many navigation targets the body carries.
    */
   uint32_t links;
+  /**
+   * Whether "always load from this sender" has anything to key a durable allowance on.
+   * Where this is zero the control is **absent** rather than disabled: an allowance keyed
+   * on nothing applies to everyone, which is the opposite of what the control says.
+   */
+  uint8_t may_always_allow;
+  /**
+   * Whether FR-42's destination exists. Read it with [`sift_document_unsubscribe`].
+   */
+  uint8_t has_unsubscribe;
 } SiftDocument;
+
+/**
+ * One refused fetching position, and the rule that refused it.
+ *
+ * The strings borrow from the open document and die with it.
+ */
+typedef struct {
+  /**
+   * Where it appeared, so the disclosure says *what* was lost rather than only how much.
+   */
+  SiftStr element;
+  SiftStr attribute;
+  /**
+   * The address, decoded and bidi-stripped. Safe to render in native chrome.
+   */
+  SiftStr displayed;
+  /**
+   * Why. Where no filter list is loaded this says so, rather than naming a rule that did
+   * not run — a user who believes a rule matched believes in a protection that is absent.
+   */
+  SiftStr rule;
+} SiftWithheld;
+
+/**
+ * A contiguous, borrowed array of fixed-layout records.
+ *
+ * The alternative — an opaque row handle with a per-field accessor — was excluded
+ * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
+ * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
+ * hundred thousand boundary crossings per fling, against one delivery.
+ *
+ * # Safety
+ *
+ * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
+ * pointing into layer-owned storage with the same lifetime.
+ */
+typedef struct {
+  const SiftWithheld *ptr;
+  size_t len;
+} SiftRows_SiftWithheld;
+
+/**
+ * One navigation target, as FR-30 requires it be shown.
+ */
+typedef struct {
+  /**
+   * Punycode-decoded and bidi-**stripped** — the opposite of what NFR-54 does to a display
+   * name, because a URL's component order carries meaning and prose's does not.
+   */
+  SiftStr displayed;
+  /**
+   * What will actually be opened.
+   */
+  SiftStr target;
+  /**
+   * The wrapper this was recovered from, or null where there was none. Never followed to
+   * find out where it goes — following it *is* the tracking event.
+   */
+  SiftStr wrapper;
+  /**
+   * A `mailto:`, shown and reported as needing a mail handler rather than omitted.
+   */
+  uint8_t needs_a_mail_handler;
+} SiftLink;
+
+/**
+ * A contiguous, borrowed array of fixed-layout records.
+ *
+ * The alternative — an opaque row handle with a per-field accessor — was excluded
+ * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
+ * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
+ * hundred thousand boundary crossings per fling, against one delivery.
+ *
+ * # Safety
+ *
+ * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
+ * pointing into layer-owned storage with the same lifetime.
+ */
+typedef struct {
+  const SiftLink *ptr;
+  size_t len;
+} SiftRows_SiftLink;
+
+/**
+ * One attachment, as FR-10 lists it. Nothing here has been downloaded.
+ */
+typedef struct {
+  /**
+   * The identifier a save takes. Opaque above the adapter.
+   */
+  SiftStr part;
+  /**
+   * What the sender declared. Advisory, and one of three sources.
+   */
+  SiftStr media_type;
+  /**
+   * The sender's name, normalized for chrome under NFR-54.
+   */
+  SiftStr display_name;
+  /**
+   * The name a save would derive under NFR-53. Shown beside the sender's where they
+   * differ, because a name that changed silently is one the user did not agree to.
+   */
+  SiftStr file_name;
+  /**
+   * What the provider says it costs. Advisory: L-13 bounds what is transferred.
+   */
+  uint64_t declared_size;
+  /**
+   * [`SIFT_WARN_DECLARED`], [`SIFT_WARN_EXTENSION`] and [`SIFT_WARN_DISAGREES`], or-ed.
+   * Non-zero means FR-10's explicit warning is required before opening.
+   */
+  uint32_t warning;
+} SiftAttachment;
+
+/**
+ * A contiguous, borrowed array of fixed-layout records.
+ *
+ * The alternative — an opaque row handle with a per-field accessor — was excluded
+ * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
+ * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
+ * hundred thousand boundary crossings per fling, against one delivery.
+ *
+ * # Safety
+ *
+ * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
+ * pointing into layer-owned storage with the same lifetime.
+ */
+typedef struct {
+  const SiftAttachment *ptr;
+  size_t len;
+} SiftRows_SiftAttachment;
+
+/**
+ * NFR-53's plan: where an attachment would be written, resolved and shown before the write.
+ */
+typedef struct {
+  /**
+   * Names the plan. [`sift_write_attachment`] takes this rather than a path, so the path
+   * that is written is the one that was shown — re-deriving at write time is exactly how
+   * those two come apart.
+   */
+  uint64_t plan;
+  /**
+   * The **exact** final path, including any disambiguating suffix.
+   */
+  SiftStr final_path;
+  /**
+   * Whether the derived name differs from the sender's, which is worth saying out loud.
+   */
+  uint8_t renamed;
+  uint64_t declared_size;
+} SiftSavePlan;
+
+/**
+ * What a completed save wrote, and what the bytes turned out to be.
+ */
+typedef struct {
+  uint64_t written;
+  /**
+   * The warning bits again, now including the source that only exists once the content
+   * does. A `.pdf` whose bytes begin `MZ` is the case FR-10 wrote the rule for.
+   */
+  uint32_t warning;
+} SiftSaveOutcome;
 
 /**
  * What the broker said about one resource load.
@@ -539,6 +739,99 @@ SiftStatus sift_sync_account(SiftApp *app, const uint8_t *label, size_t label_le
  * `app` and `out` must be valid.
  */
 SiftStatus sift_open_document(SiftApp *app, SiftId message, uint8_t dark, SiftDocument *out);
+
+/**
+ * FR-29's disclosure: every refused position in an open document, and the rule behind it.
+ *
+ * The rows borrow from the document and are valid until [`sift_close_document`]. That is one
+ * lifetime rather than two that can disagree — the revocation that kills the addresses is the
+ * same call that frees the rows describing them.
+ *
+ * # Safety
+ * `app` and `out` must be valid; `token` must point to `token_len` bytes of UTF-8.
+ */
+SiftStatus sift_document_withheld(SiftApp *app,
+                                  const uint8_t *token,
+                                  size_t token_len,
+                                  SiftRows_SiftWithheld *out);
+
+/**
+ * FR-30: every navigation target, with the destination the confirmation sheet must show.
+ *
+ * # Safety
+ * `app` and `out` must be valid; `token` must point to `token_len` bytes of UTF-8.
+ */
+SiftStatus sift_document_links(SiftApp *app,
+                               const uint8_t *token,
+                               size_t token_len,
+                               SiftRows_SiftLink *out);
+
+/**
+ * FR-42: the unsubscribe destination, where the message declares one.
+ *
+ * Fails where there is none, which the shell already knows from `has_unsubscribe` — the two
+ * agree by construction because both read the same field.
+ *
+ * **Sift never issues the request.** The historical form is a message, which the no-send
+ * constraint forbids outright; the modern form is an HTTP request to an address carrying a
+ * per-recipient token, which is precisely what FR-29 treats as evidence that a resource is
+ * tracking the reader. This hands the shell a destination to open in a browser, and nothing
+ * on this boundary can be made to fetch it.
+ *
+ * # Safety
+ * `app` and `out` must be valid; `token` must point to `token_len` bytes of UTF-8.
+ */
+SiftStatus sift_document_unsubscribe(SiftApp *app,
+                                     const uint8_t *token,
+                                     size_t token_len,
+                                     SiftLink *out);
+
+/**
+ * FR-10's list. **Nothing is downloaded** — this reads the structure the sync already has.
+ *
+ * The rows are held per message and replaced on each call, so a shell that lists twice sees
+ * the second listing rather than two.
+ *
+ * # Safety
+ * `app` and `out` must be valid.
+ */
+SiftStatus sift_message_attachments(SiftApp *app, SiftId message, SiftRows_SiftAttachment *out);
+
+/**
+ * Resolve where an attachment would be written. **Writes nothing.**
+ *
+ * Two calls rather than one, because the requirement is that the exact path be shown
+ * *before* the write. One call that saved and then reported would satisfy every test and
+ * none of the requirement.
+ *
+ * The directory is the user's and comes from the platform's own chooser; Sift decides only
+ * the name, and decides it under NFR-53.
+ *
+ * # Safety
+ * `app` and `out` must be valid; `part` and `directory` must point to their lengths in UTF-8.
+ */
+SiftStatus sift_plan_attachment_save(SiftApp *app,
+                                     SiftId message,
+                                     const uint8_t *part,
+                                     size_t part_len,
+                                     const uint8_t *directory,
+                                     size_t directory_len,
+                                     SiftSavePlan *out);
+
+/**
+ * Fetch the part and write it to the planned path.
+ *
+ * **Nothing is overwritten**, and that is held at the syscall rather than by a check — a
+ * check before a write is a race, and the file that appears between the two is the one
+ * somebody cared about.
+ *
+ * The plan is consumed, so one plan writes one file. A shell that wants a second copy asks
+ * for a second plan, which resolves a second path.
+ *
+ * # Safety
+ * `app` and `out` must be valid.
+ */
+SiftStatus sift_write_attachment(SiftApp *app, uint64_t plan, SiftSaveOutcome *out);
 
 /**
  * Close a document: revoke its token and release what was held for it.

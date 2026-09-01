@@ -85,13 +85,38 @@ pub(crate) struct Layer {
     /// keyed on the token, and closing the document is the one gesture that both revokes the
     /// token and frees them — one lifetime rather than two that can disagree.
     pub(crate) documents: Mutex<BTreeMap<String, OpenDocument>>,
+    /// Attachment listings, keyed on the message. Held for the same reason the document is:
+    /// the rows are borrowed, so something has to own them past the call that returns them.
+    pub(crate) attachments: Mutex<BTreeMap<u128, OpenAttachments>>,
+    /// NFR-53's resolved save plans, by handle. A plan is *the* thing the user was shown, so
+    /// writing takes the handle rather than a path — re-deriving a path at write time would
+    /// let the written one differ from the shown one, which is the whole requirement.
+    pub(crate) plans: Mutex<BTreeMap<u64, sift_app::attachment::SavePlan>>,
+    pub(crate) next_plan: Mutex<u64>,
+}
+
+/// A message's attachment listing, and the rows borrowed from it.
+#[derive(Debug)]
+pub(crate) struct OpenAttachments {
+    pub(crate) listed: Vec<sift_app::attachment::Attachment>,
+    pub(crate) rows: Vec<crate::entry::SiftAttachment<'static>>,
 }
 
 /// The layer-owned text behind a [`SiftDocument`](crate::entry::SiftDocument).
+///
+/// The whole document rather than only its HTML, because the reader's chrome is drawn from
+/// the parts *around* the body — what was withheld, where each link goes — and those are
+/// borrowed row arrays under D-66. A row array has to point at something with a lifetime, and
+/// the document's lifetime is the only one that is already correct: it ends at the revocation
+/// that makes every address in it dead.
 #[derive(Debug)]
 pub(crate) struct OpenDocument {
-    pub(crate) html: String,
-    pub(crate) token: String,
+    pub(crate) document: sift_app::document::Document,
+    /// Row arrays are handed out as pointers into a contiguous slice, so the rows are built
+    /// once when the document opens rather than per call — a per-call `Vec` would be freed
+    /// before the shell read it.
+    pub(crate) withheld: Vec<crate::entry::SiftWithheld<'static>>,
+    pub(crate) links: Vec<crate::entry::SiftLink<'static>>,
 }
 
 /// Where one observation's batches go.
