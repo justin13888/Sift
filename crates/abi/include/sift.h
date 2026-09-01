@@ -178,6 +178,46 @@ typedef struct {
 } SiftHostCallbacks;
 
 /**
+ * Run a scheduled item. The shell calls this, on its main loop, with the ticket it was given.
+ */
+typedef void (*SiftRun)(uint64_t ticket);
+
+/**
+ * Arrange for `run(ticket)` to happen on the shell's main loop, and return immediately.
+ *
+ * **It must not run it inline.** Running it inline would deliver a callback from inside the
+ * call that produced it, which is the reentrancy D-48 forbids outright.
+ */
+typedef void (*SiftSchedule)(void *context, SiftRun run, uint64_t ticket);
+
+/**
+ * What the layer needs from the shell that the host callbacks do not carry.
+ */
+typedef struct {
+  /**
+   * The container the application's files live under — UTF-8, pointer and length.
+   *
+   * **The shell supplies it; the layer never computes one.** The container API is platform
+   * code, and D-1's economics rest on the core having no platform toolkit. Deriving a path
+   * from `$HOME` would also be wrong under both the macOS sandbox and Flatpak, and would
+   * give the test harness no way to ask for a scratch root.
+   */
+  SiftStr container_root;
+  /**
+   * D-48's hop.
+   */
+  SiftSchedule schedule;
+  void *schedule_context;
+  /**
+   * D-36 and D-71: whether the callback scheme is registered with the system.
+   *
+   * Checked **before** an authorization begins rather than after, because discovering it
+   * afterwards means the user has already been sent to a browser and returned to nothing.
+   */
+  uint8_t scheme_is_registered;
+} SiftInit;
+
+/**
  * An opaque handle to the running layer.
  *
  * The shell holds it and passes it back. It never dereferences it — which is what lets the
@@ -317,7 +357,7 @@ typedef void (*SiftRowsCallback)(void *context,
  * # Safety
  * `out` must be a valid writable pointer to a `*mut SiftApp`.
  */
-SiftStatus sift_initialize(SiftHostCallbacks callbacks, SiftApp **out);
+SiftStatus sift_initialize(SiftHostCallbacks callbacks, SiftInit init, SiftApp **out);
 
 /**
  * Tear the layer down.
@@ -379,6 +419,24 @@ SiftStatus sift_observe_messages(SiftApp *app,
  */
 SiftStatus sift_cancel_observation(SiftApp *app,
                                    SiftObservation observation);
+
+/**
+ * Run a scheduled delivery. **The shell calls this, on its main loop, and nowhere else.**
+ *
+ * This is the far side of D-48's hop: the layer asked the shell to arrange for a ticket to
+ * be run on its loop, and this is what running it means. Every observer callback the shell
+ * receives is invoked from inside this call, which is what makes "delivered on the shell's
+ * own main loop" true rather than hoped for.
+ *
+ * A ticket that was already run, or that belonged to a layer since torn down, resolves to
+ * nothing. That is not a defect to report: a window closing between the post and the turn
+ * of the loop is ordinary, and the guarantee cancellation makes is precisely that the
+ * delivery finds nothing to call.
+ *
+ * # Safety
+ * Called from the shell's main loop, with a ticket the layer issued.
+ */
+void sift_run_scheduled(uint64_t ticket);
 
 /**
  * How many actions the register holds.

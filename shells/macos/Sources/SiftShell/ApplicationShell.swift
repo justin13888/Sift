@@ -18,6 +18,10 @@ import CSift
 /// than one that used more memory.
 final class ApplicationShell: NSObject, NSApplicationDelegate {
     private var app: OpaquePointer?
+
+    /// The container path's bytes. The layer copies during `sift_initialize`; this simply
+    /// keeps them alive for the duration of that call.
+    private var containerRoot: [UInt8] = []
     private var statusItem: NSStatusItem?
     private var windows: [WindowShell] = []
 
@@ -43,7 +47,34 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         installApplicationMenu()
 
         var handle: UnsafeMutablePointer<SiftApp>?
-        let status = sift_initialize(hostCallbacks(), &handle)
+        // The container is the shell's to name. The layer never computes one — under the
+        // sandbox this resolves inside the app's own container, and a path derived from
+        // $HOME would be wrong there and wrong again under Flatpak on the other shell.
+        //
+        // Application Support and not Caches: the layout MUST NOT live anywhere the
+        // operating system may purge on its own, because a purge would remove blobs while
+        // leaving the encrypted index referencing them.
+        guard let root = Self.containerRoot() else {
+            present(startupFailure: Failed)
+            return
+        }
+        containerRoot = Array(root.utf8)
+        let status = containerRoot.withUnsafeBufferPointer { bytes -> SiftStatus in
+            let init_ = SiftInit(
+                container_root: SiftStr(ptr: bytes.baseAddress, len: bytes.count),
+                // D-48's hop, and the shell's whole obligation for it: post it, do not run
+                // it. Running it inline would hand a callback back from inside the call
+                // that caused it, which is the reentrancy D-48 forbids.
+                schedule: { _, run, ticket in
+                    DispatchQueue.main.async { run?(ticket) }
+                },
+                schedule_context: nil,
+                // D-36 and D-71. The Info.plist registers the scheme, so this bundle has
+                // somewhere for an authorization to return to.
+                scheme_is_registered: 1
+            )
+            return sift_initialize(hostCallbacks(), init_, &handle)
+        }
         guard status == Ok else {
             // A caught panic is its own status, everywhere. Reporting it as an ordinary
             // failure would erase exactly the distinction D-47 insists on.
@@ -200,6 +231,28 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     }
 
     private func hasAnyAccount() -> Bool { false }
+
+    /// The container the application's files live under.
+    ///
+    /// Application Support rather than Caches, because the layout MUST NOT live anywhere the
+    /// operating system may purge on its own. Under the sandbox this already resolves inside
+    /// the app's own container; outside it, the bundle identifier keeps it to itself.
+    private static func containerRoot() -> String? {
+        guard
+            let base = FileManager.default.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask
+            ).first
+        else { return nil }
+        let root = base.appendingPathComponent("net.justinchung.sift", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: root, withIntermediateDirectories: true
+            )
+        } catch {
+            return nil
+        }
+        return root.path
+    }
 
     /// Every mutation this shell performs goes through the action register by identifier.
     ///

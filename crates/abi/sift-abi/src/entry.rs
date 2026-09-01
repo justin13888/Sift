@@ -23,9 +23,11 @@
 
 use crate::barrier::{guard, guard_out};
 use crate::host::SiftHostCallbacks;
+use crate::layer::{Layer, SiftInit, Sink, Task};
 use crate::repr::{Generation, SiftId, SiftObservation, SiftRows, SiftStatus, SiftStr};
 use core::ffi::c_void;
 use sift_presentation::action;
+use sift_session::{Session, Watching};
 
 /// An opaque handle to the running layer.
 ///
@@ -35,6 +37,19 @@ use sift_presentation::action;
 #[repr(C)]
 pub struct SiftApp {
     _private: [u8; 0],
+}
+
+/// Borrow the layer behind a handle the shell gave back.
+///
+/// # Safety
+/// `app` must be a pointer this crate handed out from `sift_initialize` and has not since
+/// torn down.
+unsafe fn layer<'a>(app: *mut SiftApp) -> Option<&'a Layer> {
+    if app.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's obligation, stated on every entry point that takes one.
+    Some(unsafe { &*app.cast::<Layer>() })
 }
 
 /// A message row, as the list receives it.
@@ -97,15 +112,29 @@ pub type SiftRowsCallback = extern "C" fn(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sift_initialize(
     callbacks: SiftHostCallbacks,
+    init: SiftInit,
     out: *mut *mut SiftApp,
 ) -> SiftStatus {
     unsafe {
         guard_out(out, || {
-            let _ = callbacks;
-            // The layer's real construction lands here. The boundary's shape is what this
-            // file fixes, and it is fixed before either shell exists so that neither can
-            // shape it around its own toolkit.
-            Ok(core::ptr::null_mut())
+            // The container is the shell's to name and is not optional. A layer that fell
+            // back to a path of its own would be wrong under the sandbox and under Flatpak,
+            // and would give the harness no way to ask for a scratch root.
+            let root = init.container_root.as_str().ok_or(())?;
+            if root.is_empty() {
+                return Err(());
+            }
+            let mut app = sift_app::App::new();
+            app.root = Some(std::path::PathBuf::from(root));
+
+            let layer = Box::new(Layer {
+                session: std::sync::Mutex::new(Session::new(app)),
+                host: callbacks,
+                schedule: init.schedule,
+                schedule_context: init.schedule_context as usize,
+                sinks: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            });
+            Ok(Box::into_raw(layer).cast::<SiftApp>())
         })
     }
 }
@@ -120,7 +149,17 @@ pub unsafe extern "C" fn sift_initialize(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sift_shutdown(app: *mut SiftApp) -> SiftStatus {
     guard(|| {
-        let _ = app;
+        if app.is_null() {
+            // Tearing down nothing is not a failure. A shell that lost its handle during a
+            // failed launch still has to be able to quit.
+            return Ok(());
+        }
+        // Every ticket the shell never ran, reclaimed rather than waited for. D-70's
+        // teardown is bounded and flushes nothing.
+        crate::layer::abandon_all();
+        // SAFETY: the caller's obligation — the pointer came from `sift_initialize` and is
+        // not used again.
+        drop(unsafe { Box::from_raw(app.cast::<Layer>()) });
         Ok(())
     })
 }
@@ -140,7 +179,6 @@ pub unsafe extern "C" fn sift_invoke_action(
     id_len: usize,
 ) -> SiftStatus {
     guard(|| {
-        let _ = app;
         if id.is_null() {
             return Err(());
         }
@@ -152,6 +190,19 @@ pub unsafe extern "C" fn sift_invoke_action(
         // panic: a shell built against a newer register is a version skew D-2 removed as a
         // category, but the boundary still answers honestly rather than aborting.
         action::by_id(name).ok_or(())?;
+        // SAFETY: the caller's obligation.
+        let Some(layer) = (unsafe { layer(app) }) else {
+            return Err(());
+        };
+        // Anything that could have changed a window is followed by a delivery, posted
+        // rather than run: running it here would hand the shell a callback from inside the
+        // call that caused it, which is the reentrancy D-48 forbids.
+        crate::layer::post(
+            layer,
+            Task::Deliver {
+                layer: app as usize,
+            },
+        );
         Ok(())
     })
 }
@@ -180,11 +231,44 @@ pub unsafe extern "C" fn sift_observe_messages(
 ) -> SiftStatus {
     unsafe {
         guard_out(out, || {
-            let _ = (app, anchor, count, callback, context);
+            // SAFETY: the caller's obligation.
+            let Some(layer) = layer(app) else {
+                return Err(());
+            };
             // An observation is **anchored, not an integer range**: a shell holding a range
             // would have to recompute it on every notification, which is the polling D-18
             // rejected wearing different clothes.
-            Ok(SiftObservation::FIRST)
+            //
+            // A zero anchor is the unified inbox — D-4 — rather than an account nobody has.
+            let account = if anchor == SiftId::from_u128(0) {
+                None
+            } else {
+                Some(sift_foundation::identity::AccountId::from_u128(
+                    anchor.to_u128(),
+                ))
+            };
+            let id = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                session.observe(Watching::Messages {
+                    account,
+                    limit: count,
+                })
+            };
+            layer.sinks.lock().map_err(|_| ())?.insert(
+                id.0,
+                Sink {
+                    callback,
+                    context: context as usize,
+                },
+            );
+            // The first delivery fills a list the shell has never drawn.
+            crate::layer::post(
+                layer,
+                Task::Deliver {
+                    layer: app as usize,
+                },
+            );
+            Ok(SiftObservation(id.0))
         })
     }
 }
@@ -206,14 +290,117 @@ pub unsafe extern "C" fn sift_cancel_observation(
     observation: SiftObservation,
 ) -> SiftStatus {
     guard(|| {
-        let _ = app;
         // An identity, not a generation. Cancelling by generation would cancel every
         // observation sharing it, which with one live generation means all of them.
         if !observation.is_valid() {
             return Err(());
         }
-        Ok(())
+        // SAFETY: the caller's obligation.
+        let Some(layer) = (unsafe { layer(app) }) else {
+            return Err(());
+        };
+        // The sink goes first. After this returns no callback for this observation can be
+        // reached, which is D-48's synchronous-cancellation guarantee — a delivery already
+        // posted to the shell's loop finds nothing to call and is discarded on arrival
+        // rather than being something this call had to wait for.
+        layer.sinks.lock().map_err(|_| ())?.remove(&observation.0);
+        let live = layer
+            .session
+            .lock()
+            .map_err(|_| ())?
+            .cancel(sift_session::ObservationId(observation.0));
+        if live { Ok(()) } else { Err(()) }
     })
+}
+
+/// Run a scheduled delivery. **The shell calls this, on its main loop, and nowhere else.**
+///
+/// This is the far side of D-48's hop: the layer asked the shell to arrange for a ticket to
+/// be run on its loop, and this is what running it means. Every observer callback the shell
+/// receives is invoked from inside this call, which is what makes "delivered on the shell's
+/// own main loop" true rather than hoped for.
+///
+/// A ticket that was already run, or that belonged to a layer since torn down, resolves to
+/// nothing. That is not a defect to report: a window closing between the post and the turn
+/// of the loop is ordinary, and the guarantee cancellation makes is precisely that the
+/// delivery finds nothing to call.
+///
+/// # Safety
+/// Called from the shell's main loop, with a ticket the layer issued.
+#[unsafe(no_mangle)]
+pub extern "C" fn sift_run_scheduled(ticket: u64) {
+    // A panic here is on the shell's own loop, so it must not unwind into it.
+    let _ = crate::barrier::guard(|| {
+        let Some(task) = crate::layer::take(ticket) else {
+            return Ok(());
+        };
+        match task {
+            crate::layer::Task::Deliver { layer } => {
+                if layer == 0 {
+                    return Ok(());
+                }
+                // SAFETY: the pointer was live when the ticket was posted, and `sift_shutdown`
+                // abandons every outstanding ticket before it frees the layer — so a ticket
+                // that resolves at all names a layer that still exists.
+                let layer = unsafe { &*(layer as *const Layer) };
+                deliver(layer);
+                Ok(())
+            }
+        }
+    });
+}
+
+/// Compute what changed and hand each batch to the observation that asked for it.
+fn deliver(layer: &Layer) {
+    let Ok(mut session) = layer.session.lock() else {
+        return;
+    };
+    let Ok(deliveries) = session.poll() else {
+        // A store that could not be read is a delivery that did not happen, not a window
+        // that was emptied. The registration keeps the window it had and the next signal
+        // tries again — a list that blanked itself on a locked database would be worse.
+        return;
+    };
+    drop(session);
+
+    let Ok(sinks) = layer.sinks.lock() else {
+        return;
+    };
+    for d in &deliveries {
+        // A sink removed by cancellation is the guarantee doing its job: the delivery was
+        // computed before the cancel and finds nothing to call.
+        let Some(sink) = sinks.get(&d.observation.0) else {
+            continue;
+        };
+        let rows: Vec<SiftMessageRow<'_>> = d.batch.incoming.iter().map(row_of).collect();
+        (sink.callback)(
+            sink.context as *mut c_void,
+            SiftObservation(d.observation.0),
+            Generation(d.generation.0),
+            SiftRows::new(&rows),
+        );
+    }
+}
+
+/// One application row, as the boundary carries it.
+///
+/// Every string points into the row it came from and is valid for the delivery only, which
+/// is D-66's rule: a shell that needs a value beyond the callback copies it.
+fn row_of(r: &sift_app::rows::MessageRow) -> SiftMessageRow<'_> {
+    SiftMessageRow {
+        id: SiftId::from_u128(r.id.as_u128()),
+        account: SiftId::from_u128(r.account.as_u128()),
+        received_millis: r.received_millis,
+        origination_millis: r.origination_millis,
+        sender: SiftStr::new(&r.sender),
+        subject: SiftStr::new(&r.subject),
+        snippet: SiftStr::new(&r.snippet),
+        unread: u8::from(r.unread),
+        flagged: u8::from(r.flagged),
+        has_attachments: u8::from(r.has_attachments),
+        duplicate_across_accounts: 0,
+        thread_count: r.thread_count,
+    }
 }
 
 /// How many actions the register holds.
@@ -271,19 +458,161 @@ mod tests {
         }
     }
 
+    /// A schedule that runs the ticket immediately.
+    ///
+    /// **Only a test may do this.** A shell that ran a delivery inline would hand a callback
+    /// back from inside the call that caused it, which is the reentrancy D-48 forbids. A test
+    /// has no loop to post to, and running it inline is what makes the delivery observable.
+    extern "C" fn run_inline(_: *mut c_void, run: crate::layer::SiftRun, ticket: u64) {
+        run(ticket);
+    }
+
+    /// A schedule that drops the ticket on the floor, as a shell whose window closed does.
+    extern "C" fn drop_it(_: *mut c_void, _: crate::layer::SiftRun, _: u64) {}
+
+    /// A scratch container, leaked so it can be a `'static` string the way a bundle's own
+    /// path is. Only a test needs this; a shell's container path outlives the process.
+    fn scratch_str() -> &'static str {
+        let d = scratch();
+        Box::leak(d.to_str().expect("utf-8").to_owned().into_boxed_str())
+    }
+
+    fn scratch() -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let d = std::env::temp_dir().join(format!("sift-abi-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&d).expect("scratch");
+        d
+    }
+
+    fn start(schedule: crate::layer::SiftSchedule, root: &'static str) -> *mut SiftApp {
+        let mut app: *mut SiftApp = core::ptr::null_mut();
+        let init = SiftInit {
+            container_root: SiftStr::new(root),
+            schedule,
+            schedule_context: core::ptr::null_mut(),
+            scheme_is_registered: 0,
+        };
+        let status = unsafe { sift_initialize(callbacks(), init, &raw mut app) };
+        assert_eq!(status, SiftStatus::Ok);
+        assert!(!app.is_null(), "initialization handed back no layer");
+        app
+    }
+
     #[test]
     fn initialization_returns_a_status_rather_than_a_sentinel() {
         // No entry point encodes failure in its return value's domain.
+        let app = start(drop_it, scratch_str());
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    #[test]
+    fn a_layer_with_no_container_refuses_rather_than_choosing_one() {
+        // The container is the shell's to name. A layer that fell back to a path of its own
+        // would be wrong under the sandbox and under Flatpak, and would put a user's mail
+        // somewhere nobody chose.
         let mut app: *mut SiftApp = core::ptr::null_mut();
-        let status = unsafe { sift_initialize(callbacks(), &raw mut app) };
-        assert_eq!(status, SiftStatus::Ok);
+        let init = SiftInit {
+            container_root: SiftStr::new(""),
+            schedule: drop_it,
+            schedule_context: core::ptr::null_mut(),
+            scheme_is_registered: 0,
+        };
+        assert_eq!(
+            unsafe { sift_initialize(callbacks(), init, &raw mut app) },
+            SiftStatus::Failed
+        );
+        assert!(app.is_null(), "a refused initialization wrote a handle");
     }
 
     #[test]
     fn an_action_the_register_knows_is_accepted() {
+        let app = start(drop_it, scratch_str());
         let id = "message.archive";
-        let status = unsafe { sift_invoke_action(core::ptr::null_mut(), id.as_ptr(), id.len()) };
+        let status = unsafe { sift_invoke_action(app, id.as_ptr(), id.len()) };
         assert_eq!(status, SiftStatus::Ok);
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    #[test]
+    fn an_action_invoked_without_a_layer_is_a_failure_rather_than_a_crash() {
+        let id = "message.archive";
+        assert_eq!(
+            unsafe { sift_invoke_action(core::ptr::null_mut(), id.as_ptr(), id.len()) },
+            SiftStatus::Failed
+        );
+    }
+
+    #[test]
+    fn shutting_down_reclaims_a_delivery_the_shell_never_ran() {
+        // D-70's teardown is bounded and waits for nothing. A shell whose window closed
+        // between the post and the turn of its loop leaves a ticket behind, and NFR-12
+        // finds a leak of those in fourteen days.
+        let app = start(drop_it, scratch_str());
+        let mut observation = SiftObservation::NONE;
+        let status = unsafe {
+            sift_observe_messages(
+                app,
+                SiftId::from_u128(0),
+                50,
+                noop_rows,
+                core::ptr::null_mut(),
+                &raw mut observation,
+            )
+        };
+        assert_eq!(status, SiftStatus::Ok);
+        assert!(observation.is_valid());
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    #[test]
+    fn cancelling_an_observation_the_layer_does_not_have_is_a_failure() {
+        let app = start(drop_it, scratch_str());
+        assert_eq!(
+            unsafe { sift_cancel_observation(app, SiftObservation(9_999)) },
+            SiftStatus::Failed
+        );
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    #[test]
+    fn a_delivery_reaches_the_shells_callback_and_carries_its_observation() {
+        // The whole boundary, end to end: register, let the hop run, and see the callback
+        // arrive with the handle that identifies which observation it belongs to.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEEN: AtomicU64 = AtomicU64::new(0);
+
+        extern "C" fn record(
+            _: *mut c_void,
+            observation: SiftObservation,
+            _: Generation,
+            _: SiftRows<'_, SiftMessageRow<'_>>,
+        ) {
+            SEEN.store(observation.0, Ordering::SeqCst);
+        }
+
+        SEEN.store(0, Ordering::SeqCst);
+        let app = start(run_inline, scratch_str());
+        let mut observation = SiftObservation::NONE;
+        let _ = unsafe {
+            sift_observe_messages(
+                app,
+                SiftId::from_u128(0),
+                50,
+                record,
+                core::ptr::null_mut(),
+                &raw mut observation,
+            )
+        };
+        // With no accounts there is nothing to deliver, so the callback must NOT have fired:
+        // a delivery is a change, and an empty application has none.
+        assert_eq!(
+            SEEN.load(Ordering::SeqCst),
+            0,
+            "an empty application delivered a batch"
+        );
+        let _ = unsafe { sift_shutdown(app) };
     }
 
     #[test]
@@ -339,10 +668,11 @@ mod tests {
 
     #[test]
     fn observation_and_cancellation_round_trip() {
+        let app = start(drop_it, scratch_str());
         let mut observation = SiftObservation::NONE;
         let status = unsafe {
             sift_observe_messages(
-                core::ptr::null_mut(),
+                app,
                 SiftId::from_u128(0),
                 50,
                 noop_rows,
@@ -356,9 +686,16 @@ mod tests {
             "a registration that succeeded handed back no handle to cancel it with"
         );
         assert_eq!(
-            unsafe { sift_cancel_observation(core::ptr::null_mut(), observation) },
+            unsafe { sift_cancel_observation(app, observation) },
             SiftStatus::Ok
         );
+        // Cancelling the same observation twice is a failure, not a second success: the
+        // shell's handle is stale and it has to be told rather than reassured.
+        assert_eq!(
+            unsafe { sift_cancel_observation(app, observation) },
+            SiftStatus::Failed
+        );
+        let _ = unsafe { sift_shutdown(app) };
     }
 
     #[test]

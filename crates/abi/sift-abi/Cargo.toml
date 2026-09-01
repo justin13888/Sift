@@ -23,6 +23,10 @@ dbg_macro = "deny"
 [dependencies]
 sift-foundation.workspace = true
 sift-presentation.workspace = true
+# D-18's registry and the assembled application beneath it. The ABI is still a leaf: the
+# edges point down, and nothing in the core depends on this crate.
+sift-session.workspace = true
+sift-app.workspace = true
 
 [lib]
 crate-type = ["staticlib", "rlib"]

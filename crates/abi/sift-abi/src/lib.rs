@@ -4,4 +4,5 @@ pub mod barrier;
 pub mod change;
 pub mod entry;
 pub mod host;
+pub mod layer;
 pub mod repr;
