@@ -2,7 +2,7 @@
 
 What is encrypted, what is not, and where the keys live.
 
-**Owns:** D-22, D-42, D-43, D-75, D-76.
+**Owns:** D-22, D-42, D-43, D-75, D-76, D-106, D-107.
 
 ## Message data
 
@@ -280,6 +280,50 @@ durable, which is one more thing that must survive an abrupt termination correct
 the kind of thing that is subtly wrong for a long time. A construction with a nonce large enough to be
 chosen randomly without a birthday concern would remove it, at the cost of per-page overhead — and that
 trade is a real one that should be re-examined once the page overhead is measured rather than assumed.
+
+## D-107 — The page layer attaches as a VFS, and four settings are load-bearing
+
+**Chosen:** the page layer is a SQLite VFS. It translates every logical byte range the engine asks for
+onto sealed blocks of a fixed logical size, seals the file's own length as its own page under a page
+number no data block can reach, and reserves write counters ahead of use. Four settings are **asserted
+against a live connection** rather than assumed: `locking_mode=EXCLUSIVE`, `mmap_size=0`,
+`temp_store=MEMORY`, and a page size equal to the logical block.
+**Rejected:** adopting SQLCipher; encrypting columns above the engine; trusting that the settings were
+applied.
+
+**Why a VFS at all.** SQLite removed the in-tree encryption hook in 3.32, so the attachment point
+page-level encryption used to have no longer exists. SQLCipher is a *fork*, and adopting it would defeat
+[D-21](../architecture/overview.md)'s reason for bundling the engine. A VFS is what remains, and it is
+sufficient: every byte the engine reads or writes passes through it.
+
+**Why the length is sealed rather than stored.** It has to be stored somewhere. A file whose length is
+rounded up to the block size reports a full block for a 32-byte write-ahead-log header, and recovery then
+reads past what was written. Storing it in the clear would leave one field an attacker could edit to
+truncate a database without failing authentication — so it is sealed like any other page.
+
+**Why the counter is reserved before it is used.** [D-76](#d-76--what-the-page-format-has-to-nail-down)
+derives the nonce from the page number and a durable counter. A run that resumed the counter from the
+last *written* header would reissue every counter used since that header was written, and reissuing a
+counter under one key is nonce reuse. So a run reserves a window, records the top of it, and syncs that
+record before issuing any of them: a crash then leaves the mark ahead of reality, which wastes counters,
+rather than behind it, which reuses them.
+
+**Why the four settings are asserted rather than documented.** Each fails silently, and two of them fail
+in a way that produces no symptom at all.
+
+| Setting | What goes wrong without it |
+|---|---|
+| `locking_mode=EXCLUSIVE` | The write-ahead index becomes a memory-mapped file the layer never sees. The pages of a database are sealed and the index describing them is not |
+| `mmap_size=0` | A memory-mapped read bypasses the layer entirely and hands the pager ciphertext |
+| `temp_store=MEMORY` | A spill file has no key and is written in the clear |
+| page size = logical block | Every engine page straddles two sealed blocks, so every write becomes a read-modify-write of two |
+
+**Contestable because:** this is unsafe foreign-function code on the one path where a mistake loses an
+account rather than failing a parse — the same objection [D-42](#d-42--every-database-is-encrypted-at-the-page-level-beneath-the-database-engine)
+already records, now with a larger surface. The mitigation is that the tests read the **bytes on disk**
+rather than asking the engine whether it is satisfied: a round-trip test passes unchanged against a layer
+that seals nothing, and the first version of this layer did exactly that on macOS, where the temporary
+directory is reached through a symbolic link and the key registry missed on the path the engine resolved.
 
 ## Integrity, not only confidentiality
 

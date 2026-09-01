@@ -2,6 +2,7 @@
 
 use crate::schema::{self, JOURNAL_SCHEMA_V1, Migration, STORE_SCHEMA_V1, SchemaError, admit_pair};
 use rusqlite::Connection;
+use sift_crypto::derive;
 use sift_foundation::identity::AccountId;
 use std::path::{Path, PathBuf};
 
@@ -9,6 +10,9 @@ use std::path::{Path, PathBuf};
 pub enum OpenError {
     Schema(SchemaError),
     Sql(rusqlite::Error),
+    /// The sealing layer refused. Distinct from a SQL error because the answer is different:
+    /// a file that does not authenticate is discarded and resynced, never repaired.
+    Sealing(String),
 }
 
 impl From<rusqlite::Error> for OpenError {
@@ -27,6 +31,7 @@ impl core::fmt::Display for OpenError {
         match self {
             Self::Schema(e) => write!(f, "{e}"),
             Self::Sql(e) => write!(f, "{e}"),
+            Self::Sealing(e) => write!(f, "{e}"),
         }
     }
 }
@@ -78,6 +83,10 @@ impl Account {
         Self::configure(&store)?;
         Self::configure(&journal)?;
 
+        Self::finish(store, journal, id)
+    }
+
+    fn finish(store: Connection, journal: Connection, id: AccountId) -> Result<Self, OpenError> {
         let store_version = schema::version_of(&store)?;
         let journal_version = schema::version_of(&journal)?;
 
@@ -99,6 +108,87 @@ impl Account {
             }
         }
         Ok(Self { store, journal, id })
+    }
+
+    /// Open or create an account **sealed** under a key derived from its own.
+    ///
+    /// D-74 gives an account two files and D-106 gives each of them its own derived key, so the
+    /// two never share a counter space — one key over two files is nonce reuse, which costs
+    /// confidentiality and authenticity both.
+    ///
+    /// The keys are lent to the VFS for the duration of the open and withdrawn immediately
+    /// after: the files stay sealed, and nothing new can be opened against them. `PageKey`
+    /// zeroes itself when the registry drops it.
+    ///
+    /// # Errors
+    /// As [`open`](Self::open), plus a refusal where the VFS cannot be registered or where a
+    /// file does not authenticate under the key presented — which D-73 makes a refusal rather
+    /// than a repair.
+    pub fn open_sealed(
+        paths: &AccountPaths,
+        id: AccountId,
+        owner_key: &[u8; 32],
+    ) -> Result<Self, OpenError> {
+        crate::vfs::register().map_err(OpenError::Sealing)?;
+        crate::vfs::present_key(
+            &paths.store,
+            derive::file_key(owner_key, derive::Role::Store),
+            derive::file_key_id(owner_key, derive::Role::Store),
+        );
+        crate::vfs::present_key(
+            &paths.journal,
+            derive::file_key(owner_key, derive::Role::Journal),
+            derive::file_key_id(owner_key, derive::Role::Journal),
+        );
+        let opened = Self::open_through(paths, id, Some(crate::vfs::VFS_NAME));
+        crate::vfs::withdraw_key(&paths.store);
+        crate::vfs::withdraw_key(&paths.journal);
+        opened
+    }
+
+    fn open_through(
+        paths: &AccountPaths,
+        id: AccountId,
+        vfs_name: Option<&str>,
+    ) -> Result<Self, OpenError> {
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let (store, journal) = match vfs_name {
+            Some(name) => (
+                Connection::open_with_flags_and_vfs(&paths.store, flags, name)?,
+                Connection::open_with_flags_and_vfs(&paths.journal, flags, name)?,
+            ),
+            None => (
+                Connection::open(&paths.store)?,
+                Connection::open(&paths.journal)?,
+            ),
+        };
+        // **Before anything writes.** `page_size` cannot be changed once a database has pages,
+        // and a database created at the engine's default would have every write straddle two
+        // sealed blocks for the rest of its life.
+        if vfs_name.is_some() {
+            for conn in [&store, &journal] {
+                conn.pragma_update(
+                    None,
+                    "page_size",
+                    i64::from(crate::vfs::LOGICAL_BLOCK as u32),
+                )?;
+                conn.pragma_update(None, "temp_store", "MEMORY")?;
+                conn.pragma_update(None, "mmap_size", 0i64)?;
+                let _: String =
+                    conn.pragma_update_and_check(None, "locking_mode", "EXCLUSIVE", |r| r.get(0))?;
+            }
+        }
+        Self::configure(&store)?;
+        Self::configure(&journal)?;
+        if vfs_name.is_some() {
+            for conn in [&store, &journal] {
+                crate::vfs::assert_pragmas(conn).map_err(OpenError::Sealing)?;
+            }
+        }
+        Self::finish(store, journal, id)
     }
 
     /// The pragmas NFR-16 depends on.
