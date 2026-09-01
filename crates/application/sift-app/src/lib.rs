@@ -21,6 +21,7 @@ pub mod attachment;
 pub mod document;
 pub mod rows;
 
+use sift_foundation::condition::AccountCondition;
 use sift_foundation::identity::{AccountId, AccountOrdinal, LocalId, LocalIdGenerator};
 use sift_mutations::queue::Queue;
 use sift_provider::capability::{
@@ -687,4 +688,72 @@ pub struct SyncReport {
     pub removed: usize,
     /// FR-23's new mail: delivered-and-unread at this moment, and not reconstructable later.
     pub delivered: usize,
+}
+
+/// D-49's annunciator, resolved per account.
+///
+/// One badge shows the **single highest-precedence** condition rather than a list, and
+/// `AccountCondition`'s `Ord` is that precedence — so resolving is a `min` over what applies.
+/// `Healthy` renders nothing at all: a badge that is always present is a badge nobody reads.
+impl App {
+    /// What is currently true of one account.
+    ///
+    /// # Errors
+    /// There is no such account.
+    pub fn condition_of(&mut self, name: &str) -> Result<AccountCondition, String> {
+        let mut applicable = Vec::new();
+        let account = self.account(name)?;
+
+        // The store answering at all is the test for this one, and it is a real query rather
+        // than a flag: a flag says what was true when somebody last set it, and a full disk
+        // does not set flags.
+        if account
+            .store
+            .store
+            .query_row("SELECT 1 FROM message LIMIT 1", [], |_| Ok(()))
+            .is_err()
+            && account
+                .store
+                .store
+                .query_row("SELECT count(*) FROM message", [], |r| r.get::<_, i64>(0))
+                .is_err()
+        {
+            applicable.push(AccountCondition::StorageUnavailable);
+        }
+
+        let quarantined = account
+            .queue
+            .entries()
+            .iter()
+            .any(|e| e.state.needs_attention());
+        if quarantined {
+            applicable.push(AccountCondition::Attention);
+        }
+
+        // A watched account with a queue that cannot drain. The intents are safe and the user
+        // has something to do about them, which is exactly what `Attention` means — and saying
+        // nothing would leave a person watching triage pile up with no indication why.
+        if !account.writes_enabled && !account.queue.is_empty() {
+            applicable.push(AccountCondition::Attention);
+        }
+
+        Ok(AccountCondition::resolve(&applicable))
+    }
+
+    /// The one condition the annunciator draws, across every account, and how many accounts
+    /// are in it.
+    pub fn annunciator(&mut self) -> (AccountCondition, usize) {
+        let names: Vec<String> = self
+            .account_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let conditions: Vec<AccountCondition> = names
+            .iter()
+            .filter_map(|n| self.condition_of(n).ok())
+            .collect();
+        let worst = AccountCondition::resolve(&conditions);
+        let affected = conditions.iter().filter(|c| **c == worst).count();
+        (worst, affected)
+    }
 }

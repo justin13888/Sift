@@ -33,6 +33,52 @@ use sift_provider::capability::Capabilities;
 
 use crate::Session;
 
+/// D-86's undo record. **In the layer, not the shell.**
+///
+/// A window shell is destroyed when its window closes, in a product that runs with no window
+/// at all — so a user who archives a message and closes the window would have a countdown that
+/// dies with the view, which is not a decision anyone made. The layer holds it; a shell renders
+/// it, and the always-on surface can present it when there is no window.
+///
+/// It survives a window closing and **not** a quit: a compensation offered at the next launch
+/// would act on a gesture the user has lost the context for.
+#[derive(Debug, Clone)]
+pub struct Undoable {
+    /// D-85's group. One gesture, however many messages — which is what makes FR-17's bulk
+    /// operation one undoable unit rather than a hundred.
+    pub undo_group: u128,
+    pub action: &'static str,
+    /// What it did, for the affordance's own words.
+    pub intent: &'static str,
+    pub messages: usize,
+    /// When the gesture happened. The countdown is `L22_UNDO_WINDOW` from here.
+    pub at_millis: u64,
+    /// Whether FR-15's **timed** window applies, as opposed to ordinary reversibility.
+    ///
+    /// Only intents that remove the message from the view the user is looking at. Mark-read,
+    /// flag and tag leave the message in front of the user, where the affordance that applied
+    /// the change is also the one that reverses it — and a countdown on every message the
+    /// reader marks read would make the mechanism worthless by making it constant.
+    pub timed: bool,
+}
+
+impl Undoable {
+    /// Whether the countdown is still running.
+    #[must_use]
+    pub fn within_window(&self, now_millis: u64) -> bool {
+        self.timed
+            && now_millis.saturating_sub(self.at_millis)
+                < sift_foundation::limits::L22_UNDO_WINDOW.as_millis() as u64
+    }
+
+    /// Milliseconds left on the countdown, or zero.
+    #[must_use]
+    pub fn remaining_millis(&self, now_millis: u64) -> u64 {
+        let window = sift_foundation::limits::L22_UNDO_WINDOW.as_millis() as u64;
+        window.saturating_sub(now_millis.saturating_sub(self.at_millis))
+    }
+}
+
 /// What one gesture did.
 #[derive(Debug, Clone)]
 pub struct Gesture {
@@ -178,6 +224,7 @@ impl Session {
         let undo_group = self.app_mut().next_intent_id();
         let mut enqueued = Vec::new();
         let mut skipped = Vec::new();
+        let mut origins: Vec<(LocalId, Intent, Option<i64>)> = Vec::new();
 
         for message in self.app().selection.clone() {
             let Some(owner) = self
@@ -191,6 +238,21 @@ impl Session {
             };
             let intent_id = self.app_mut().next_intent_id();
             let account = self.app_mut().account(&owner)?;
+            // **Where it was, captured now.** FR-15 reverses an archive by moving the message
+            // back, and "back" is a fact that only exists before the gesture: once the overlay
+            // hides the row and the provider applies the change, nothing says where it came
+            // from. Read here, or the most common destructive action in the product has no
+            // undo at all — which is exactly what the first run of this showed.
+            let restore_to: Option<i64> = account
+                .store
+                .store
+                .query_row(
+                    "SELECT folder_id FROM message_location WHERE message_id = ?1
+                     ORDER BY folder_id LIMIT 1",
+                    rusqlite::params![message.to_bytes().to_vec()],
+                    |r| r.get(0),
+                )
+                .ok();
             let sequence = account
                 .queue
                 .enqueue(intent_id, message, intent.clone(), now);
@@ -218,7 +280,24 @@ impl Session {
                     ],
                 )
                 .map_err(|e| format!("the journal refused the intent: {e}"))?;
+            origins.push((message, intent.clone(), restore_to));
             enqueued.push(message);
+        }
+
+        // The record is kept only where there is something to take back. A gesture that
+        // enqueued nothing has nothing to compensate, and offering undo for it would be a
+        // control that does nothing.
+        if !enqueued.is_empty() {
+            self.undoable = Some(Undoable {
+                undo_group,
+                action: action.id,
+                intent: intent.name(),
+                messages: enqueued.len(),
+                at_millis: now,
+                timed: intent.removes_from_view(),
+            });
+            self.undone.clear();
+            self.undone = origins;
         }
 
         Ok(Gesture {
@@ -229,6 +308,124 @@ impl Session {
             enqueued,
             skipped,
             optimistic: intent.applies_optimistically(),
+        })
+    }
+
+    /// What could be undone right now, if anything.
+    #[must_use]
+    pub fn undoable(&self) -> Option<&Undoable> {
+        self.undoable.as_ref()
+    }
+
+    /// FR-15 — reverse the last gesture.
+    ///
+    /// **Executed as the compensation, never as a queue retraction.** The original may already
+    /// have reached the server; a design that tries to cancel in flight has two outcomes to
+    /// reason about, and one that always compensates has one.
+    ///
+    /// Nothing is withheld to make this cheap. D-86 rejected holding the intent back for the
+    /// duration of the window, because that reintroduces a race at the end of every window
+    /// against a flush that may already have started — on the most frequent destructive action
+    /// in the product. The saving arrives anyway: intents flush on the scheduler's tick, and an
+    /// archive and its compensation inside one interval collapse under the coalescing rule that
+    /// already exists.
+    ///
+    /// **What a compensation restores is local state, never a remote side effect.** Reporting
+    /// not-junk returns the message and tells the provider it was wrong; it cannot un-train the
+    /// classifier, and this must not be described as promising that.
+    ///
+    /// # Errors
+    /// There is nothing to undo, the intent has no compensation, or the journal refused one.
+    pub fn undo_last(&mut self, now: u64) -> Result<Gesture, String> {
+        let record = self.undoable.clone().ok_or("there is nothing to undo")?;
+        if self.undone.is_empty() {
+            return Err("there is nothing to undo".to_owned());
+        }
+        // Cloned rather than taken: a failed undo must leave the record standing. Consuming it
+        // on the way *in* means a compensation that could not be built also destroys the only
+        // affordance for building it, and the user is told there is nothing to undo about a
+        // gesture they just watched happen.
+        let undone = self.undone.clone();
+
+        // The undo is its own gesture with its own group, because it is its own thing that
+        // happened — and because undoing an undo is a redo, which falls out for free.
+        let undo_group = self.app_mut().next_intent_id();
+        let mut enqueued = Vec::new();
+        let mut skipped = Vec::new();
+        let mut name = "";
+
+        for (message, original, restore_to) in undone {
+            // `restore_to` was read at the gesture, before the overlay hid the row. A
+            // compensation that moved mail to a folder nobody chose would be worse than one
+            // that did not run, so an intent with no recorded origin is reported rather than
+            // guessed at.
+            let Some(compensation) = original.compensation(restore_to) else {
+                skipped.push((
+                    message,
+                    format!("`{}` has no compensation", original.name()),
+                ));
+                continue;
+            };
+            name = compensation.name();
+            let Some(owner) = self
+                .app()
+                .owner_of(message)
+                .cloned()
+                .or_else(|| self.app().owner_of_stored(message))
+            else {
+                skipped.push((message, "no account holds this message".to_owned()));
+                continue;
+            };
+            let intent_id = self.app_mut().next_intent_id();
+            let account = self.app_mut().account(&owner)?;
+            let sequence = account
+                .queue
+                .enqueue(intent_id, message, compensation.clone(), now);
+            account
+                .store
+                .journal
+                .execute(
+                    "INSERT INTO intent (id, undo_group, message_id, operation, intent_version,
+                                         state, created_millis, per_message_seq, expires_millis)
+                     VALUES (?1, ?2, ?3, ?4, 1, 'Pending', ?5, ?6, ?7)",
+                    rusqlite::params![
+                        intent_id.to_be_bytes().to_vec(),
+                        undo_group.to_be_bytes().to_vec(),
+                        message.to_bytes().to_vec(),
+                        compensation.name(),
+                        i64::try_from(now).unwrap_or(i64::MAX),
+                        i64::try_from(sequence).unwrap_or(i64::MAX),
+                        i64::try_from(now.saturating_add(
+                            sift_foundation::limits::L17_INTENT_EXPIRY.as_millis() as u64
+                        ))
+                        .unwrap_or(i64::MAX),
+                    ],
+                )
+                .map_err(|e| format!("the journal refused the compensation: {e}"))?;
+            enqueued.push(message);
+        }
+
+        if enqueued.is_empty() {
+            // The record stands, so the user can be told why rather than told nothing.
+            return Err(format!(
+                "`{}` could not be undone: {}",
+                record.intent,
+                skipped
+                    .first()
+                    .map_or("nothing was reversible", |(_, why)| why.as_str())
+            ));
+        }
+        // Only now: the gesture has been reversed, so there is nothing left to reverse.
+        self.undoable = None;
+        self.undone.clear();
+        Ok(Gesture {
+            action: "undo.last-gesture",
+            mutates: true,
+            intent: Some(name),
+            undo_group,
+            enqueued,
+            skipped,
+            optimistic: true,
         })
     }
 }

@@ -111,10 +111,20 @@ pub fn message_rows(account: &OpenAccount, limit: u32) -> Result<Vec<MessageRow>
 
         // D-51. The overlay is consulted before anything is formatted, because a row it
         // removes is not a row a shell should be told about at all.
+        //
+        // **The last intent decides, not any of them.** `any(removes_from_view)` reads as the
+        // safe answer and is not: an archive followed by FR-15's compensation is a sequence
+        // whose net effect is nothing, and under `any` the row stayed hidden — so undo put the
+        // message back and the user watched it not come back. The overlay is ordered, and the
+        // last thing that happened is what is true.
         let pending = overlay.for_message(id);
         if pending
             .iter()
-            .any(sift_mutations::intent::Intent::removes_from_view)
+            .rev()
+            .find(|i| {
+                i.removes_from_view() || matches!(i, sift_mutations::intent::Intent::MoveTo { .. })
+            })
+            .is_some_and(|last| removes(last, account, id))
         {
             continue;
         }
@@ -174,4 +184,30 @@ fn digest_of(bytes: &[u8]) -> u64 {
     let take = bytes.len().min(8);
     head[..take].copy_from_slice(&bytes[..take]);
     u64::from_be_bytes(head)
+}
+
+/// Whether one pending intent takes the message out of the view.
+///
+/// Every removing intent does, with one exception that matters: a `MoveTo` whose destination is
+/// a folder the message is **already recorded in** is a message being put back where it was,
+/// which is what FR-15's compensation for an archive looks like. Treating that as a removal is
+/// what made an undone archive invisible.
+fn removes(
+    intent: &sift_mutations::intent::Intent,
+    account: &OpenAccount,
+    message: LocalId,
+) -> bool {
+    if let sift_mutations::intent::Intent::MoveTo { folder } = intent {
+        let already_there: bool = account
+            .store
+            .store
+            .query_row(
+                "SELECT 1 FROM message_location WHERE message_id = ?1 AND folder_id = ?2",
+                rusqlite::params![message.to_bytes().to_vec(), folder],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        return !already_there;
+    }
+    intent.removes_from_view()
 }

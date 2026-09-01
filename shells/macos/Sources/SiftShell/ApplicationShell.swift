@@ -240,7 +240,9 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             return
         }
         // The list is an observation, so the optimistic effect arrives through D-48's hop
-        // rather than being applied here. Nothing to do but let it.
+        // rather than being applied here. The chrome is not an observation, so it is asked
+        // once, here, where something is known to have happened.
+        for window in windows { window.refreshChrome() }
     }
 
     @objc func openMainWindow() {
@@ -257,6 +259,7 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
 
         guard let app else { return }
         let window = MainWindowController(app: app)
+        window.onInvoke = { [weak self] id in self?.invoke(id) }
         window.onClose = { [weak self, weak window] in
             guard let window else { return }
             self?.forget(window)

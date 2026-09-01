@@ -14,6 +14,11 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     private let sidebar = SidebarViewController()
     private let list = MessageListViewController()
     private let reader = ReaderViewController()
+    /// Where a gesture from the undo toast goes. The toast does not invoke directly, because
+    /// three ways to reach an action must not be three implementations of it.
+    var onInvoke: ((String) -> Void)?
+    private let annunciator = AnnunciatorView(frame: .zero)
+    private let undoBar = UndoBar(frame: .zero)
 
     /// Told when the last window closes, so FR-25's distinction can be honoured: closing a
     /// window lowers Sift back to the menu bar and is **not** quitting.
@@ -64,7 +69,32 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         split.addSplitViewItem(listItem)
         split.addSplitViewItem(readerItem)
 
-        window.contentViewController = split
+        // The annunciator and the undo toast are window chrome, not panes: they sit over the
+        // split view so that neither steals width from a pane, and both are absent rather than
+        // blank when there is nothing to say.
+        let container = NSView()
+        let splitView = split.view
+        splitView.translatesAutoresizingMaskIntoConstraints = false
+        annunciator.translatesAutoresizingMaskIntoConstraints = false
+        undoBar.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(splitView)
+        container.addSubview(annunciator)
+        container.addSubview(undoBar)
+        NSLayoutConstraint.activate([
+            splitView.topAnchor.constraint(equalTo: container.topAnchor),
+            splitView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            splitView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            splitView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            annunciator.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
+            annunciator.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            undoBar.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -20),
+            undoBar.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+        ])
+
+        let host = NSViewController()
+        host.view = container
+        host.addChild(split)
+        window.contentViewController = host
         // **After** the content view controller, not before. Assigning one re-derives the
         // window's frame from the controller's own fitting size, and a split view with three
         // panes that have minimums and no preferred sizes fits to the sum of the minimums —
@@ -95,6 +125,8 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         // D-4's unified inbox is the zero anchor: every account, merged on one comparator.
         list.observe(app: app, account: .zero)
         sidebar.reload(app: app)
+        annunciator.show(app: app)
+        undoBar.onUndo = { [weak self] in self?.onInvoke?("undo.last-gesture") }
 
         window.makeKeyAndOrderFront(nil)
         self.window = window
@@ -106,6 +138,16 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     /// Bring an existing window forward. "Open Sift" means *show me Sift*, not *make another*.
     func raise() {
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Redraw what a gesture may have changed.
+    ///
+    /// Called after every invocation rather than on a timer: a resident process that polls its
+    /// own state is exactly the idle wakeup NFR-11 counts, and neither of these changes without
+    /// something happening.
+    func refreshChrome() {
+        annunciator.show(app: app)
+        undoBar.refresh(app: app)
     }
 
     func windowWillClose(_ notification: Notification) {

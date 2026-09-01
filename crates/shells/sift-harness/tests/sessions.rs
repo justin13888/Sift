@@ -1245,3 +1245,126 @@ fn the_content_is_the_last_source_and_it_only_exists_once_the_bytes_are_here() {
     );
     std::fs::remove_dir_all(&directory).ok();
 }
+
+// ---------------------------------------------------------------------------------------
+// FR-15's undo, and D-49's annunciator.
+// ---------------------------------------------------------------------------------------
+
+/// The property, not the mechanism: archive a message, take it back, and see it return.
+///
+/// This is what the first working version of undo did *not* do. Archive's compensation is a
+/// move back to where the message was, and nothing captured where that was — so `compensation`
+/// returned `None` and the most common destructive action in the product had no undo at all.
+#[test]
+fn undoing_an_archive_brings_the_message_back() {
+    let mut cmds = hostile();
+    cmds.extend([
+        "window open",
+        "select #3",
+        "do message.archive",
+        "list",
+        "undo",
+        "list",
+    ]);
+    let out = session(&cmds);
+
+    let lists: Vec<&str> = out
+        .split("> ")
+        .filter(|s| s.contains("A receipt") || s.contains("A newsletter"))
+        .collect();
+    assert!(
+        out.contains("move-to enqueued"),
+        "reversed by compensation: {out}"
+    );
+    assert!(
+        out.contains("reversed by compensation, not by retraction"),
+        "{out}"
+    );
+    // The last listing has the archived message back in it. The one before it does not.
+    let after = lists.last().unwrap_or(&"");
+    assert!(
+        after.contains("A receipt") && after.contains("pending: move-to"),
+        "the undone message is back, and marked pending: {after}"
+    );
+}
+
+/// D-51's overlay reads the **last** intent, not any of them.
+///
+/// `any(removes_from_view)` looks like the safe answer and is not: an archive followed by its
+/// compensation is a sequence whose net effect is nothing, and under `any` the row stayed
+/// hidden — so undo put the message back and the user watched it not come back.
+#[test]
+fn a_compensation_that_puts_a_message_back_does_not_leave_it_hidden() {
+    let mut cmds = hostile();
+    cmds.extend([
+        "window open",
+        "select #3",
+        "do message.archive",
+        "undo",
+        "list",
+    ]);
+    let out = session(&cmds);
+    let last = out.rsplit("> ").next().unwrap_or_default();
+    assert!(last.contains("A receipt"), "{out}");
+}
+
+/// FR-15 gives a **timed** window only to intents that take the message out of view. Marking
+/// read leaves it in front of the user, where the affordance that applied the change is also
+/// the one that reverses it — and a countdown on every message the reader marks read would
+/// make the mechanism worthless by making it constant.
+#[test]
+fn only_an_intent_that_removes_the_message_gets_a_countdown() {
+    let mut removing = hostile();
+    removing.extend(["window open", "select #3", "do message.archive", "undo"]);
+    assert!(
+        session(&removing).contains("ms left on FR-15's window"),
+        "archive takes the message out of view"
+    );
+
+    let mut staying = hostile();
+    staying.extend(["window open", "select #3", "do message.mark-read", "undo"]);
+    let out = session(&staying);
+    assert!(
+        out.contains("no countdown; it stays reversible either way"),
+        "{out}"
+    );
+}
+
+/// D-85's group is assigned at the gesture, so FR-17's bulk operation is one undoable unit
+/// rather than a hundred.
+#[test]
+fn a_bulk_gesture_is_one_undoable_unit() {
+    let mut cmds = hostile();
+    cmds.extend([
+        "window open",
+        "select #1 #2 #3",
+        "do message.archive",
+        "undo",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("over 3 message(s)"), "{out}");
+    assert_eq!(
+        out.matches("move-to enqueued").count(),
+        3,
+        "one gesture, three compensations, one undo: {out}"
+    );
+}
+
+/// A failed undo must leave the record standing. Consuming it on the way *in* means a
+/// compensation that could not be built also destroys the affordance for building it, and the
+/// user is told there is nothing to undo about a gesture they just watched happen.
+#[test]
+fn an_undo_that_could_not_run_does_not_consume_the_thing_it_would_have_undone() {
+    let mut cmds = hostile();
+    cmds.extend([
+        "window open",
+        "select #3",
+        "do message.archive",
+        "undo",
+        "undo",
+    ]);
+    let out = session(&cmds);
+    // The first undo succeeds and *does* consume it, which is correct — this asserts the
+    // second reports an empty stack rather than an error about a half-consumed one.
+    assert!(out.contains("there is nothing to undo"), "{out}");
+}

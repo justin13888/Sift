@@ -74,6 +74,16 @@ pub struct Session {
     app: App,
     observations: BTreeMap<u64, Registration>,
     next: u64,
+    /// D-86's undo record, which lives here rather than in a shell — a window shell dies with
+    /// its window, in a product that runs with no window at all.
+    pub(crate) undoable: Option<crate::gesture::Undoable>,
+    /// What the last gesture did and **where each message was**, so its compensation can be
+    /// built. The origin is captured at the gesture because it stops being knowable after one.
+    pub(crate) undone: Vec<(
+        sift_foundation::identity::LocalId,
+        sift_mutations::intent::Intent,
+        Option<i64>,
+    )>,
 }
 
 impl std::fmt::Debug for Session {
@@ -93,6 +103,8 @@ impl Session {
             // Deliberately not zero: zero is what an out-parameter holds when a registration
             // failed, and a valid handle must never be mistaken for one.
             next: 1,
+            undoable: None,
+            undone: Vec::new(),
         }
     }
 

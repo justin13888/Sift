@@ -44,6 +44,7 @@ fn dispatch(session: &mut Session, verb: &str, rest: &[&str]) -> Output {
         // D-98's register is presentation-layer, so invoking one is the session's rather than
         // the application's — and a shell binds to the session anyway.
         "do" => return invoke(session, &rest),
+        "undo" => return undo(session),
         "actions" => return actions(session),
         _ => {}
     }
@@ -105,6 +106,7 @@ fn help() -> Vec<String> {
         "open <id|#n>                                     open a message in the reader",
         "window <open|close>                              a window exists, or does not",
         "actions                                          the palette: a filtered view of the register",
+        "undo                                             FR-15: reverse the last gesture, by compensation",
         "do <action-id> [arg]                             invoke an action by identifier (D-98)",
         "queue [account]                                  the durable queue, by state",
         "flush <account> [--leave-in-flight]              issue one batch; optionally stop there",
@@ -440,6 +442,42 @@ fn window(app: &mut App, args: &[&str]) -> Output {
         }
         _ => Err("window <open|close>".to_owned()),
     }
+}
+
+/// FR-15 — what could be taken back, and taking it back.
+///
+/// Two verbs in one because they answer the same question: a countdown a shell cannot read is
+/// a countdown a shell cannot draw.
+fn undo(session: &mut Session) -> Output {
+    let now = now_millis();
+    let Some(record) = session.undoable() else {
+        return Err("there is nothing to undo".to_owned());
+    };
+    let mut out = vec![if record.timed {
+        format!(
+            "undo `{}` over {} message(s) — {} ms left on FR-15's window",
+            record.intent,
+            record.messages,
+            record.remaining_millis(now)
+        )
+    } else {
+        format!(
+            "undo `{}` over {} message(s) — no countdown; it stays reversible either way",
+            record.intent, record.messages
+        )
+    }];
+    let gesture = session.undo_last(now)?;
+    out.extend(
+        gesture
+            .enqueued
+            .iter()
+            .map(|m| format!("{m}: {} enqueued", gesture.intent.unwrap_or_default())),
+    );
+    out.extend(gesture.skipped.iter().map(|(m, why)| format!("{m}: {why}")));
+    // Never a queue retraction. The original may already have reached the server, and a
+    // design that tries to cancel in flight has two outcomes to reason about.
+    out.push("-- reversed by compensation, not by retraction".to_owned());
+    Ok(out)
 }
 
 fn actions(session: &mut Session) -> Output {

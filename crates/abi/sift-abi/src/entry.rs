@@ -244,6 +244,149 @@ pub struct SiftGesture {
     pub optimistic: u8,
 }
 
+/// What could be undone right now.
+///
+/// D-86 puts this record **in the layer**, and this is why it can be: a window shell is
+/// destroyed when its window closes, in a product that runs with no window at all, so a
+/// countdown owned by a view dies with the view. The always-on surface reads the same record
+/// through the same entry point.
+///
+/// `timed` distinguishes FR-15's countdown from ordinary reversibility. Every intent but
+/// permanent delete stays reversible for as long as the message exists; only intents that
+/// remove the message from view get a *window*, because those are the ones where the user has
+/// nothing left to click. A countdown on every message the reader marks read would make the
+/// mechanism worthless by making it constant.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_undoable(app: *mut SiftApp, out: *mut SiftUndoable) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let session = layer.session.lock().map_err(|_| ())?;
+            let record = session.undoable().ok_or(())?;
+            let now = now_millis();
+            Ok(SiftUndoable {
+                messages: u32::try_from(record.messages).unwrap_or(u32::MAX),
+                timed: u8::from(record.timed),
+                remaining_millis: if record.timed {
+                    record.remaining_millis(now)
+                } else {
+                    0
+                },
+                intent: SiftStr::new(record.intent),
+            })
+        })
+    }
+}
+
+/// The gesture that undo would reverse.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftUndoable<'a> {
+    pub messages: u32,
+    /// Whether FR-15's countdown applies. Where this is zero the gesture is still reversible
+    /// through the ordinary interface — there is simply no toast.
+    pub timed: u8,
+    /// What is left of L-22. Zero once the countdown has run out, which does not mean the
+    /// gesture became irreversible.
+    pub remaining_millis: u64,
+    /// What was done, for the affordance's own words. A `'static` name from the register,
+    /// so unlike every other borrowed string here it outlives any document.
+    pub intent: SiftStr<'a>,
+}
+
+/// D-49's annunciator: the one condition worth drawing, across every account.
+///
+/// **One badge, not a list.** `AccountCondition`'s ordering is the precedence, so this is a
+/// `min` over what applies — and `Healthy` renders nothing at all, because a badge that is
+/// always present is a badge nobody reads.
+///
+/// This is a poll rather than a push on purpose. The push exists too: D-67's
+/// `account_condition_changed` host callback is what wakes a shell with no window, because
+/// `NeedsAuthentication` is the one condition that MUST reach the user with nothing on screen.
+/// A shell that had only the callback could not draw the badge when a window opens.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_annunciator(
+    app: *mut SiftApp,
+    out: *mut SiftAnnunciator,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let mut session = layer.session.lock().map_err(|_| ())?;
+            let (condition, accounts) = session.app_mut().annunciator();
+            Ok(SiftAnnunciator {
+                condition: SiftCondition::of(condition),
+                accounts: u32::try_from(accounts).unwrap_or(u32::MAX),
+                asks_something_of_the_user: u8::from(condition.asks_something_of_the_user()),
+                reaches_the_user_without_a_window: u8::from(
+                    condition.reaches_the_user_without_a_window(),
+                ),
+            })
+        })
+    }
+}
+
+/// D-49's eight conditions, in precedence order. Lower is worse.
+///
+/// A `#[repr(transparent)]` newtype with constants rather than a C enum, because cbindgen
+/// emits an enum as both a tagged type and a typedef and Swift then sees the name twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct SiftCondition(pub u32);
+
+impl SiftCondition {
+    /// FR-2. **The one condition that must reach the user with no window open.**
+    pub const NEEDS_AUTHENTICATION: Self = Self(0);
+    /// Also what a full disk produces: mutations stop rather than being applied optimistically
+    /// to a store Sift cannot write.
+    pub const STORAGE_UNAVAILABLE: Self = Self(1);
+    /// FR-22. Never resumes on its own, which is why it is not the same as the next one.
+    pub const PAUSED_BY_USER: Self = Self(2);
+    /// FR-36. Resumes when the accounting period rolls over.
+    pub const PAUSED_BY_DATA_CAP: Self = Self(3);
+    /// **Progress, not a fault.** The user action is nothing, and presenting it as a fault
+    /// would be dishonest.
+    pub const RECOVERING: Self = Self(4);
+    /// NFR-29. A capability went away, or resynchronization has no efficient path.
+    pub const DEGRADED: Self = Self(5);
+    /// A quarantined intent, or triage held on an account that is watched but not written to.
+    pub const ATTENTION: Self = Self(6);
+    /// Draws nothing.
+    pub const HEALTHY: Self = Self(7);
+
+    const fn of(condition: sift_foundation::condition::AccountCondition) -> Self {
+        use sift_foundation::condition::AccountCondition as C;
+        match condition {
+            C::NeedsAuthentication => Self::NEEDS_AUTHENTICATION,
+            C::StorageUnavailable => Self::STORAGE_UNAVAILABLE,
+            C::PausedByUser => Self::PAUSED_BY_USER,
+            C::PausedByDataCap => Self::PAUSED_BY_DATA_CAP,
+            C::Recovering => Self::RECOVERING,
+            C::Degraded => Self::DEGRADED,
+            C::Attention => Self::ATTENTION,
+            C::Healthy => Self::HEALTHY,
+        }
+    }
+}
+
+/// What the badge draws.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftAnnunciator {
+    pub condition: SiftCondition,
+    /// How many accounts are in it. One account in trouble and five is a different sentence.
+    pub accounts: u32,
+    /// Whether the user has something to do. `RECOVERING` is the interesting zero.
+    pub asks_something_of_the_user: u8,
+    pub reaches_the_user_without_a_window: u8,
+}
+
 /// Whether an action is available right now.
 ///
 /// D-98 makes an unavailable action **absent rather than disabled**, so this is what decides
