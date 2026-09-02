@@ -40,16 +40,37 @@ final class SettingsWindow: NSWindowController {
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let scroll = NSScrollView()
-        let document = NSView()
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+
+        // **A scroll view does not lay out what it scrolls.** A document view left translating
+        // its autoresizing mask keeps the zero frame it was created with, so a stack pinned to
+        // its four edges is pinned to nothing, and every row's own width constraint then
+        // contradicts a container that is zero wide. That is what the empty settings window
+        // was: nineteen rows, all present, laid out into 0x0 and reported by nobody.
+        //
+        // Every other scroll view in this shell holds a table or a text view, which size
+        // themselves. This one holds a plain view, so it is sized here — pinned to the clip
+        // view's width, with its height coming from the stack.
+        //
+        // **Flipped**, because a scroll view's origin is the bottom-left of an ordinary view.
+        // With the default geometry the first row lands at the bottom of the document and the
+        // window opens showing the end of the list — which reads as a different bug from the
+        // one above and has the same fix nowhere near it.
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(stack)
+        scroll.documentView = document
         NSLayoutConstraint.activate([
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
             stack.topAnchor.constraint(equalTo: document.topAnchor),
             stack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
         ])
-        scroll.documentView = document
-        scroll.hasVerticalScroller = true
         window.contentView = scroll
         window.center()
     }
@@ -89,8 +110,23 @@ final class SettingsWindow: NSWindowController {
                     note("These go with the account when you remove it."))
                 wroteAccountHeading = true
             }
-            stack.addArrangedSubview(view(for: row))
+            add(view(for: row))
         }
+    }
+
+    /// Add a row and give it the stack's width.
+    ///
+    /// **The width is constrained here rather than where the row is built**, because an anchor
+    /// pair needs a common ancestor and a row that has not been added yet has none — activating
+    /// it early raises, AppKit swallows the exception at the top of the event loop, and what is
+    /// left on screen is however much of the list had been added before it. Which looks exactly
+    /// like a settings window that has no settings in it.
+    private func add(_ row: NSView) {
+        stack.addArrangedSubview(row)
+        row.widthAnchor.constraint(
+            equalTo: stack.widthAnchor,
+            constant: -(stack.edgeInsets.left + stack.edgeInsets.right)
+        ).isActive = true
     }
 
     private func heading(_ text: String) -> NSView {
@@ -153,7 +189,6 @@ final class SettingsWindow: NSWindowController {
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 14
-        row.widthAnchor.constraint(equalToConstant: 620).isActive = true
         return row
     }
 
@@ -204,4 +239,13 @@ final class SettingsWindow: NSWindowController {
         // cannot hold, and putting the old one back says so more clearly than an alert.
         if !ok { reload() }
     }
+}
+
+/// A view whose origin is its top-left.
+///
+/// AppKit's is the bottom-left, which is the right answer for a canvas and the wrong one for a
+/// list inside a scroll view: the content is laid out upwards from the bottom and the scroll
+/// opens at the end of it.
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }

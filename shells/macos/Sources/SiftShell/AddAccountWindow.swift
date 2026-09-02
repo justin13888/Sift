@@ -25,7 +25,15 @@ import CSift
 final class AddAccountWindow: NSWindowController {
     private let app: OpaquePointer
     private let onAdded: () -> Void
+    /// Told when the flow ends, added or not, so the shell releases this controller — and so a
+    /// callback arriving afterwards is not handed to a screen that is gone.
+    private let onDismissed: () -> Void
     private let status = NSTextField(labelWithString: "")
+    /// A sheet has no chrome, so it needs a way out that a window of its own gets from the
+    /// platform. Hidden in the window frame, where the close button already says this.
+    private let dismissButton = NSButton(title: "Not Now", target: nil, action: nil)
+    /// Ends the flow exactly once. `close()` re-enters through the window delegate.
+    private var finished = false
 
     /// The OAuth client this build was configured with, from the bundle.
     ///
@@ -40,9 +48,14 @@ final class AddAccountWindow: NSWindowController {
     /// Held for the life of the flow, because the session is cancelled when it is released.
     private var session: ASWebAuthenticationSession?
 
-    init(app: OpaquePointer, onAdded: @escaping () -> Void) {
+    init(
+        app: OpaquePointer,
+        onAdded: @escaping () -> Void,
+        onDismissed: @escaping () -> Void
+    ) {
         self.app = app
         self.onAdded = onAdded
+        self.onDismissed = onDismissed
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 620, height: 560),
             styleMask: [.titled, .closable, .miniaturizable],
@@ -50,9 +63,53 @@ final class AddAccountWindow: NSWindowController {
         window.title = "Add an Account"
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        window.delegate = self
         window.contentView = build()
         window.center()
     }
+
+    /// D-97: **a window of its own on first run, a sheet on the window that started it.**
+    ///
+    /// The same screen in the frame that fits where it was asked for, rather than two
+    /// implementations of one flow. The account-less state has no window to attach to; adding
+    /// a second account always does.
+    func present(over host: NSWindow?) {
+        guard let window else { return }
+        if let host, host !== window {
+            dismissButton.isHidden = false
+            host.beginSheet(window) { _ in }
+        } else {
+            dismissButton.isHidden = true
+            showWindow(nil)
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Bring a flow already in progress forward rather than starting a second one — two
+    /// authorizations in flight is two PKCE verifiers and one of them cannot be returned to.
+    func raise() {
+        guard let window else { return }
+        (window.sheetParent ?? window).makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// End the flow, in whichever frame it was presented in.
+    private func finish(added: Bool) {
+        guard !finished else { return }
+        finished = true
+        // The session is cancelled when it is released, and a flow that has ended holds none.
+        session = nil
+        if let window, let host = window.sheetParent {
+            host.endSheet(window)
+            window.orderOut(nil)
+        } else {
+            close()
+        }
+        if added { onAdded() }
+        onDismissed()
+    }
+
+    @objc private func dismissWithoutAdding() { finish(added: false) }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
@@ -108,6 +165,11 @@ final class AddAccountWindow: NSWindowController {
             title: "Look Around First", target: self, action: #selector(useFixtures))
         fixtures.bezelStyle = .rounded
 
+        dismissButton.bezelStyle = .rounded
+        dismissButton.target = self
+        dismissButton.action = #selector(dismissWithoutAdding)
+        dismissButton.isHidden = true
+
         if AddAccountWindow.clientID == nil {
             connect.isEnabled = false
             status.stringValue = """
@@ -120,7 +182,7 @@ final class AddAccountWindow: NSWindowController {
                 "Sift will open your browser to sign in. The reply comes back to Sift directly."
         }
 
-        let buttons = NSStackView(views: [fixtures, connect])
+        let buttons = NSStackView(views: [dismissButton, fixtures, connect])
         buttons.orientation = .horizontal
         buttons.spacing = 12
 
@@ -252,8 +314,7 @@ final class AddAccountWindow: NSWindowController {
             status.stringValue = "That sign-in did not complete. You can try again."
             return
         }
-        close()
-        onAdded()
+        finish(added: true)
     }
 
     @objc private func useFixtures() {
@@ -269,8 +330,7 @@ final class AddAccountWindow: NSWindowController {
         _ = SiftText.withBytes(label) { ptr, len in
             sift_sync_account(UnsafeMutablePointer(app), ptr, len)
         }
-        close()
-        onAdded()
+        finish(added: true)
     }
 }
 
@@ -283,5 +343,15 @@ extension AddAccountWindow: ASWebAuthenticationPresentationContextProviding {
     /// one: the sign-in belongs to the account being added.
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         window ?? NSApp.keyWindow ?? NSWindow()
+    }
+}
+
+// MARK: - A window the user closed is a flow they left
+
+extension AddAccountWindow: NSWindowDelegate {
+    /// The close button, in the window frame. Without this the controller would be held after
+    /// its screen had gone, and the next `Add Account` would raise a window nobody can see.
+    func windowWillClose(_ notification: Notification) {
+        finish(added: false)
     }
 }

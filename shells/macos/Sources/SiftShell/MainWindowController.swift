@@ -183,6 +183,10 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         window?.makeKeyAndOrderFront(nil)
     }
 
+    /// What a sheet attaches to. D-97 puts the add-account flow on *the window that started
+    /// it*, and `NSApp.keyWindow` is nil when the gesture came from the tray.
+    var hostWindow: NSWindow? { window }
+
     @objc private func runSearch() {
         let query = searchField.stringValue
         if query.trimmingCharacters(in: .whitespaces).isEmpty {

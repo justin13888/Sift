@@ -287,6 +287,13 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             debugWindow = window
             window.present(row)
             return
+        case "app.add-account":
+            // **The one gesture that was bound to nothing.** It reached the register, crossed
+            // the boundary, found an action with no intent behind it and came back `Ok` — so
+            // nothing happened and nothing said so. Adding an account is the shell's own work:
+            // there is no intent for it, and the layer has no window to open.
+            beginAddAccount()
+            return
         case "app.open-settings":
             guard let app else { return }
             let window = settingsWindow ?? SettingsWindow(app: app)
@@ -412,14 +419,37 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
 
     /// **The account-less state is the add-account flow**, not an empty inbox with a hint in
     /// it. So first run is a screen, and this is where it opens.
+    ///
+    /// It is also where `Add Account…` arrives, which is the whole difference between a flow a
+    /// user can reach once and one they can reach whenever they want another mailbox. D-97
+    /// gives the two cases different frames and the same screen: a window of its own when
+    /// there is nothing to attach to, a sheet on the window that asked otherwise.
     private func beginAddAccount() {
         guard let app else { return }
-        let window = AddAccountWindow(app: app) { [weak self] in
-            self?.openMainWindow()
+        if let existing = addAccount {
+            existing.raise()
+            return
         }
+        let window = AddAccountWindow(
+            app: app,
+            onAdded: { [weak self] in self?.openMainWindow() },
+            onDismissed: { [weak self] in
+                self?.addAccount = nil
+                // First run with nothing added leaves no window, and an accessory with no
+                // window is one the dock does not show. Put the policy back where the window
+                // count says it should be rather than leaving Sift stranded as regular.
+                self?.syncActivationPolicy()
+            })
         addAccount = window
-        window.showWindow(nil)
+        // **A main window, or none.** D-97 puts this on the window that started it, and the
+        // window that started it is a main window or the tray — `keyWindow` may be Settings or
+        // the runtime panel, which are their own window kinds and are not what a new account
+        // belongs to. Nil is the first-run frame, and it is also the honest answer when the
+        // gesture came from the menu bar with every window closed.
+        let host = windows.first(where: { $0.hostWindow === NSApp.keyWindow })?.hostWindow
+            ?? windows.last?.hostWindow
         NSApp.setActivationPolicy(.regular)
+        window.present(over: host)
         NSApp.activate(ignoringOtherApps: true)
     }
 
