@@ -492,6 +492,155 @@ struct Gathered {
     condition: SiftCondition,
 }
 
+/// Authorize, or withdraw authorization for, writes to one account.
+///
+/// **An account is added watching and nothing else**, and this is the only thing that changes
+/// it. Until it existed, triage on a macOS account was journaled durably, applied
+/// optimistically, and could never be issued — the posture was settable from the test harness
+/// and from nowhere a person could reach.
+///
+/// Withdrawing takes effect immediately for anything not yet issued. Intents already on the
+/// wire are not recalled: a request that has left cannot be unsent, and pretending otherwise
+/// is the one lie a mutation queue must not tell.
+///
+/// # Safety
+/// `app` must be valid; `label` must point to `label_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_set_writes_enabled(
+    app: *mut SiftApp,
+    label: *const u8,
+    label_len: usize,
+    enabled: u8,
+) -> SiftStatus {
+    guard(|| {
+        // SAFETY: the caller's obligation.
+        let name = unsafe { borrowed(label, label_len)? };
+        // SAFETY: as above.
+        let layer = (unsafe { layer(app) }).ok_or(())?;
+        let mut session = layer.session.lock().map_err(|_| ())?;
+        session
+            .app_mut()
+            .set_writes_enabled(name, enabled != 0)
+            .map_err(|_| ())
+    })
+}
+
+/// What one turn of the flush did.
+///
+/// **`authorized` is not a failure.** An account that is only being watched has a queue that
+/// grows and sends nothing, and that is the state the user chose — so it crosses as a result
+/// with a count in it rather than as an error, which is what lets a surface say *nothing has
+/// been sent, and nothing will be until you say so* instead of drawing a fault.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftFlush {
+    /// Zero where writes are not authorized for this account. Nothing was issued.
+    pub authorized: u8,
+    /// Intents held because writes are not authorized. Zero once they are.
+    pub held: u32,
+    pub issued: u32,
+    pub applied: u32,
+    /// The provider refused, in its own terms. Settled: retrying changes nothing.
+    pub refused: u32,
+    /// Left for the scheduler to try again.
+    pub deferred: u32,
+    /// The request went out and no answer came back — D-85's `Reconciling`.
+    pub reconciling: u32,
+    /// Held rather than executed: unrecognised, or its gating capability has gone away.
+    pub quarantined: u32,
+    /// What is still queued afterwards.
+    pub queued: u32,
+    /// Whether the flush ended in a stated failure. **The state, not the sentence** — D-56
+    /// keeps prose on the shell's side of this boundary.
+    pub failed: u8,
+}
+
+/// Send what is queued for one account, once.
+///
+/// **This blocks the calling thread**, which is a limitation rather than a design, and the same
+/// one [`sift_sync_account`] carries: the work belongs on a worker under D-19, and moving it
+/// there changes nothing a shell can see because every delivery already arrives through D-48's
+/// hop rather than out of this call.
+///
+/// # Safety
+/// `app` and `out` must be valid; `label` must point to `label_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_flush_account(
+    app: *mut SiftApp,
+    label: *const u8,
+    label_len: usize,
+    out: *mut SiftFlush,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let name = borrowed(label, label_len)?;
+            let layer = layer(app).ok_or(())?;
+            let flushed = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                session.app_mut().flush(name).map_err(|_| ())?
+            };
+            // The list is an observation, and a settled intent removes the overlay row that was
+            // hiding a message. Posted rather than run: running it here would hand the shell a
+            // callback from inside the call that caused it, which is D-48's reentrancy.
+            crate::layer::post(
+                layer,
+                Task::Deliver {
+                    layer: app as usize,
+                },
+            );
+            let report = &flushed.report;
+            let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+            Ok(SiftFlush {
+                authorized: u8::from(flushed.authorized),
+                held: count(flushed.held),
+                issued: count(report.issued),
+                applied: count(report.applied),
+                refused: count(report.refused),
+                deferred: count(report.deferred),
+                reconciling: count(report.reconciling),
+                quarantined: count(report.quarantined),
+                queued: count(flushed.queued),
+                failed: u8::from(flushed.error.is_some()),
+            })
+        })
+    }
+}
+
+/// FR-15 — reverse the last reversible gesture.
+///
+/// **Not an action.** `undo.last-gesture` is in D-98's register and has no intent behind it, so
+/// invoking it through [`sift_invoke_action`] returns success and does nothing — which is what
+/// the undo toast was wired to. The reversal is a gesture of its own shape: it acts over
+/// D-85's undo group rather than over a message, so a bulk operation reverses as the one
+/// gesture FR-17 promises.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_undo_last(app: *mut SiftApp, out: *mut SiftGesture) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let gesture = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                session.undo_last(now_millis()).map_err(|_| ())?
+            };
+            crate::layer::post(
+                layer,
+                Task::Deliver {
+                    layer: app as usize,
+                },
+            );
+            Ok(SiftGesture {
+                mutated: u8::from(gesture.mutates),
+                enqueued: u32::try_from(gesture.enqueued.len()).unwrap_or(u32::MAX),
+                skipped: u32::try_from(gesture.skipped.len()).unwrap_or(u32::MAX),
+                optimistic: u8::from(gesture.optimistic),
+            })
+        })
+    }
+}
+
 /// The URI scheme this client's authorization callback comes back on — D-36 and D-109.
 ///
 /// # Why a shell asks rather than derives
@@ -3166,6 +3315,121 @@ mod tests {
             0,
             "the account-less state is what makes the add-account flow the right first screen"
         );
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    /// A flush against the recorded corpus, before and after the posture is changed.
+    ///
+    /// The corpus is a real adapter over recorded exchanges, so this drives the same path a
+    /// real mailbox does — including the one step an account that is only watched skips.
+    #[test]
+    fn a_watched_account_issues_nothing_and_says_how_much_it_is_holding() {
+        let app = start(run_inline, scratch_str());
+        let name = "mail";
+        let message = hostile_message(app);
+
+        assert_eq!(
+            unsafe { sift_select(app, &raw const message, 1) },
+            SiftStatus::Ok
+        );
+        assert_eq!(do_action(app, "message.archive"), SiftStatus::Ok);
+
+        let mut flushed = SiftFlush {
+            authorized: 1,
+            held: 0,
+            issued: 0,
+            applied: 0,
+            refused: 0,
+            deferred: 0,
+            reconciling: 0,
+            quarantined: 0,
+            queued: 0,
+            failed: 0,
+        };
+        assert_eq!(
+            unsafe { sift_flush_account(app, name.as_ptr(), name.len(), &raw mut flushed) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            flushed.authorized, 0,
+            "an account is added watching, so the one step that cannot be taken back is the \
+             one step it does not take"
+        );
+        assert_eq!(
+            flushed.issued, 0,
+            "nothing may leave an unauthorized account"
+        );
+        assert_eq!(
+            flushed.held, 1,
+            "the intent is durably recorded and held, and the count is what makes that \
+             checkable rather than something a user is told"
+        );
+
+        assert_eq!(
+            unsafe { sift_set_writes_enabled(app, name.as_ptr(), name.len(), 1) },
+            SiftStatus::Ok
+        );
+        let mut rows = SiftRows::<SiftAccount<'static>>::empty();
+        assert_eq!(unsafe { sift_accounts(app, &raw mut rows) }, SiftStatus::Ok);
+        assert_eq!(
+            unsafe { rows.as_slice() }[0].writes_enabled,
+            1,
+            "the posture the list reports is the one that was just set"
+        );
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    #[test]
+    fn undo_reverses_the_gesture_the_register_could_only_report() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        assert_eq!(
+            unsafe { sift_select(app, &raw const message, 1) },
+            SiftStatus::Ok
+        );
+        assert_eq!(do_action(app, "message.archive"), SiftStatus::Ok);
+
+        let mut undoable = SiftUndoable {
+            messages: 0,
+            timed: 0,
+            remaining_millis: 0,
+            intent: SiftStr::new(""),
+        };
+        assert_eq!(
+            unsafe { sift_undoable(app, &raw mut undoable) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            undoable.messages, 1,
+            "an archive over one message is reversible"
+        );
+
+        let mut gesture = SiftGesture {
+            mutated: 0,
+            enqueued: 0,
+            skipped: 0,
+            optimistic: 0,
+        };
+        assert_eq!(
+            unsafe { sift_undo_last(app, &raw mut gesture) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            gesture.enqueued, 1,
+            "the reversal is its own gesture with its own intent — invoking the register \
+             entry returned success and enqueued nothing"
+        );
+
+        // Nothing to undo is an identified failure rather than a zero row: the affordance
+        // is absent, and `SiftUndoable` has no way to say "none" that a shell could not
+        // mistake for a gesture over no messages.
+        assert_eq!(
+            unsafe { sift_undoable(app, &raw mut undoable) },
+            SiftStatus::Failed,
+            "the record is spent once it has been used"
+        );
+
         assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
     }
 

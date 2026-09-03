@@ -287,6 +287,23 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             debugWindow = window
             window.present(row)
             return
+        case "undo.last-gesture":
+            // **Its own entry point, not the register's.** `undo.last-gesture` is in D-98's
+            // set and has no intent behind it, so invoking it across the boundary returned
+            // success and reversed nothing — which is what the undo toast was wired to. The
+            // reversal acts over D-85's undo group rather than over a message, so a bulk
+            // operation reverses as the one gesture FR-17 promises.
+            guard let app else { return }
+            var reversal = SiftGesture()
+            if sift_undo_last(UnsafeMutablePointer(app), &reversal) != Ok {
+                // Nothing to reverse, or nothing about it was reversible. D-98's rule for an
+                // action that is not available is silence, not an alert announcing a
+                // capability the user does not have.
+                NSSound.beep()
+                return
+            }
+            for window in windows { window.refreshChrome() }
+            return
         case "app.add-account":
             // **The one gesture that was bound to nothing.** It reached the register, crossed
             // the boundary, found an action with no intent behind it and came back `Ok` — so

@@ -431,6 +431,52 @@ typedef struct {
 } SiftRows_SiftAccount;
 
 /**
+ * What one turn of the flush did.
+ *
+ * **`authorized` is not a failure.** An account that is only being watched has a queue that
+ * grows and sends nothing, and that is the state the user chose — so it crosses as a result
+ * with a count in it rather than as an error, which is what lets a surface say *nothing has
+ * been sent, and nothing will be until you say so* instead of drawing a fault.
+ */
+typedef struct {
+  /**
+   * Zero where writes are not authorized for this account. Nothing was issued.
+   */
+  uint8_t authorized;
+  /**
+   * Intents held because writes are not authorized. Zero once they are.
+   */
+  uint32_t held;
+  uint32_t issued;
+  uint32_t applied;
+  /**
+   * The provider refused, in its own terms. Settled: retrying changes nothing.
+   */
+  uint32_t refused;
+  /**
+   * Left for the scheduler to try again.
+   */
+  uint32_t deferred;
+  /**
+   * The request went out and no answer came back — D-85's `Reconciling`.
+   */
+  uint32_t reconciling;
+  /**
+   * Held rather than executed: unrecognised, or its gating capability has gone away.
+   */
+  uint32_t quarantined;
+  /**
+   * What is still queued afterwards.
+   */
+  uint32_t queued;
+  /**
+   * Whether the flush ended in a stated failure. **The state, not the sentence** — D-56
+   * keeps prose on the shell's side of this boundary.
+   */
+  uint8_t failed;
+} SiftFlush;
+
+/**
  * A message row, as the list receives it.
  *
  * **Fixed layout, and the text fields are pointers into layer-owned storage valid for the
@@ -1058,6 +1104,53 @@ uint32_t sift_account_count(SiftApp *app);
  * `app` and `out` must be valid.
  */
 SiftStatus sift_accounts(SiftApp *app, SiftRows_SiftAccount *out);
+
+/**
+ * Authorize, or withdraw authorization for, writes to one account.
+ *
+ * **An account is added watching and nothing else**, and this is the only thing that changes
+ * it. Until it existed, triage on a macOS account was journaled durably, applied
+ * optimistically, and could never be issued — the posture was settable from the test harness
+ * and from nowhere a person could reach.
+ *
+ * Withdrawing takes effect immediately for anything not yet issued. Intents already on the
+ * wire are not recalled: a request that has left cannot be unsent, and pretending otherwise
+ * is the one lie a mutation queue must not tell.
+ *
+ * # Safety
+ * `app` must be valid; `label` must point to `label_len` bytes of UTF-8.
+ */
+SiftStatus sift_set_writes_enabled(SiftApp *app,
+                                   const uint8_t *label,
+                                   size_t label_len,
+                                   uint8_t enabled);
+
+/**
+ * Send what is queued for one account, once.
+ *
+ * **This blocks the calling thread**, which is a limitation rather than a design, and the same
+ * one [`sift_sync_account`] carries: the work belongs on a worker under D-19, and moving it
+ * there changes nothing a shell can see because every delivery already arrives through D-48's
+ * hop rather than out of this call.
+ *
+ * # Safety
+ * `app` and `out` must be valid; `label` must point to `label_len` bytes of UTF-8.
+ */
+SiftStatus sift_flush_account(SiftApp *app, const uint8_t *label, size_t label_len, SiftFlush *out);
+
+/**
+ * FR-15 — reverse the last reversible gesture.
+ *
+ * **Not an action.** `undo.last-gesture` is in D-98's register and has no intent behind it, so
+ * invoking it through [`sift_invoke_action`] returns success and does nothing — which is what
+ * the undo toast was wired to. The reversal is a gesture of its own shape: it acts over
+ * D-85's undo group rather than over a message, so a bulk operation reverses as the one
+ * gesture FR-17 promises.
+ *
+ * # Safety
+ * `app` and `out` must be valid.
+ */
+SiftStatus sift_undo_last(SiftApp *app, SiftGesture *out);
 
 /**
  * The URI scheme this client's authorization callback comes back on — D-36 and D-109.

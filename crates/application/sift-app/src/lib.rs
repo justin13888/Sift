@@ -975,6 +975,80 @@ impl App {
         Ok(())
     }
 
+    /// Send what is queued for one account, once.
+    ///
+    /// **The read-only posture is checked before anything is issued**, and before the adapter
+    /// is even taken. Everything up to here has already happened: the intents were built,
+    /// checked against declared capabilities, written durably and applied optimistically. This
+    /// is the one step that cannot be taken back, and it is the one step an account that is
+    /// only being watched does not take.
+    ///
+    /// It lives here rather than in a shell because both shells need it and D-17 makes a
+    /// capability that exists in one of them a defect. The harness keeps two branches of its
+    /// own on top of this — an account with no provider behind it, and stopping after the
+    /// issue so the crash path can be driven — and both are test affordances rather than
+    /// things a person does.
+    ///
+    /// # Errors
+    /// There is no such account, it has no provider behind it, or the journal refused the
+    /// durable marker D-85 requires before a request goes out.
+    pub fn flush(&mut self, name: &str) -> Result<Flushed, String> {
+        if !self.may_issue(name) {
+            return Ok(Flushed {
+                authorized: false,
+                held: self.held(name),
+                report: sift_mutations::flush::FlushReport::default(),
+                queued: self.account(name)?.queue.len(),
+                error: None,
+            });
+        }
+        let account = self.account(name)?;
+        let adapter = account
+            .adapter
+            .take()
+            .ok_or("this account has no provider behind it")?;
+
+        // The durable half of D-85's marker. It is a callback because the journal is the
+        // store's and the queue cannot reach it — the two sit side by side in this layer and
+        // D-59 gives neither an edge to the other.
+        let journal = &account.store.journal;
+        let mut mark_issued = |ids: &[u128]| -> Result<(), String> {
+            let transaction = journal.unchecked_transaction().map_err(|e| e.to_string())?;
+            for id in ids {
+                transaction
+                    .execute(
+                        "UPDATE intent SET state = 'Issued' WHERE id = ?1",
+                        rusqlite::params![id.to_be_bytes().to_vec()],
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            transaction.commit().map_err(|e| e.to_string())
+        };
+
+        let resolve = Remote(&account.store.store);
+        let outcome = sift_mutations::flush::flush_once(
+            adapter.as_ref(),
+            &mut account.queue,
+            &resolve,
+            &mut mark_issued,
+        );
+        // Returned either way — a failed flush must not leave an account unreachable, for the
+        // same reason a failed sync must not.
+        account.adapter = Some(adapter);
+
+        let (report, error) = match outcome {
+            Ok(report) => (report, None),
+            Err(failure) => (failure.report.clone(), Some(failure.error.to_string())),
+        };
+        Ok(Flushed {
+            authorized: true,
+            held: 0,
+            report,
+            queued: account.queue.len(),
+            error,
+        })
+    }
+
     /// How many intents are being held because writes are not authorized.
     ///
     /// Surfaced rather than silent: a queue that grows while nothing leaves is a state the
@@ -986,6 +1060,24 @@ impl App {
             .filter(|a| !a.writes_enabled)
             .map_or(0, |a| a.queue.len())
     }
+}
+
+/// What one turn of the flush did, including the turn an unauthorized account does not take.
+///
+/// **`authorized` is not an error case.** An account that is only being watched has a queue
+/// that grows and sends nothing, and that is the state the user chose — so it is reported as a
+/// result with a count in it rather than as a failure, which is what lets a surface say
+/// "nothing has been sent, and nothing will be until you say so" instead of showing a fault.
+#[derive(Debug, Clone)]
+pub struct Flushed {
+    pub authorized: bool,
+    /// Intents held because writes are not authorized. Zero once they are.
+    pub held: usize,
+    pub report: sift_mutations::flush::FlushReport,
+    /// What is still queued afterwards.
+    pub queued: usize,
+    /// The provider or the journal refused, in the layer's own words.
+    pub error: Option<String>,
 }
 
 /// What one turn of the sync loop did.
