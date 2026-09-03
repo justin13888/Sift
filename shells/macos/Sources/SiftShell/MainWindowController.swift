@@ -18,6 +18,17 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     /// three ways to reach an action must not be three implementations of it.
     var onInvoke: ((String) -> Void)?
     private let annunciator = AnnunciatorView(frame: .zero)
+    /// What the list is anchored on. D-4's zero identity is every account merged, and it is
+    /// where a window starts.
+    private var account: SiftId = .zero
+    /// Accounts this process has already fetched for.
+    ///
+    /// **One round trip per account per run, and no more.** Nothing across this boundary runs
+    /// periodically yet — the scheduler is not wired to it — so an account that is never synced
+    /// from a gesture is never synced at all, and a person who signed in yesterday opens Sift
+    /// to the mail they had yesterday. Until the scheduler is behind this, the gestures that
+    /// mean *show me this mailbox* are what fetch it.
+    private var synced: Set<String> = []
     private let searchField = NSSearchField()
     private let searchReport = NSTextField(labelWithString: "")
     private let undoBar = UndoBar(frame: .zero)
@@ -100,7 +111,10 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             guard let self else { return }
             self.searchReport.isHidden = true
             self.searchField.stringValue = ""
-            self.list.observe(app: self.app, account: .zero)
+            // Back to what the sidebar is showing, not to the unified inbox — clearing a
+            // search inside one account and landing in every account is a retarget the user
+            // did not ask for.
+            self.list.observe(app: self.app, account: self.account)
         }
 
         // The annunciator and the undo toast are window chrome, not panes: they sit over the
@@ -167,12 +181,24 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 
         // D-4's unified inbox is the zero anchor: every account, merged on one comparator.
         list.observe(app: app, account: .zero)
+        sidebar.onSelect = { [weak self] account in
+            guard let self, !account.same(as: self.account) else { return }
+            self.account = account
+            self.list.clearSearch()
+            self.list.observe(app: self.app, account: account)
+            self.fetchOnce(matching: account)
+        }
         sidebar.reload(app: app)
         annunciator.show(app: app)
         undoBar.onUndo = { [weak self] in self?.onInvoke?("undo.last-gesture") }
 
         window.makeKeyAndOrderFront(nil)
         self.window = window
+        // **After the window is on screen, not before it.** A fetch blocks this thread, and a
+        // launch that waits on the network before drawing anything is the opposite of what a
+        // resident mail client should do. Ordering the window in first means a person sees
+        // Sift and then sees it fill, rather than seeing nothing and wondering.
+        DispatchQueue.main.async { [weak self] in self?.fetchOnce(matching: .zero) }
         // Every `Window`-scoped action in the register turns on this, so a layer that was
         // never told a window exists offers a menu to nobody.
         _ = sift_set_window_present(UnsafeMutablePointer(app), 1)
@@ -217,6 +243,34 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     func refreshChrome() {
         annunciator.show(app: app)
         undoBar.refresh(app: app)
+    }
+
+    /// The account list changed — one was added, or its condition did.
+    ///
+    /// Called rather than polled: a resident process that watches its own state is the idle
+    /// wakeup NFR-11 counts, and neither of those changes without something happening.
+    /// Fetch the accounts this anchor covers, once each per run.
+    ///
+    /// **This blocks the main thread for the length of a walk**, which is stated rather than
+    /// hidden behind a spinner: the work belongs on a worker under D-19, and moving it there
+    /// changes nothing a shell can see because every delivery already arrives through D-48's
+    /// hop rather than out of this call.
+    private func fetchOnce(matching anchor: SiftId) {
+        let unified = anchor.same(as: .zero)
+        for account in Account.all(app: app) {
+            guard unified || account.id.same(as: anchor) else { continue }
+            guard synced.insert(account.name).inserted else { continue }
+            _ = SiftText.withBytes(account.name) { ptr, len in
+                sift_sync_account(UnsafeMutablePointer(app), ptr, len)
+            }
+        }
+        sidebar.reload(app: app)
+        refreshChrome()
+    }
+
+    func refreshAccounts() {
+        sidebar.reload(app: app)
+        refreshChrome()
     }
 
     func windowWillClose(_ notification: Notification) {

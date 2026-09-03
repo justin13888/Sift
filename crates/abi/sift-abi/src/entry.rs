@@ -199,6 +199,8 @@ pub unsafe extern "C" fn sift_initialize(
                 stage_rows: std::sync::Mutex::new(Vec::new()),
                 setting_rows: std::sync::Mutex::new(Vec::new()),
                 setting_values: std::sync::Mutex::new(Vec::new()),
+                account_rows: std::sync::Mutex::new(Vec::new()),
+                account_names: std::sync::Mutex::new(Vec::new()),
                 search: std::sync::Mutex::new(crate::layer::SearchResult::default()),
             });
             Ok(Box::into_raw(layer).cast::<SiftApp>())
@@ -381,6 +383,113 @@ pub unsafe extern "C" fn sift_account_count(app: *mut SiftApp) -> u32 {
         };
         u32::try_from(session.app().accounts().count()).unwrap_or(u32::MAX)
     }
+}
+
+/// One account, as a shell needs to see it.
+///
+/// **The label is the handle.** Every account-taking entry point across this boundary names an
+/// account by the label it was added under, and until this existed nothing said what those
+/// labels were — so a shell could add an account and then never reach it again, and the
+/// runtime panel had to ask the user to type one. D-89 makes the identity Sift's own; the
+/// label is what a person calls it and what the container recorded.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftAccount<'a> {
+    /// D-89's Sift-assigned identity — the anchor a message-list observation takes.
+    pub id: SiftId,
+    /// What the account was added as, and what every other entry point takes.
+    pub name: SiftStr<'a>,
+    /// What the container recorded so a later run knows how to reconnect it. **Not something
+    /// to branch on**: the provider model plans against declared capabilities, and this is a
+    /// name for a reconnection route rather than a provider a shell may reason about.
+    pub kind: SiftStr<'a>,
+    /// D-49's single condition for this account.
+    pub condition: SiftCondition,
+    /// Whether Sift may change this mailbox. An account is added watching and nothing else,
+    /// and this is the flag that says so.
+    pub writes_enabled: u8,
+    /// Intents recorded and held because writes are not authorized. Zero once they are.
+    pub held: u32,
+}
+
+/// Every account the container holds.
+///
+/// The rows are borrowed for the duration of the call, like every other row array here, and
+/// the text behind them lives in the layer until the next call replaces it.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_accounts(
+    app: *mut SiftApp,
+    out: *mut SiftRows<'static, SiftAccount<'static>>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let mut session = layer.session.lock().map_err(|_| ())?;
+
+            let names: Vec<String> = session
+                .app()
+                .accounts()
+                .map(|(name, _)| name.clone())
+                .collect();
+            // One pass, and the condition first, because computing it needs the application
+            // mutably and a borrow of the account cannot be alive across that call.
+            let mut gathered = Vec::with_capacity(names.len());
+            for name in &names {
+                let condition = session
+                    .app_mut()
+                    .condition_of(name)
+                    .map_or(SiftCondition::HEALTHY, SiftCondition::of);
+                let app = session.app();
+                let held = u32::try_from(app.held(name)).unwrap_or(u32::MAX);
+                let Some((_, account)) = app.accounts().find(|(n, _)| *n == name) else {
+                    continue;
+                };
+                gathered.push(Gathered {
+                    id: account.id.as_u128(),
+                    kind: account.kind.clone(),
+                    writes_enabled: account.writes_enabled,
+                    held,
+                    condition,
+                });
+            }
+            drop(session);
+
+            // The names and the kinds, in one vector the layer owns, because a `repr(C)` row
+            // cannot own a `String` and the temporaries above die at the end of this call.
+            let mut stored = layer.account_names.lock().map_err(|_| ())?;
+            *stored = names
+                .into_iter()
+                .chain(gathered.iter().map(|g| g.kind.clone()))
+                .collect();
+            let count = gathered.len();
+            let mut table = layer.account_rows.lock().map_err(|_| ())?;
+            *table = gathered
+                .iter()
+                .enumerate()
+                .map(|(i, g)| SiftAccount {
+                    id: SiftId::from_u128(g.id),
+                    name: SiftStr::new(extend(&stored[i])),
+                    kind: SiftStr::new(extend(&stored[count + i])),
+                    condition: g.condition,
+                    writes_enabled: u8::from(g.writes_enabled),
+                    held: g.held,
+                })
+                .collect();
+            Ok(SiftRows::new(extend_rows(&table)))
+        })
+    }
+}
+
+/// One account's facts, read while the session is held and used after it is released.
+struct Gathered {
+    id: u128,
+    kind: String,
+    writes_enabled: bool,
+    held: u32,
+    condition: SiftCondition,
 }
 
 /// The URI scheme this client's authorization callback comes back on — D-36 and D-109.
@@ -3010,6 +3119,54 @@ mod tests {
         assert_eq!(found.delegable_accounts, 0);
         assert!(!found.rows.is_empty(), "the local search found nothing");
         let _ = unsafe { sift_shutdown(app) };
+    }
+
+    #[test]
+    fn the_account_list_names_what_a_shell_must_name_to_reach_it() {
+        let app = start(drop_it, scratch_str());
+        let name = "mail";
+        let mut id = SiftId::from_u128(0);
+        assert_eq!(
+            unsafe { sift_add_replayed_account(app, name.as_ptr(), name.len(), &raw mut id) },
+            SiftStatus::Ok
+        );
+
+        let mut rows = SiftRows::<SiftAccount<'static>>::empty();
+        assert_eq!(unsafe { sift_accounts(app, &raw mut rows) }, SiftStatus::Ok);
+        let listed = unsafe { rows.as_slice() };
+        assert_eq!(
+            listed.len(),
+            1,
+            "one account was added and one should be listed"
+        );
+
+        let row = &listed[0];
+        assert_eq!(unsafe { row.name.as_str() }, Some(name));
+        assert_eq!(
+            row.id.bytes, id.bytes,
+            "the listed identity must be the one adding it handed back, or an observation \
+             anchored on it would watch a different account"
+        );
+        assert_eq!(
+            row.writes_enabled, 0,
+            "an account is added watching and nothing else"
+        );
+        assert_eq!(row.held, 0, "nothing has been queued yet");
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    #[test]
+    fn an_account_that_was_never_added_is_not_listed() {
+        let app = start(drop_it, scratch_str());
+        let mut rows = SiftRows::<SiftAccount<'static>>::empty();
+        assert_eq!(unsafe { sift_accounts(app, &raw mut rows) }, SiftStatus::Ok);
+        assert_eq!(
+            unsafe { rows.as_slice() }.len(),
+            0,
+            "the account-less state is what makes the add-account flow the right first screen"
+        );
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
     }
 
     #[test]

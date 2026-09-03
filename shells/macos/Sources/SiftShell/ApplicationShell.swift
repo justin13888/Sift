@@ -432,7 +432,12 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         }
         let window = AddAccountWindow(
             app: app,
-            onAdded: { [weak self] in self?.openMainWindow() },
+            onAdded: { [weak self] in
+                self?.openMainWindow()
+                // The sidebar is where the account has to appear, and it is asked rather
+                // than told: the list it draws is the layer's.
+                self?.windows.forEach { $0.refreshAccounts() }
+            },
             onDismissed: { [weak self] in
                 self?.addAccount = nil
                 // First run with nothing added leaves no window, and an accessory with no
@@ -607,3 +612,4 @@ extension ApplicationShell {
     func raiseRestartPrompt() {}
     func refreshAnnunciator() {}
 }
+

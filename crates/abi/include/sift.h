@@ -332,6 +332,105 @@ typedef struct {
 } SiftUndoable;
 
 /**
+ * D-49's eight conditions, in precedence order. Lower is worse.
+ *
+ * A `#[repr(transparent)]` newtype with constants rather than a C enum, because cbindgen
+ * emits an enum as both a tagged type and a typedef and Swift then sees the name twice.
+ */
+typedef uint32_t SiftCondition;
+/**
+ * FR-2. **The one condition that must reach the user with no window open.**
+ */
+#define SiftCondition_NEEDS_AUTHENTICATION 0
+/**
+ * Also what a full disk produces: mutations stop rather than being applied optimistically
+ * to a store Sift cannot write.
+ */
+#define SiftCondition_STORAGE_UNAVAILABLE 1
+/**
+ * FR-22. Never resumes on its own, which is why it is not the same as the next one.
+ */
+#define SiftCondition_PAUSED_BY_USER 2
+/**
+ * FR-36. Resumes when the accounting period rolls over.
+ */
+#define SiftCondition_PAUSED_BY_DATA_CAP 3
+/**
+ * **Progress, not a fault.** The user action is nothing, and presenting it as a fault
+ * would be dishonest.
+ */
+#define SiftCondition_RECOVERING 4
+/**
+ * NFR-29. A capability went away, or resynchronization has no efficient path.
+ */
+#define SiftCondition_DEGRADED 5
+/**
+ * A quarantined intent, or triage held on an account that is watched but not written to.
+ */
+#define SiftCondition_ATTENTION 6
+/**
+ * Draws nothing.
+ */
+#define SiftCondition_HEALTHY 7
+
+/**
+ * One account, as a shell needs to see it.
+ *
+ * **The label is the handle.** Every account-taking entry point across this boundary names an
+ * account by the label it was added under, and until this existed nothing said what those
+ * labels were — so a shell could add an account and then never reach it again, and the
+ * runtime panel had to ask the user to type one. D-89 makes the identity Sift's own; the
+ * label is what a person calls it and what the container recorded.
+ */
+typedef struct {
+  /**
+   * D-89's Sift-assigned identity — the anchor a message-list observation takes.
+   */
+  SiftId id;
+  /**
+   * What the account was added as, and what every other entry point takes.
+   */
+  SiftStr name;
+  /**
+   * What the container recorded so a later run knows how to reconnect it. **Not something
+   * to branch on**: the provider model plans against declared capabilities, and this is a
+   * name for a reconnection route rather than a provider a shell may reason about.
+   */
+  SiftStr kind;
+  /**
+   * D-49's single condition for this account.
+   */
+  SiftCondition condition;
+  /**
+   * Whether Sift may change this mailbox. An account is added watching and nothing else,
+   * and this is the flag that says so.
+   */
+  uint8_t writes_enabled;
+  /**
+   * Intents recorded and held because writes are not authorized. Zero once they are.
+   */
+  uint32_t held;
+} SiftAccount;
+
+/**
+ * A contiguous, borrowed array of fixed-layout records.
+ *
+ * The alternative — an opaque row handle with a per-field accessor — was excluded
+ * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
+ * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
+ * hundred thousand boundary crossings per fling, against one delivery.
+ *
+ * # Safety
+ *
+ * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
+ * pointing into layer-owned storage with the same lifetime.
+ */
+typedef struct {
+  const SiftAccount *ptr;
+  size_t len;
+} SiftRows_SiftAccount;
+
+/**
  * A message row, as the list receives it.
  *
  * **Fixed layout, and the text fields are pointers into layer-owned storage valid for the
@@ -555,48 +654,6 @@ typedef struct {
   const SiftStr *ptr;
   size_t len;
 } SiftRows_SiftStr;
-
-/**
- * D-49's eight conditions, in precedence order. Lower is worse.
- *
- * A `#[repr(transparent)]` newtype with constants rather than a C enum, because cbindgen
- * emits an enum as both a tagged type and a typedef and Swift then sees the name twice.
- */
-typedef uint32_t SiftCondition;
-/**
- * FR-2. **The one condition that must reach the user with no window open.**
- */
-#define SiftCondition_NEEDS_AUTHENTICATION 0
-/**
- * Also what a full disk produces: mutations stop rather than being applied optimistically
- * to a store Sift cannot write.
- */
-#define SiftCondition_STORAGE_UNAVAILABLE 1
-/**
- * FR-22. Never resumes on its own, which is why it is not the same as the next one.
- */
-#define SiftCondition_PAUSED_BY_USER 2
-/**
- * FR-36. Resumes when the accounting period rolls over.
- */
-#define SiftCondition_PAUSED_BY_DATA_CAP 3
-/**
- * **Progress, not a fault.** The user action is nothing, and presenting it as a fault
- * would be dishonest.
- */
-#define SiftCondition_RECOVERING 4
-/**
- * NFR-29. A capability went away, or resynchronization has no efficient path.
- */
-#define SiftCondition_DEGRADED 5
-/**
- * A quarantined intent, or triage held on an account that is watched but not written to.
- */
-#define SiftCondition_ATTENTION 6
-/**
- * Draws nothing.
- */
-#define SiftCondition_HEALTHY 7
 
 /**
  * What the badge draws.
@@ -990,6 +1047,17 @@ SiftStatus sift_undoable(SiftApp *app, SiftUndoable *out);
  * `app` must be valid.
  */
 uint32_t sift_account_count(SiftApp *app);
+
+/**
+ * Every account the container holds.
+ *
+ * The rows are borrowed for the duration of the call, like every other row array here, and
+ * the text behind them lives in the layer until the next call replaces it.
+ *
+ * # Safety
+ * `app` and `out` must be valid.
+ */
+SiftStatus sift_accounts(SiftApp *app, SiftRows_SiftAccount *out);
 
 /**
  * The URI scheme this client's authorization callback comes back on — D-36 and D-109.

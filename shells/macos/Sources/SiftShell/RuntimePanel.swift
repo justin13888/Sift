@@ -14,7 +14,11 @@ import CSift
 /// to draw a panel nobody is looking at is exactly the idle wakeup NFR-11 counts.
 final class RuntimePanel: NSWindowController {
     private let app: OpaquePointer
-    private let accountField = NSTextField(string: "")
+    /// **Chosen, not typed.** This was a free-text field, because nothing across the boundary
+    /// said what the accounts were called — so the one surface that exists to show a person
+    /// their queue asked them to guess its name first.
+    private let accountPicker = NSPopUpButton(frame: .zero, pullsDown: false)
+    private var accounts: [Account] = []
     private let queueTable = NSTextView()
     private let memoryTable = NSTextView()
     private let summary = NSTextField(labelWithString: "")
@@ -36,9 +40,8 @@ final class RuntimePanel: NSWindowController {
     required init?(coder: NSCoder) { nil }
 
     private func build() -> NSView {
-        accountField.placeholderString = "account"
-        accountField.target = self
-        accountField.action = #selector(refresh)
+        accountPicker.target = self
+        accountPicker.action = #selector(refresh)
 
         let refreshButton = NSButton(title: "Refresh", target: self, action: #selector(refresh))
         refreshButton.bezelStyle = .rounded
@@ -47,10 +50,10 @@ final class RuntimePanel: NSWindowController {
         summary.lineBreakMode = .byWordWrapping
         summary.preferredMaxLayoutWidth = 660
 
-        let controls = NSStackView(views: [accountField, refreshButton])
+        let controls = NSStackView(views: [accountPicker, refreshButton])
         controls.orientation = .horizontal
         controls.spacing = 10
-        accountField.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        accountPicker.widthAnchor.constraint(equalToConstant: 220).isActive = true
 
         let stack = NSStackView(views: [
             controls,
@@ -102,14 +105,32 @@ final class RuntimePanel: NSWindowController {
         window?.makeKeyAndOrderFront(nil)
     }
 
+    /// Refill the picker from the layer, holding whatever was chosen.
+    private func reloadAccounts() {
+        let chosen = selected()?.name
+        accounts = Account.all(app: app)
+        accountPicker.removeAllItems()
+        accountPicker.addItems(withTitles: accounts.map(\.name))
+        if let chosen, let index = accounts.firstIndex(where: { $0.name == chosen }) {
+            accountPicker.selectItem(at: index)
+        }
+    }
+
+    private func selected() -> Account? {
+        let index = accountPicker.indexOfSelectedItem
+        guard index >= 0, index < accounts.count else { return nil }
+        return accounts[index]
+    }
+
     @objc private func refresh() {
         memoryTable.string = memory()
-        let account = accountField.stringValue.trimmingCharacters(in: .whitespaces)
-        guard !account.isEmpty else {
-            queueTable.string = "Type an account name above to see what it holds."
+        reloadAccounts()
+        guard let chosen = selected() else {
+            queueTable.string = "There are no accounts yet."
             summary.stringValue = ""
             return
         }
+        let account = chosen.name
         var rows = SiftRows_SiftQueued()
         let ok = SiftText.withBytes(account) { ptr, len in
             sift_queue(UnsafeMutablePointer(app), ptr, len, &rows) == Ok

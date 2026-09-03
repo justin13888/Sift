@@ -121,6 +121,14 @@ pub(crate) struct Layer {
     pub(crate) memory_rows: Mutex<Vec<crate::entry::SiftSubsystemBytes<'static>>>,
     pub(crate) stage_rows: Mutex<Vec<crate::repr::SiftStr<'static>>>,
     pub(crate) setting_rows: Mutex<Vec<crate::entry::SiftSetting<'static>>>,
+    /// The account list, and the text it borrows.
+    ///
+    /// **A shell cannot name an account without this.** Every other account-taking entry point
+    /// takes a label, and until now nothing across the boundary said what the labels were —
+    /// so a shell could add an account and then never sync, pause, authorize or flush it
+    /// again, and the runtime panel asked the user to type one in.
+    pub(crate) account_rows: Mutex<Vec<crate::entry::SiftAccount<'static>>>,
+    pub(crate) account_names: Mutex<Vec<String>>,
     /// The text the setting rows borrow. Held separately because the rows are `repr(C)` and
     /// cannot own a `String`.
     pub(crate) setting_values: Mutex<Vec<String>>,

@@ -34,6 +34,13 @@ final class AddAccountWindow: NSWindowController {
     private let dismissButton = NSButton(title: "Not Now", target: nil, action: nil)
     /// Ends the flow exactly once. `close()` re-enters through the window delegate.
     private var finished = false
+    /// What to call this mailbox.
+    ///
+    /// **A name the user chooses, because it is the handle.** Every account-taking call across
+    /// the boundary names an account by this label, so a hardcoded one — this was `"Mail"` —
+    /// makes a second account collide with the first and gives a person no way to tell two
+    /// mailboxes apart in the sidebar they both appear in.
+    private let nameField = NSTextField(string: "")
 
     /// The OAuth client this build was configured with, from the bundle.
     ///
@@ -151,6 +158,14 @@ final class AddAccountWindow: NSWindowController {
         disclosure.font = .preferredFont(forTextStyle: .callout)
         disclosure.preferredMaxLayoutWidth = 560
 
+        nameField.placeholderString = "Work, Personal, …"
+        nameField.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        let nameLabel = NSTextField(labelWithString: "Call this account")
+        nameLabel.font = .preferredFont(forTextStyle: .body)
+        let naming = NSStackView(views: [nameLabel, nameField])
+        naming.orientation = .horizontal
+        naming.spacing = 10
+
         status.font = .preferredFont(forTextStyle: .callout)
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byWordWrapping
@@ -186,7 +201,7 @@ final class AddAccountWindow: NSWindowController {
         buttons.orientation = .horizontal
         buttons.spacing = 12
 
-        let stack = NSStackView(views: [heading, body, disclosure, status, buttons])
+        let stack = NSStackView(views: [heading, body, disclosure, naming, status, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 18
@@ -300,7 +315,7 @@ final class AddAccountWindow: NSWindowController {
     /// answered rather than dropped.
     func callbackArrived(_ url: String) {
         var id = SiftId.zero
-        let name = "Mail"
+        let name = chosenName()
         let ok = SiftText.withBytes(url) { urlPtr, urlLen in
             SiftText.withBytes(name) { namePtr, nameLen in
                 sift_complete_authorization(
@@ -314,12 +329,35 @@ final class AddAccountWindow: NSWindowController {
             status.stringValue = "That sign-in did not complete. You can try again."
             return
         }
+        // **The first sync happens here, or the account a person just signed in to shows them
+        // an empty list.** Nothing else asks: there is no periodic scheduler across this
+        // boundary yet, so an account that is never synced from a gesture is never synced.
+        //
+        // It blocks this thread, which is stated rather than hidden. The walk belongs on a
+        // worker under D-19 and moving it there changes nothing a shell can see, because every
+        // delivery already arrives through D-48's hop rather than out of this call.
+        status.stringValue = "Signed in. Fetching your mail…"
+        status.displayIfNeeded()
+        _ = SiftText.withBytes(name) { ptr, len in
+            sift_sync_account(UnsafeMutablePointer(app), ptr, len)
+        }
         finish(added: true)
+    }
+
+    /// The label to add the account under.
+    ///
+    /// Empty is a name too, and it is the one that would make the account unnameable — so it
+    /// is defaulted rather than refused. A person who typed nothing gets something they can
+    /// rename later, not a dialog telling them what they did wrong.
+    private func chosenName() -> String {
+        let typed = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return typed.isEmpty ? "Mail" : typed
     }
 
     @objc private func useFixtures() {
         var id = SiftId.zero
-        let label = "fixtures"
+        let label = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty ? "fixtures" : chosenName()
         let added = SiftText.withBytes(label) { ptr, len in
             sift_add_replayed_account(UnsafeMutablePointer(app), ptr, len, &id) == Ok
         }

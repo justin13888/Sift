@@ -11,9 +11,17 @@ final class SidebarViewController: NSViewController {
     private let scroll = NSScrollView()
     private var entries: [Entry] = []
 
+    /// Told which account to show — D-4's zero identity is every account merged.
+    var onSelect: ((SiftId) -> Void)?
+
     private struct Entry {
         let title: String
         let symbol: String
+        /// The observation anchor. Zero is the unified inbox.
+        let account: SiftId
+        /// D-49's condition for this account, drawn beside it. `nil` for the unified row,
+        /// which is not an account and has no condition of its own.
+        let condition: SiftCondition?
     }
 
     override func loadView() {
@@ -47,13 +55,38 @@ final class SidebarViewController: NSViewController {
 
     /// Fill from what the layer holds.
     ///
+    /// **The accounts are asked for rather than assumed.** This used to be one hardcoded row
+    /// that ignored the argument it was handed, so an account a person had signed in to was
+    /// invisible in the one surface whose job is to show it, and there was no way to look at
+    /// one mailbox rather than all of them.
+    ///
     /// Folders arrive through their own observation once the boundary carries one; until then
-    /// the unified inbox is what the sidebar can honestly offer, and offering a folder tree
-    /// that is not wired would be worse than offering none.
+    /// an account is a leaf, and offering a folder tree that is not wired would be worse than
+    /// offering none.
     func reload(app: OpaquePointer?) {
-        entries = [Entry(title: "All Inboxes", symbol: "tray.2")]
+        let previous = selectedAccount()
+        // D-4's unified inbox is above the accounts rather than inside one: putting it under
+        // an account would be filing it under one of the things it exists to combine.
+        entries = [Entry(title: "All Inboxes", symbol: "tray.2", account: .zero, condition: nil)]
+        for account in Account.all(app: app) {
+            entries.append(
+                Entry(
+                    title: account.name,
+                    symbol: "tray",
+                    account: account.id,
+                    condition: account.condition))
+        }
         outline.reloadData()
-        outline.selectRowIndexes([0], byExtendingSelection: false)
+        // Hold the selection across a reload. An account added while the unified inbox was
+        // showing must not silently retarget the list to something else.
+        let row = entries.firstIndex { $0.account.same(as: previous) } ?? 0
+        outline.selectRowIndexes([row], byExtendingSelection: false)
+    }
+
+    private func selectedAccount() -> SiftId {
+        let row = outline.selectedRow
+        guard row >= 0, row < entries.count else { return .zero }
+        return entries[row].account
     }
 }
 
@@ -67,6 +100,10 @@ extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate 
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool { false }
+
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        onSelect?(selectedAccount())
+    }
 
     func outlineView(
         _ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any
@@ -98,6 +135,12 @@ extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate 
                 return c
             }()
         cell.textField?.stringValue = entry.title
+        // D-49 draws the worst condition once, in the annunciator. Here it is only a tint on
+        // the row, so an account that needs something is findable in a list of five without
+        // the sidebar growing a second badge that says the same thing in a different place.
+        cell.textField?.textColor =
+            (entry.condition.map { $0 != Annunciator.healthy } ?? false)
+            ? .systemOrange : .labelColor
         cell.imageView?.image = NSImage(
             systemSymbolName: entry.symbol, accessibilityDescription: entry.title)
         return cell
