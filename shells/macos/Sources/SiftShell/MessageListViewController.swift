@@ -152,16 +152,19 @@ final class MessageListViewController: NSViewController {
 
     /// A delivery arrived.
     ///
-    /// The layer sends only the rows entering the window, and today it sends them whole on
-    /// first fill. Applying the change vocabulary row by row — so a move animates as a move
-    /// and a cell keeps its identity — is what the batch is for and is wired next; until
-    /// then this keeps the array and the layer's window equal, which is the invariant that
-    /// matters most.
+    /// **The window, replaced.** This used to append what arrived, which is only correct while
+    /// nothing ever leaves: a sync that removes a message left its row on screen, and opening
+    /// it failed with the store saying no account holds that message — because none did any
+    /// more. The layer now sends the whole window, and this array and that window are the same
+    /// list, which is the invariant that matters most.
+    ///
+    /// D-18's change vocabulary is still the right answer and is still unwired: a move drawn
+    /// as a move keeps a row's identity and a cell's state, and `reloadData` keeps neither.
+    /// What it costs today is animation. What appending cost was correctness.
     private func received(_ incoming: [MessageRow]) {
-        guard !incoming.isEmpty else { return }
         let previous = selectedRow()
         let wasEmpty = rows.isEmpty
-        rows.append(contentsOf: incoming)
+        rows = incoming
         table.reloadData()
         restore(previous)
 

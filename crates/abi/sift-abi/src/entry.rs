@@ -1625,7 +1625,13 @@ fn deliver(layer: &Layer) {
         let Some(sink) = sinks.get(&d.observation.0) else {
             continue;
         };
-        let rows: Vec<SiftMessageRow<'_>> = d.batch.incoming.iter().map(row_of).collect();
+        // **The window, not the rows entering it.** A shell given only the arrivals has no way
+        // to express a removal, so it appends — and a sync that drops a message leaves the row
+        // on screen pointing at something the store no longer holds. D-18's change vocabulary
+        // is the specified answer and `SiftChange` is written and tested; nothing carries it
+        // across this boundary yet, and until something does, the whole window is the honest
+        // delivery.
+        let rows: Vec<SiftMessageRow<'_>> = d.window.iter().map(row_of).collect();
         (sink.callback)(
             sink.context as *mut c_void,
             SiftObservation(d.observation.0),
