@@ -953,6 +953,50 @@ impl App {
         container.set_setting(key, value)
     }
 
+    /// What an account setting currently holds — the recorded value, or D-101's default.
+    ///
+    /// # Errors
+    /// There is no such account, or the key is not one this build has.
+    pub fn account_setting(&self, name: &str, key: &str) -> Result<settings::Value, String> {
+        let setting = settings::by_key(key)
+            .ok_or_else(|| format!("`{key}` is not a setting this build has"))?;
+        let id = self
+            .accounts
+            .get(name)
+            .ok_or_else(|| format!("no account named `{name}`"))?
+            .id;
+        let recorded = self
+            .container
+            .as_ref()
+            .and_then(|c| c.account_setting(id, key).ok().flatten());
+        Ok(recorded
+            .and_then(|text| setting.default.parse_like(&text))
+            .unwrap_or_else(|| setting.default.clone()))
+    }
+
+    /// Record an account setting.
+    ///
+    /// # Errors
+    /// There is no such account, the key is unknown or is not account-scoped, the value is not
+    /// one it can hold, it is security state, or there is no container to record it in.
+    pub fn set_account_setting(
+        &mut self,
+        name: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        let id = self
+            .accounts
+            .get(name)
+            .ok_or_else(|| format!("no account named `{name}`"))?
+            .id;
+        let container = self
+            .container
+            .as_mut()
+            .ok_or("this session has no container, so a setting would not survive it")?;
+        container.set_account_setting(id, key, value)
+    }
+
     /// FR-4 — erase an account: its files, its registry row, and every credential item.
     ///
     /// Provable by enumeration, which is what the registry is for: what it does not list does
@@ -1120,6 +1164,18 @@ impl App {
                 .is_err()
         {
             applicable.push(AccountCondition::StorageUnavailable);
+        }
+
+        // D-95 puts the pause on the account rather than on the installation, and D-49 makes
+        // it a condition of its own rather than a flag — the three pauses are three
+        // conditions, because "you stopped this" and "the data cap stopped this" are answered
+        // by the user differently.
+        let paused = self
+            .account_setting(name, "sync.paused")
+            .is_ok_and(|v| v == settings::Value::Flag(true));
+        let account = self.account(name)?;
+        if paused {
+            applicable.push(AccountCondition::PausedByUser);
         }
 
         let quarantined = account

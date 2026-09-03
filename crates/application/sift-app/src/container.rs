@@ -141,6 +141,20 @@ impl Container {
                  -- who had ever opened the settings screen.
                  key            TEXT PRIMARY KEY NOT NULL,
                  value          TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE IF NOT EXISTS account_setting (
+                 -- D-101's other table. **The scope split is the storage split**, and until
+                 -- this existed the account half had nowhere to live: every account setting
+                 -- was refused on the way in, so the shells drew controls that were disabled
+                 -- with a comment explaining that a value accepted here would be dropped.
+                 --
+                 -- Here rather than in the account's own store, for the reason `writes_enabled`
+                 -- is: this is the table FR-4 erases by removing the account's row, and one
+                 -- transaction removing both is one thing that can fail rather than two.
+                 account        BLOB NOT NULL REFERENCES account(id),
+                 key            TEXT NOT NULL,
+                 value          TEXT NOT NULL,
+                 PRIMARY KEY (account, key)
              ) STRICT;",
         )
         .map_err(|e| format!("the registry schema: {e}"))?;
@@ -312,6 +326,64 @@ impl Container {
         Ok(())
     }
 
+    /// One account setting, or `None` where the user has not changed it.
+    ///
+    /// # Errors
+    /// The registry could not be read.
+    pub fn account_setting(&self, id: AccountId, key: &str) -> Result<Option<String>, String> {
+        match self.registry.query_row(
+            "SELECT value FROM account_setting WHERE account = ?1 AND key = ?2",
+            rusqlite::params![id.as_u128().to_be_bytes().to_vec(), key],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Record an account setting.
+    ///
+    /// # Errors
+    /// The registry refused, the key is not one D-101 enumerates, it is an installation
+    /// setting rather than an account one, it is security state, or the value is not one that
+    /// setting can hold.
+    pub fn set_account_setting(
+        &mut self,
+        id: AccountId,
+        key: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        let setting = crate::settings::by_key(key)
+            .ok_or_else(|| format!("`{key}` is not a setting this build has"))?;
+        if setting.scope != crate::settings::Scope::Account {
+            return Err(format!(
+                "`{key}` is an installation setting, not an account one"
+            ));
+        }
+        if setting.is_security_state {
+            // The per-sender lists are records of decisions made in context. They are shown
+            // and revoked from the surface where the decision was made, not bulk-edited here.
+            // **This refusal is the one that does not move**: giving the account half of the
+            // table somewhere to live must not give these two a bulk editor by accident.
+            return Err(format!(
+                "`{key}` is security state and is not set through settings"
+            ));
+        }
+        setting
+            .default
+            .parse_like(value)
+            .ok_or_else(|| format!("`{value}` is not a value `{key}` can hold"))?;
+        self.registry
+            .execute(
+                "INSERT INTO account_setting (account, key, value) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(account, key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![id.as_u128().to_be_bytes().to_vec(), key, value],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// FR-4 — erase an account, by enumeration.
     ///
     /// The registry row, both files, and every credential item. The ordinal is **not** freed:
@@ -344,6 +416,14 @@ impl Container {
                 let _ = std::fs::remove_file(PathBuf::from(p));
             }
         }
+        // The account's own settings, which are its and not the installation's. Before the
+        // row, because the row is what they reference.
+        self.registry
+            .execute(
+                "DELETE FROM account_setting WHERE account = ?1",
+                [id.as_u128().to_be_bytes().to_vec()],
+            )
+            .map_err(|e| e.to_string())?;
         self.registry
             .execute(
                 "DELETE FROM account WHERE id = ?1",

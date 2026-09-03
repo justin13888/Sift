@@ -22,6 +22,10 @@ import CSift
 final class SettingsWindow: NSWindowController {
     private let app: OpaquePointer
     private let stack = NSStackView()
+    /// What each control edits. An account row needs two facts to write — which account and
+    /// which key — and an identifier is one string; encoding both into it would make the
+    /// separator part of the format.
+    private var edits: [ObjectIdentifier: (account: String?, key: String)] = [:]
 
     init(app: OpaquePointer) {
         self.app = app
@@ -93,24 +97,28 @@ final class SettingsWindow: NSWindowController {
             return
         }
 
-        var wroteInstallationHeading = false
-        var wroteAccountHeading = false
-        for index in 0..<rows.len {
-            let row = ptr[index]
-            let accountScoped = row.account_scoped != 0
-            if !accountScoped && !wroteInstallationHeading {
-                stack.addArrangedSubview(heading("This installation"))
-                stack.addArrangedSubview(
-                    note("These stay when you remove an account."))
-                wroteInstallationHeading = true
+        edits.removeAll()
+        let all = (0..<rows.len).map { ptr[$0] }
+
+        stack.addArrangedSubview(heading("This installation"))
+        stack.addArrangedSubview(note("These stay when you remove an account."))
+        for row in all where row.account_scoped == 0 {
+            add(view(for: row, account: nil))
+        }
+
+        // **One group per account, rather than one group for the idea of an account.** These
+        // go with the account when it is removed, so a single "Each account" list would be
+        // showing one account's values under a heading that claims to speak for all of them —
+        // and there is nothing it could write them to.
+        let accountRows = all.filter { $0.account_scoped != 0 }
+        guard !accountRows.isEmpty else { return }
+        for account in Account.all(app: app) {
+            stack.addArrangedSubview(heading(account.name))
+            stack.addArrangedSubview(
+                note("These go with this account when you remove it."))
+            for row in accountRows {
+                add(view(for: row, account: account.name))
             }
-            if accountScoped && !wroteAccountHeading {
-                stack.addArrangedSubview(heading("Each account"))
-                stack.addArrangedSubview(
-                    note("These go with the account when you remove it."))
-                wroteAccountHeading = true
-            }
-            add(view(for: row))
         }
     }
 
@@ -142,10 +150,12 @@ final class SettingsWindow: NSWindowController {
         return label
     }
 
-    private func view(for row: SiftSetting) -> NSView {
+    private func view(for row: SiftSetting, account: String?) -> NSView {
         let key = SiftText.string(row.key)
         let owner = SiftText.string(row.owner)
-        let value = SiftText.string(row.value)
+        // `sift_settings` reports the installation table. An account row's value is that
+        // account's, so it is read per account rather than repeated from one of them.
+        let value = account.map { held(key, of: $0) } ?? SiftText.string(row.value)
 
         let title = NSTextField(labelWithString: SettingsWindow.words(key))
         title.font = .preferredFont(forTextStyle: .body)
@@ -166,17 +176,14 @@ final class SettingsWindow: NSWindowController {
             let toggle = NSButton(
                 checkboxWithTitle: "", target: self, action: #selector(toggled(_:)))
             toggle.state = (value == "true") ? .on : .off
-            toggle.identifier = NSUserInterfaceItemIdentifier(key)
+            edits[ObjectIdentifier(toggle)] = (account, key)
             control = toggle
         } else {
             let field = NSTextField(string: value)
             field.target = self
             field.action = #selector(edited(_:))
-            field.identifier = NSUserInterfaceItemIdentifier(key)
             field.widthAnchor.constraint(equalToConstant: 180).isActive = true
-            // An account setting has no store yet, and a control that accepted a value it
-            // then dropped would be worse than one that says so.
-            field.isEnabled = row.account_scoped == 0
+            edits[ObjectIdentifier(field)] = (account, key)
             control = field
         }
 
@@ -219,20 +226,42 @@ final class SettingsWindow: NSWindowController {
     }
 
     @objc private func toggled(_ sender: NSButton) {
-        guard let key = sender.identifier?.rawValue else { return }
-        write(key, sender.state == .on ? "true" : "false")
+        guard let edit = edits[ObjectIdentifier(sender)] else { return }
+        write(edit, sender.state == .on ? "true" : "false")
     }
 
     @objc private func edited(_ sender: NSTextField) {
-        guard let key = sender.identifier?.rawValue else { return }
-        write(key, sender.stringValue)
+        guard let edit = edits[ObjectIdentifier(sender)] else { return }
+        write(edit, sender.stringValue)
     }
 
-    private func write(_ key: String, _ value: String) {
-        let ok = SiftText.withBytes(key) { keyPtr, keyLen in
+    /// What one account holds for a key, or the shipped default.
+    private func held(_ key: String, of account: String) -> String {
+        var out = SiftStr()
+        let ok = SiftText.withBytes(account) { namePtr, nameLen in
+            SiftText.withBytes(key) { keyPtr, keyLen in
+                sift_account_setting(
+                    UnsafeMutablePointer(app), namePtr, nameLen, keyPtr, keyLen, &out) == Ok
+            }
+        }
+        return ok ? SiftText.string(out) : ""
+    }
+
+    /// **Two entry points, because the scope split is the storage split.** An account setting
+    /// goes with the account when it is removed and an installation setting does not, so which
+    /// one a key belongs to is a fact the row carries rather than one the layer infers.
+    private func write(_ edit: (account: String?, key: String), _ value: String) {
+        let ok = SiftText.withBytes(edit.key) { keyPtr, keyLen in
             SiftText.withBytes(value) { valuePtr, valueLen in
-                sift_set_setting(UnsafeMutablePointer(app), keyPtr, keyLen, valuePtr, valueLen)
-                    == Ok
+                guard let account = edit.account else {
+                    return sift_set_setting(
+                        UnsafeMutablePointer(app), keyPtr, keyLen, valuePtr, valueLen) == Ok
+                }
+                return SiftText.withBytes(account) { namePtr, nameLen in
+                    sift_set_account_setting(
+                        UnsafeMutablePointer(app), namePtr, nameLen, keyPtr, keyLen,
+                        valuePtr, valueLen) == Ok
+                }
             }
         }
         // A refusal is redrawn rather than reported: the layer refuses a value the setting

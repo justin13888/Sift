@@ -1260,6 +1260,45 @@ SiftStatus sift_set_setting(SiftApp *app,
                             size_t value_len);
 
 /**
+ * Record an account setting — D-101's other table.
+ *
+ * **Separate from [`sift_set_setting`] because the scope split is the storage split.** An
+ * account setting goes with the account when it is removed and an installation setting does
+ * not, and a single entry point taking a key would have to guess which table a key belongs to
+ * from the key itself — which is exactly the ambiguity the two tables exist to remove.
+ *
+ * The two security-state rows are refused here as they are there: the per-sender lists are
+ * records of decisions the user made in context, shown and revoked where the decision was
+ * made rather than bulk-edited in a screen away from any message.
+ *
+ * # Safety
+ * `app` must be valid; every string must point to its length in UTF-8.
+ */
+SiftStatus sift_set_account_setting(SiftApp *app,
+                                    const uint8_t *label,
+                                    size_t label_len,
+                                    const uint8_t *key,
+                                    size_t key_len,
+                                    const uint8_t *value,
+                                    size_t value_len);
+
+/**
+ * What an account setting currently holds.
+ *
+ * The text lives in the layer until the next call replaces it, like every other borrowed
+ * string here.
+ *
+ * # Safety
+ * `app` and `out` must be valid; both strings must point to their lengths in UTF-8.
+ */
+SiftStatus sift_account_setting(SiftApp *app,
+                                const uint8_t *label,
+                                size_t label_len,
+                                const uint8_t *key,
+                                size_t key_len,
+                                SiftStr *out);
+
+/**
  * FR-34's queue: what is durably enqueued, per account, by state.
  *
  * **This is the surface a person uses to check that nothing was sent.** An account that is

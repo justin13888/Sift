@@ -201,6 +201,7 @@ pub unsafe extern "C" fn sift_initialize(
                 setting_values: std::sync::Mutex::new(Vec::new()),
                 account_rows: std::sync::Mutex::new(Vec::new()),
                 account_names: std::sync::Mutex::new(Vec::new()),
+                account_setting_value: std::sync::Mutex::new(String::new()),
                 search: std::sync::Mutex::new(crate::layer::SearchResult::default()),
             });
             Ok(Box::into_raw(layer).cast::<SiftApp>())
@@ -948,6 +949,79 @@ pub unsafe extern "C" fn sift_set_setting(
         let mut session = layer.session.lock().map_err(|_| ())?;
         session.app_mut().set_setting(key, value).map_err(|_| ())
     })
+}
+
+/// Record an account setting — D-101's other table.
+///
+/// **Separate from [`sift_set_setting`] because the scope split is the storage split.** An
+/// account setting goes with the account when it is removed and an installation setting does
+/// not, and a single entry point taking a key would have to guess which table a key belongs to
+/// from the key itself — which is exactly the ambiguity the two tables exist to remove.
+///
+/// The two security-state rows are refused here as they are there: the per-sender lists are
+/// records of decisions the user made in context, shown and revoked where the decision was
+/// made rather than bulk-edited in a screen away from any message.
+///
+/// # Safety
+/// `app` must be valid; every string must point to its length in UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_set_account_setting(
+    app: *mut SiftApp,
+    label: *const u8,
+    label_len: usize,
+    key: *const u8,
+    key_len: usize,
+    value: *const u8,
+    value_len: usize,
+) -> SiftStatus {
+    guard(|| {
+        // SAFETY: the caller's obligation.
+        let (name, key, value) = unsafe {
+            (
+                borrowed(label, label_len)?,
+                borrowed(key, key_len)?,
+                borrowed(value, value_len)?,
+            )
+        };
+        // SAFETY: as above.
+        let layer = (unsafe { layer(app) }).ok_or(())?;
+        let mut session = layer.session.lock().map_err(|_| ())?;
+        session
+            .app_mut()
+            .set_account_setting(name, key, value)
+            .map_err(|_| ())
+    })
+}
+
+/// What an account setting currently holds.
+///
+/// The text lives in the layer until the next call replaces it, like every other borrowed
+/// string here.
+///
+/// # Safety
+/// `app` and `out` must be valid; both strings must point to their lengths in UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_account_setting(
+    app: *mut SiftApp,
+    label: *const u8,
+    label_len: usize,
+    key: *const u8,
+    key_len: usize,
+    out: *mut SiftStr<'static>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let (name, key) = (borrowed(label, label_len)?, borrowed(key, key_len)?);
+            let layer = layer(app).ok_or(())?;
+            let text = {
+                let session = layer.session.lock().map_err(|_| ())?;
+                session.app().account_setting(name, key).map_err(|_| ())?
+            };
+            let mut held = layer.account_setting_value.lock().map_err(|_| ())?;
+            *held = text.as_text();
+            Ok(SiftStr::new(extend(&held)))
+        })
+    }
 }
 
 /// A boolean.

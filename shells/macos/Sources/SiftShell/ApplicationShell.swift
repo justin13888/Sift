@@ -287,6 +287,13 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             debugWindow = window
             window.present(row)
             return
+        case "app.pause-sync", "app.resume-sync":
+            // **D-95 puts the pause on the account, and this menu item is over all of them.**
+            // The register has one application-scoped action rather than one per account, so
+            // the shell is what fans it out; the layer holds the flag, one per account, and
+            // D-49 turns it into a condition the annunciator draws.
+            setPaused(id == "app.pause-sync")
+            return
         case "undo.last-gesture":
             // **Its own entry point, not the register's.** `undo.last-gesture` is in D-98's
             // set and has no intent behind it, so invoking it across the boundary returned
@@ -425,7 +432,55 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(windows.isEmpty ? .accessory : .regular)
     }
 
-    @objc private func pauseSync() { invoke("app.pause-sync") }
+    /// The tray's one pause control, which is a toggle rather than a second verb.
+    @objc private func pauseSync() {
+        invoke(everyAccountPaused() ? "app.resume-sync" : "app.pause-sync")
+    }
+
+    /// Whether every account is paused. **Vacuously false with no accounts**: there is nothing
+    /// paused, and offering to resume nothing is worse than offering to pause nothing.
+    private func everyAccountPaused() -> Bool {
+        guard let app else { return false }
+        let accounts = Account.all(app: app)
+        return !accounts.isEmpty && accounts.allSatisfy { $0.condition == Annunciator.pausedByUser }
+    }
+
+    /// Pause or resume every account.
+    ///
+    /// **It was invoked across the boundary and did nothing.** `app.pause-sync` is in D-98's
+    /// register with no intent behind it, so the tray item and the menu entry both reported
+    /// success and changed nothing — and there was no account-scoped storage for the flag to
+    /// live in either.
+    private func setPaused(_ paused: Bool) {
+        guard let app else { return }
+        let value = paused ? "true" : "false"
+        let key = "sync.paused"
+        for account in Account.all(app: app) {
+            _ = SiftText.withBytes(account.name) { namePtr, nameLen in
+                SiftText.withBytes(key) { keyPtr, keyLen in
+                    SiftText.withBytes(value) { valuePtr, valueLen in
+                        sift_set_account_setting(
+                            UnsafeMutablePointer(app), namePtr, nameLen, keyPtr, keyLen,
+                            valuePtr, valueLen)
+                    }
+                }
+            }
+        }
+        // The badge is what says it took. D-49 draws the worst condition across every account,
+        // and a pause the user asked for is one of the eight.
+        for window in windows { window.refreshAccounts() }
+        refreshTrayState()
+    }
+
+    /// The tray offers the verb that is not currently true.
+    ///
+    /// A menu that always says "Pause syncing" beside a paused account is a menu that lies
+    /// about the state it is offering to change.
+    private func refreshTrayState() {
+        let paused = everyAccountPaused()
+        let item = statusItem?.menu?.items.first { $0.action == #selector(pauseSync) }
+        item?.title = paused ? "Resume syncing" : "Pause syncing"
+    }
     @objc private func quit() { invoke("app.quit"); NSApp.terminate(nil) }
 
     private var addAccount: AddAccountWindow?

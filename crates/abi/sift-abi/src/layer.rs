@@ -129,6 +129,8 @@ pub(crate) struct Layer {
     /// again, and the runtime panel asked the user to type one in.
     pub(crate) account_rows: Mutex<Vec<crate::entry::SiftAccount<'static>>>,
     pub(crate) account_names: Mutex<Vec<String>>,
+    /// The last account setting read back, held for the string handed out.
+    pub(crate) account_setting_value: Mutex<String>,
     /// The text the setting rows borrow. Held separately because the rows are `repr(C)` and
     /// cannot own a `String`.
     pub(crate) setting_values: Mutex<Vec<String>>,
