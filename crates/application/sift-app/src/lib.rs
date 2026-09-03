@@ -174,6 +174,17 @@ pub struct OpenAccount {
     /// It is persisted in the container registry, because the alternative is a restored
     /// account that opens, shows the mail the last run left, and can never fetch another.
     pub kind: String,
+    /// FR-2's re-authentication, latched.
+    ///
+    /// **Set only on a well-formed provider denial** — D-88's rule, and the whole of NFR-34's
+    /// cascade defence: a captive portal answering a refresh with a login page produces an
+    /// unparseable response, and treating that as authoritative would put every account into
+    /// this state at once and tell a person Sift had lost their credentials when they were on
+    /// a hotel network.
+    ///
+    /// Latched rather than recomputed, because the failure happens inside a refresh nothing
+    /// else observes, and the condition has to outlive the call that discovered it.
+    pub needs_authentication: bool,
     pub capabilities: Capabilities,
     pub store: Account,
     pub queue: Queue,
@@ -349,6 +360,10 @@ impl App {
                     queue,
                     ids: LocalIdGenerator::new(row.ordinal),
                     adapter: None,
+                    // Not latched across a restart: the grant may have been repaired in the
+                    // provider's own console since, and a stale prompt asking a person to sign
+                    // in to an account that works is a prompt they learn to dismiss.
+                    needs_authentication: false,
                     writes_enabled: row.writes_enabled,
                     subjects: BTreeMap::new(),
                 },
@@ -532,6 +547,7 @@ impl App {
                 queue: Queue::new(),
                 ids: LocalIdGenerator::new(ordinal),
                 adapter: None,
+                needs_authentication: false,
                 // Read-only until somebody says otherwise. The safe state is the default,
                 // and it is the default at construction rather than at a call site that
                 // could be forgotten.
@@ -823,10 +839,24 @@ impl App {
                 authorize::registration(authorize::default_kind(), &self.oauth_client_id.clone())?;
             let mut transport = sift_http::Https::to(&registration.profile.token.host)
                 .map_err(|why| format!("the trust store could not be consulted: {why}"))?;
-            let pair = self
-                .broker
-                .refresh(&mut transport, &registration, id)
-                .map_err(|e| e.to_string())?;
+            let pair = match self.broker.refresh(&mut transport, &registration, id) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    // **Only a well-formed denial latches.** D-88 makes every other outcome
+                    // transient, and NFR-34's cascade is what that rule defends: a captive
+                    // portal answering with a login page is unparseable, not a denial, and
+                    // treating it as one would ask a person to sign in to every account at
+                    // once because they joined a hotel network.
+                    if matches!(&error, sift_credentials::oauth::AuthError::Failed(kind)
+                        if kind.is_non_transient())
+                    {
+                        self.account(name)?.needs_authentication = true;
+                    }
+                    return Err(error.to_string());
+                }
+            };
+            // It worked, so whatever it was is over.
+            self.account(name)?.needs_authentication = false;
             descriptor
                 .connect(&pair.access)
                 .map_err(|e| e.to_string())?
@@ -1176,6 +1206,12 @@ impl App {
         let account = self.account(name)?;
         if paused {
             applicable.push(AccountCondition::PausedByUser);
+        }
+        // FR-2's one condition that must reach the user with no window open, and the highest
+        // in D-49's precedence — an account Sift cannot reach is not usefully described by
+        // anything else that is also true of it.
+        if account.needs_authentication {
+            applicable.push(AccountCondition::NeedsAuthentication);
         }
 
         let quarantined = account

@@ -202,6 +202,7 @@ pub unsafe extern "C" fn sift_initialize(
                 account_rows: std::sync::Mutex::new(Vec::new()),
                 account_names: std::sync::Mutex::new(Vec::new()),
                 account_setting_value: std::sync::Mutex::new(String::new()),
+                conditions: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 search: std::sync::Mutex::new(crate::layer::SearchResult::default()),
             });
             Ok(Box::into_raw(layer).cast::<SiftApp>())
@@ -1546,8 +1547,64 @@ pub extern "C" fn sift_run_scheduled(ticket: u64) {
     });
 }
 
+/// Tell the shell about a condition that has changed since it was last told.
+///
+/// **D-67's callbacks, finally invoked.** The set was registered at initialization and stored
+/// whole, and nothing on this side ever called one — so FR-2's requirement that
+/// re-authentication reach the user *with no window open* could not be met by any shell,
+/// because the only thing that could have woken one never fired.
+///
+/// Called from the main-loop hop, which is where D-48 requires every callback to arrive. The
+/// session lock is released before any of them, because a shell is permitted to call back into
+/// the layer on the next turn of its loop and holding it here would make that a deadlock
+/// waiting for a schedule.
+fn announce_conditions(layer: &Layer) {
+    let Ok(mut session) = layer.session.lock() else {
+        return;
+    };
+    let names: Vec<String> = session
+        .app()
+        .accounts()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut now = Vec::with_capacity(names.len());
+    for name in &names {
+        let Ok(condition) = session.app_mut().condition_of(name) else {
+            continue;
+        };
+        let Some((_, account)) = session.app().accounts().find(|(n, _)| *n == name) else {
+            continue;
+        };
+        now.push((account.id.as_u128(), SiftCondition::of(condition).0));
+    }
+    drop(session);
+
+    let Ok(mut last) = layer.conditions.lock() else {
+        return;
+    };
+    let mut changed = Vec::new();
+    for (id, condition) in now {
+        if last.insert(id, condition) != Some(condition) {
+            changed.push((id, condition));
+        }
+    }
+    drop(last);
+
+    for (id, condition) in changed {
+        let account = SiftId::from_u128(id);
+        (layer.host.account_condition_changed)(layer.host.context, account, condition);
+        // FR-2 is the one that must arrive with nothing on screen, so it gets its own
+        // callback rather than being inferred from the condition by a shell that may have no
+        // window to infer it in.
+        if condition == SiftCondition::NEEDS_AUTHENTICATION.0 {
+            (layer.host.reauthentication_needed)(layer.host.context, account);
+        }
+    }
+}
+
 /// Compute what changed and hand each batch to the observation that asked for it.
 fn deliver(layer: &Layer) {
+    announce_conditions(layer);
     let Ok(mut session) = layer.session.lock() else {
         return;
     };
@@ -3631,6 +3688,81 @@ mod tests {
         assert_eq!(
             available, 0,
             "a reader that closed its message must not go on offering gestures over it"
+        );
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    /// D-67's callbacks were registered and never invoked.
+    ///
+    /// The set was stored whole at initialization behind an `allow(dead_code)`, and nothing on
+    /// the layer's side ever called one — so FR-2's requirement that re-authentication reach
+    /// the user *with no window open* could not be met by any shell, because the only thing
+    /// that could have woken one never fired.
+    #[test]
+    fn a_condition_that_changes_reaches_the_shell_once() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEEN: AtomicU32 = AtomicU32::new(0);
+        static CONDITION: AtomicU32 = AtomicU32::new(u32::MAX);
+
+        extern "C" fn note(_: *mut c_void, _: SiftId, condition: u32) {
+            SEEN.fetch_add(1, Ordering::Relaxed);
+            CONDITION.store(condition, Ordering::Relaxed);
+        }
+
+        ephemeral();
+        let mut app: *mut SiftApp = core::ptr::null_mut();
+        let mut callbacks = callbacks();
+        callbacks.account_condition_changed = note;
+        let init = SiftInit {
+            container_root: SiftStr::new(scratch_str()),
+            schedule: run_inline,
+            schedule_context: core::ptr::null_mut(),
+            oauth_client_id: SiftStr::new(""),
+            registered_schemes: SiftStr::new(""),
+        };
+        assert_eq!(
+            unsafe { sift_initialize(callbacks, init, &raw mut app) },
+            SiftStatus::Ok
+        );
+
+        let message = hostile_message(app);
+        assert!(
+            SEEN.load(Ordering::Relaxed) > 0,
+            "an account that appeared is a condition the shell has never been told"
+        );
+        assert_eq!(
+            CONDITION.load(Ordering::Relaxed),
+            SiftCondition::HEALTHY.0,
+            "a freshly synced account with nothing queued is healthy"
+        );
+
+        // Triage on an account that is only being watched is a change, and it is the one a
+        // person sees first: the queue grows, nothing leaves, and that is the state they
+        // chose — which they have to be able to see they chose.
+        assert_eq!(
+            unsafe { sift_select(app, &raw const message, 1) },
+            SiftStatus::Ok
+        );
+        assert_eq!(do_action(app, "message.archive"), SiftStatus::Ok);
+        assert_eq!(
+            CONDITION.load(Ordering::Relaxed),
+            SiftCondition::ATTENTION.0,
+            "the condition the shell was told is not the one that is now true"
+        );
+
+        // An unchanged condition is not re-announced. A callback that fires on every delivery
+        // with the same answer is a wakeup NFR-11 counts and a badge that redraws for nothing.
+        let before = SEEN.load(Ordering::Relaxed);
+        let name = "mail";
+        assert_eq!(
+            unsafe { sift_sync_account(app, name.as_ptr(), name.len()) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            SEEN.load(Ordering::Relaxed),
+            before,
+            "the same condition was announced twice"
         );
 
         assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);

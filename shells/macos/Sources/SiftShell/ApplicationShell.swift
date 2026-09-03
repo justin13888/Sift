@@ -109,6 +109,11 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         } else {
             beginAddAccount()
         }
+        // The badge says what is true of the accounts the container already held. Asked once,
+        // here, rather than waited for: the push exists for what changes afterwards, and a
+        // shell that only had the push would draw nothing until something did.
+        refreshAnnunciator()
+        refreshTrayState()
     }
 
     /// D-36's callback, arriving through the registered URI scheme.
@@ -636,6 +641,38 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         refreshTrayState()
     }
 
+    /// The menu-bar item, saying what is true of the accounts behind it.
+    ///
+    /// **The always-on surface has to be able to say something.** FR-22 makes this the surface
+    /// that is there when no window is, and D-49 requires the worst condition reach the user —
+    /// so an envelope that looks identical whether five accounts are healthy or one needs
+    /// signing in is a badge that has already failed.
+    fileprivate func refreshStatusItem() {
+        guard let app, let button = statusItem?.button else { return }
+        var out = SiftAnnunciator()
+        guard sift_annunciator(UnsafeMutablePointer(app), &out) == Ok else { return }
+        let state = Annunciator.State(
+            condition: out.condition,
+            accounts: out.accounts,
+            asksSomething: out.asks_something_of_the_user != 0,
+            reachesTheUserWithoutAWindow: out.reaches_the_user_without_a_window != 0)
+        // `healthy` has no appearance, because it draws nothing — which here means the
+        // envelope Sift has always had.
+        guard let look = Annunciator.appearance(state) else {
+            button.image = NSImage(systemSymbolName: "envelope", accessibilityDescription: "Sift")
+            button.contentTintColor = nil
+            button.toolTip = "Sift"
+            return
+        }
+        let words = Annunciator.words(state)
+        button.image = NSImage(
+            systemSymbolName: look.symbol, accessibilityDescription: words.title)
+        // Colour is the second signal rather than the only one: the symbol changes too, so
+        // the badge still says something to a person who cannot tell two tints apart.
+        button.contentTintColor = look.colour
+        button.toolTip = words.title
+    }
+
     /// The tray offers the verb that is not currently true.
     ///
     /// A menu that always says "Pause syncing" beside a paused account is a menu that lies
@@ -644,9 +681,13 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         let paused = everyAccountPaused()
         let item = statusItem?.menu?.items.first { $0.action == #selector(pauseSync) }
         item?.title = paused ? "Resume syncing" : "Pause syncing"
+        refreshStatusItem()
     }
     @objc private func quit() { invoke("app.quit"); NSApp.terminate(nil) }
 
+    /// Whether the re-authentication alert is on screen. Five accounts whose grants expired
+    /// together are five announcements and must not be five stacked alerts.
+    fileprivate var presentingReauthentication = false
     private var addAccount: AddAccountWindow?
     private var runtimePanel: RuntimePanel?
     private var settingsWindow: SettingsWindow?
@@ -844,8 +885,73 @@ private func hostCallbacks() -> SiftHostCallbacks {
 }
 
 extension ApplicationShell {
-    func raiseReauthenticationPrompt() {}
-    func raiseRestartPrompt() {}
-    func refreshAnnunciator() {}
+    /// FR-2 — **the one condition that must reach the user with no window open.**
+    ///
+    /// So it raises Sift to a regular application and activates before it says anything, the
+    /// same way a startup failure does: an accessory has no dock icon and no switcher entry,
+    /// and a modal it runs can sit behind whatever is frontmost with no ordinary way to reach
+    /// it. A prompt the user cannot find is the failure this is answering, not a smaller
+    /// version of it.
+    ///
+    /// One at a time. The layer announces a change per account, and five accounts whose grants
+    /// expired together would otherwise be five stacked alerts — which is NFR-34's cascade
+    /// wearing a different coat.
+    func raiseReauthenticationPrompt() {
+        guard !presentingReauthentication else { return }
+        presentingReauthentication = true
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        // D-56: the layer returns identified states and this shell supplies every word.
+        alert.messageText = "Sign in again"
+        alert.informativeText =
+            "Sift can no longer reach one of your accounts. It keeps everything it has already "
+            + "downloaded, and nothing has been changed or lost — signing in again is what lets "
+            + "it start syncing that account once more."
+        alert.addButton(withTitle: "Sign In…")
+        alert.addButton(withTitle: "Later")
+        let response = alert.runModal()
+        presentingReauthentication = false
+        // Adding the account again is the sign-in: D-89 makes re-adding a new account rather
+        // than a repair, and the alternative — a flow that re-attaches a grant to an existing
+        // identity — is a second authorization path with its own failure modes.
+        if response == .alertFirstButtonReturn { beginAddAccount() }
+        syncActivationPolicy()
+    }
+
+    /// FR-26 — the bundle was replaced underneath the running process.
+    ///
+    /// Sift implements no self-update; a platform channel replaced it, and continuing against
+    /// resources that no longer match the executable is what this prevents.
+    ///
+    /// **Nothing raises it yet**, and that is stated rather than implied: detecting the
+    /// replacement needs something watching the bundle path, the core is not given one, and a
+    /// handler with no trigger is a handler whose absence would otherwise look like a working
+    /// feature.
+    func raiseRestartPrompt() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Sift was updated and needs to restart"
+        alert.informativeText =
+            "The application was replaced while it was running. Quitting now loses nothing: "
+            + "every change you have made is recorded on disk and is applied when Sift starts "
+            + "again."
+        alert.addButton(withTitle: "Quit Sift")
+        alert.addButton(withTitle: "Later")
+        if alert.runModal() == .alertFirstButtonReturn { quit() }
+        syncActivationPolicy()
+    }
+
+    /// D-49's badge, redrawn where it is drawn.
+    ///
+    /// Every window has one, and the menu-bar item is the surface that is still there when
+    /// none of them is — which is the whole reason the condition arrives as a callback rather
+    /// than as something a window polls.
+    func refreshAnnunciator() {
+        for window in windows { window.refreshChrome() }
+        refreshStatusItem()
+    }
 }
 
