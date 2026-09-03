@@ -114,6 +114,12 @@ pub enum Unavailable {
     CapabilitiesDoNotPermitIt,
     /// The selection, the open message or the window is missing.
     ScopeNotSatisfied,
+    /// Nothing behind this boundary can carry it out yet, whatever the account declares.
+    ///
+    /// **Distinct from the capability answer, deliberately.** Telling a person their provider
+    /// cannot do something that no provider can do here sends them looking for a setting that
+    /// would not help.
+    NotReachableYet(&'static str),
 }
 
 impl Unavailable {
@@ -129,6 +135,7 @@ impl Unavailable {
             Self::ScopeNotSatisfied => {
                 "its scope is not satisfied — check the selection, the open message, or the window"
             }
+            Self::NotReachableYet(why) => why,
         }
     }
 }
@@ -159,6 +166,9 @@ impl Session {
         let action = action::by_id(id)?;
         if action.is_available(&self.action_context(&capabilities)) {
             return None;
+        }
+        if let sift_presentation::action::Reach::NotYet(why) = action.reach {
+            return Some(Unavailable::NotReachableYet(why));
         }
         Some(if action.mutates.is_some() && capabilities.is_none() {
             Unavailable::NoAccountBehindTheSelection

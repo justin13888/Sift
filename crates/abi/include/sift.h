@@ -1218,6 +1218,12 @@ SiftStatus sift_complete_authorization(SiftApp *app,
 /**
  * FR-19, FR-20 and FR-21 — search, with the interpretation the user is shown.
  *
+ * `account` narrows it to one account, and zero is every account — the same anchor
+ * [`sift_observe_messages`] takes, so a window that is looking at one mailbox can search the
+ * one it is looking at. FR-20's *narrow to this account* is a scope rather than a query term:
+ * spelling it as an operator would mean parsing, translating and explaining a word for
+ * something the shell already knows.
+ *
  * **The interpretation crosses the boundary as a result, not as a debug aid.** A query that
  * found nothing and one that was misread look identical from the results alone, and
  * `form:alice` is a plausible typo for `from:alice`. So is the caveat list: empty results and
@@ -1231,6 +1237,7 @@ SiftStatus sift_complete_authorization(SiftApp *app,
 SiftStatus sift_search(SiftApp *app,
                        const uint8_t *query,
                        size_t query_len,
+                       SiftId account,
                        uint32_t limit,
                        SiftSearch *out);
 

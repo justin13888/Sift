@@ -213,12 +213,15 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     /// it*, and `NSApp.keyWindow` is nil when the gesture came from the tray.
     var hostWindow: NSWindow? { window }
 
+    /// Whether the next search is scoped to this window's account — `search.narrow-to-account`.
+    private var narrowed = false
+
     @objc private func runSearch() {
         let query = searchField.stringValue
         if query.trimmingCharacters(in: .whitespaces).isEmpty {
             list.clearSearch()
         } else {
-            list.search(query, app: app)
+            list.search(query, app: app, account: narrowed ? account : .zero)
         }
     }
 
@@ -229,7 +232,60 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 
     /// `search.clear`: back to the list the observation maintains.
     func clearSearch() {
+        narrowed = false
         list.clearSearch()
+    }
+
+    // MARK: - The gestures this window owns
+    //
+    // Every one of these is in D-98's register with no intent behind it, so invoking them
+    // across the boundary returned success and did nothing. Where the caret is, which pane has
+    // the keyboard, and which account a window is looking at are facts about this window; the
+    // layer cannot answer them and should not be asked to.
+
+    /// `read.next-message`, `read.previous-message`, and the two that skip to unread.
+    func moveSelection(by step: Int, unreadOnly: Bool) {
+        list.move(by: step, unreadOnly: unreadOnly)
+    }
+
+    /// `navigate.focus-sidebar`, `navigate.focus-list`, `navigate.focus-reader`.
+    func focus(_ pane: Pane) {
+        switch pane {
+        case .sidebar: window?.makeFirstResponder(sidebar.focusTarget)
+        case .list: window?.makeFirstResponder(list.focusTarget)
+        case .reader: window?.makeFirstResponder(reader.view)
+        }
+    }
+
+    enum Pane { case sidebar, list, reader }
+
+    /// `navigate.next-account` and `navigate.previous-account`.
+    func stepAccount(by delta: Int) {
+        sidebar.step(by: delta)
+    }
+
+    /// `navigate.unified-inbox` — D-4's merged stream, which is the zero anchor.
+    func showUnifiedInbox() {
+        sidebar.selectUnified()
+    }
+
+    /// `read.toggle-dark-transform` — FR-31, per message.
+    func toggleDarkTransform() {
+        reader.toggleDarkTransform(app: app)
+    }
+
+    /// `search.narrow-to-account`: search the account this window is looking at.
+    ///
+    /// **A scope, not a query term.** The boundary takes the same anchor the list observation
+    /// does, so narrowing is a fact the window already holds rather than a word to spell,
+    /// parse, translate and explain in FR-21's interpretation.
+    func narrowSearchToAccount() {
+        narrowed = true
+        if searchField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty {
+            window?.makeFirstResponder(searchField)
+            return
+        }
+        runSearch()
     }
 
     /// Redraw what a gesture may have changed.

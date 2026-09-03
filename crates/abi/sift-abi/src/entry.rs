@@ -792,6 +792,12 @@ pub unsafe extern "C" fn sift_complete_authorization(
 
 /// FR-19, FR-20 and FR-21 — search, with the interpretation the user is shown.
 ///
+/// `account` narrows it to one account, and zero is every account — the same anchor
+/// [`sift_observe_messages`] takes, so a window that is looking at one mailbox can search the
+/// one it is looking at. FR-20's *narrow to this account* is a scope rather than a query term:
+/// spelling it as an operator would mean parsing, translating and explaining a word for
+/// something the shell already knows.
+///
 /// **The interpretation crosses the boundary as a result, not as a debug aid.** A query that
 /// found nothing and one that was misread look identical from the results alone, and
 /// `form:alice` is a plausible typo for `from:alice`. So is the caveat list: empty results and
@@ -806,6 +812,7 @@ pub unsafe extern "C" fn sift_search(
     app: *mut SiftApp,
     query: *const u8,
     query_len: usize,
+    account: SiftId,
     limit: u32,
     out: *mut SiftSearch<'static>,
 ) -> SiftStatus {
@@ -815,9 +822,23 @@ pub unsafe extern "C" fn sift_search(
             let layer = layer(app).ok_or(())?;
             let report = {
                 let mut session = layer.session.lock().map_err(|_| ())?;
+                // The same anchor a message-list observation takes, and zero means the same
+                // thing: D-4's unified stream rather than an account nobody has. FR-20's
+                // narrowing is a scope rather than a query term — an operator would have to be
+                // parsed, spelled and translated, and the account is a fact the shell already
+                // holds.
+                let named = if account == SiftId::from_u128(0) {
+                    None
+                } else {
+                    session
+                        .app()
+                        .accounts()
+                        .find(|(_, a)| a.id.as_u128() == account.to_u128())
+                        .map(|(name, _)| name.clone())
+                };
                 session
                     .app_mut()
-                    .search(query, None, limit)
+                    .search(query, named.as_deref(), limit)
                     .map_err(|_| ())?
             };
 
@@ -1843,15 +1864,21 @@ pub unsafe extern "C" fn sift_open_document(
             let Some(layer) = layer(app) else {
                 return Err(());
             };
+            let id = sift_foundation::identity::LocalId::from_u128(message.to_u128());
             let document = {
                 let mut session = layer.session.lock().map_err(|_| ())?;
-                session
+                let document = session
                     .app_mut()
-                    .open_document(
-                        sift_foundation::identity::LocalId::from_u128(message.to_u128()),
-                        dark != 0,
-                    )
-                    .map_err(|_| ())?
+                    .open_document(id, dark != 0)
+                    .map_err(|_| ())?;
+                // **What makes D-98's `OpenMessage` scope reachable at all.** The field was
+                // set to `None` at initialization and assigned nowhere, so every action scoped
+                // to an open message — the dark transform, FR-41's three handoffs, FR-33's
+                // debug view — was absent from every menu and every palette, permanently, and
+                // the register's own reconciliation could not see it because both sides agreed
+                // the identifiers existed.
+                session.app_mut().open_message = Some(id);
+                document
             };
             let blocked = u32::try_from(document.blocked).unwrap_or(u32::MAX);
             let positions = u32::try_from(document.fetching_positions).unwrap_or(u32::MAX);
@@ -2166,7 +2193,18 @@ pub unsafe extern "C" fn sift_close_document(
         let Some(layer) = (unsafe { layer(app) }) else {
             return Err(());
         };
-        layer.documents.lock().map_err(|_| ())?.remove(name);
+        let remaining = {
+            let mut documents = layer.documents.lock().map_err(|_| ())?;
+            documents.remove(name);
+            documents.len()
+        };
+        // **Only when the last one goes.** A reader that closed its message and left the menu
+        // offering to reply to it would be offering a gesture over nothing — but the reader
+        // opens the next document *before* revoking the previous token, under D-90, so
+        // clearing on every close would clear the message that had just been opened.
+        if remaining == 0 {
+            layer.session.lock().map_err(|_| ())?.app_mut().open_message = None;
+        }
         let revoked = layer
             .session
             .lock()
@@ -3288,7 +3326,16 @@ mod tests {
             delegable_accounts: 0,
         };
         assert_eq!(
-            unsafe { sift_search(app, query.as_ptr(), query.len(), 50, &raw mut found) },
+            unsafe {
+                sift_search(
+                    app,
+                    query.as_ptr(),
+                    query.len(),
+                    SiftId::from_u128(0),
+                    50,
+                    &raw mut found,
+                )
+            },
             SiftStatus::Ok
         );
 
@@ -3319,7 +3366,16 @@ mod tests {
             caveats: SiftStr::null(),
             delegable_accounts: 0,
         };
-        let _ = unsafe { sift_search(app, query.as_ptr(), query.len(), 50, &raw mut found) };
+        let _ = unsafe {
+            sift_search(
+                app,
+                query.as_ptr(),
+                query.len(),
+                SiftId::from_u128(0),
+                50,
+                &raw mut found,
+            )
+        };
         let read = text(found.interpretation);
         assert!(read.contains("read as text, not as an operator"), "{read}");
         let _ = unsafe { sift_shutdown(app) };
@@ -3338,7 +3394,16 @@ mod tests {
             caveats: SiftStr::null(),
             delegable_accounts: 0,
         };
-        let _ = unsafe { sift_search(app, query.as_ptr(), query.len(), 50, &raw mut found) };
+        let _ = unsafe {
+            sift_search(
+                app,
+                query.as_ptr(),
+                query.len(),
+                SiftId::from_u128(0),
+                50,
+                &raw mut found,
+            )
+        };
         assert_eq!(found.delegable_accounts, 0);
         assert!(!found.rows.is_empty(), "the local search found nothing");
         let _ = unsafe { sift_shutdown(app) };
@@ -3502,6 +3567,70 @@ mod tests {
             unsafe { sift_undoable(app, &raw mut undoable) },
             SiftStatus::Failed,
             "the record is spent once it has been used"
+        );
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    /// D-98's `OpenMessage` scope, which nothing ever satisfied.
+    ///
+    /// The field behind it was initialized to `None` and assigned nowhere, so every action
+    /// scoped to an open message was absent from every menu and every palette for the life of
+    /// the process — and the register's reconciliation could not see it, because both sides
+    /// agreed the identifiers existed. Only availability disagreed, with nobody.
+    #[test]
+    fn opening_a_message_is_what_makes_the_open_message_scope_true() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+
+        let mut available: u8 = 1;
+        let id = "read.toggle-dark-transform";
+        assert_eq!(
+            unsafe { sift_action_available(app, id.as_ptr(), id.len(), &raw mut available) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            available, 0,
+            "nothing is open yet, so an action over an open message must be absent"
+        );
+
+        let mut document = SiftDocument {
+            html: SiftStr::new(""),
+            token: SiftStr::new(""),
+            fetching_positions: 0,
+            blocked: 0,
+            links: 0,
+            may_always_allow: 0,
+            has_unsubscribe: 0,
+        };
+        assert_eq!(
+            unsafe { sift_open_document(app, message, 0, &raw mut document) },
+            SiftStatus::Ok
+        );
+        let token = unsafe { document.token.as_str() }
+            .expect("a token")
+            .to_owned();
+
+        assert_eq!(
+            unsafe { sift_action_available(app, id.as_ptr(), id.len(), &raw mut available) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            available, 1,
+            "a message is open, so the actions over one are reachable"
+        );
+
+        assert_eq!(
+            unsafe { sift_close_document(app, token.as_ptr(), token.len()) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sift_action_available(app, id.as_ptr(), id.len(), &raw mut available) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            available, 0,
+            "a reader that closed its message must not go on offering gestures over it"
         );
 
         assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);

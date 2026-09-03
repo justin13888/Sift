@@ -339,6 +339,65 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             runtimePanel = panel
             panel.present()
             return
+        case "read.next-message":
+            windows.first?.moveSelection(by: 1, unreadOnly: false)
+            return
+        case "read.previous-message":
+            windows.first?.moveSelection(by: -1, unreadOnly: false)
+            return
+        case "read.next-unread":
+            windows.first?.moveSelection(by: 1, unreadOnly: true)
+            return
+        case "read.previous-unread":
+            windows.first?.moveSelection(by: -1, unreadOnly: true)
+            return
+        case "navigate.focus-sidebar":
+            windows.first?.focus(.sidebar)
+            return
+        case "navigate.focus-list":
+            windows.first?.focus(.list)
+            return
+        case "navigate.focus-reader":
+            windows.first?.focus(.reader)
+            return
+        case "navigate.unified-inbox":
+            windows.first?.showUnifiedInbox()
+            return
+        case "navigate.next-account":
+            windows.first?.stepAccount(by: 1)
+            return
+        case "navigate.previous-account":
+            windows.first?.stepAccount(by: -1)
+            return
+        case "read.toggle-dark-transform":
+            windows.first?.toggleDarkTransform()
+            return
+        case "search.narrow-to-account":
+            windows.first?.narrowSearchToAccount()
+            return
+        case "read.reply", "read.reply-all", "read.forward":
+            // FR-41. **Sift constructs nothing and sends nothing** — there is no compose
+            // window and no outgoing server anywhere in this binary, and these hand the
+            // message to whatever the platform has registered for mail. A handoff that
+            // silently did nothing would be the worst of both: the product's largest adoption
+            // objection, answered with a shrug.
+            handOff(id)
+            return
+        case "message.add-tag", "message.remove-tag":
+            // **The parameter comes from the gesture, not the register.** These two carry a
+            // tag, the boundary takes one, and this shell had nothing to put in it — so both
+            // items were offered and both failed when pressed. A tag is a string a person
+            // types, which is what makes this a sheet rather than a picker: unlike a folder,
+            // there is no set to choose from across this boundary.
+            promptForTag(id)
+            return
+        case "message.permanently-delete":
+            // FR-14's single exception, and the only intent with no compensation. **Confirmed
+            // before it is issued** rather than undone afterwards, because there is nothing to
+            // undo once it has happened — so the layer refuses an unconfirmed one, and this
+            // shell was passing `confirmed: 0` and beeping.
+            confirmPermanentDelete()
+            return
         case "search.begin", "navigate.focus-search":
             windows.first?.focusSearch()
             return
@@ -372,6 +431,111 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         // rather than being applied here. The chrome is not an observation, so it is asked
         // once, here, where something is known to have happened.
         for window in windows { window.refreshChrome() }
+    }
+
+    /// FR-41's handoff: the message, in the user's own mail application.
+    ///
+    /// A `mailto:` address and nothing more. Sift has no draft to hand over — it has never
+    /// parsed one, it has no place to put one, and building one here would be the first line
+    /// of the send path scope forbids outright.
+    private func handOff(_ id: String) {
+        guard let row = windows.first?.selectedRow else {
+            NSSound.beep()
+            return
+        }
+        var components = URLComponents()
+        components.scheme = "mailto"
+        // Reply goes to the sender; forward goes to nobody, because the user picks. Reply-all
+        // needs every recipient, and the envelope this shell is given carries one address —
+        // so it is the same address, and the difference is the subject rather than a promise
+        // about recipients Sift cannot keep.
+        components.path = id == "read.forward" ? "" : address(in: row.sender)
+        let prefix = id == "read.forward" ? "Fwd: " : "Re: "
+        let subject = row.subject.hasPrefix(prefix) ? row.subject : prefix + row.subject
+        components.queryItems = [URLQueryItem(name: "subject", value: subject)]
+        guard let url = components.url, NSWorkspace.shared.open(url) else {
+            let alert = NSAlert()
+            alert.messageText = "Sift could not hand this message to a mail app."
+            alert.informativeText =
+                "Sift does not send mail — Reply and Forward pass the message to whichever "
+                + "app handles mail on this Mac, and this Mac has none set up."
+            alert.runModal()
+            return
+        }
+    }
+
+    /// The address out of a `Name <address>` envelope, or the whole string when there is none.
+    ///
+    /// NFR-54 requires the address be shown beside the display name rather than instead of it,
+    /// so the row carries both and this takes the half a mail handler can use.
+    private func address(in sender: String) -> String {
+        guard let open = sender.lastIndex(of: "<"), let close = sender.lastIndex(of: ">"),
+            open < close
+        else { return sender.trimmingCharacters(in: .whitespaces) }
+        return String(sender[sender.index(after: open)..<close])
+    }
+
+    /// Ask for the tag `message.add-tag` and `message.remove-tag` carry.
+    private func promptForTag(_ id: String) {
+        guard let app, let host = windows.first?.hostWindow else {
+            NSSound.beep()
+            return
+        }
+        let adding = id == "message.add-tag"
+        let alert = NSAlert()
+        alert.messageText = adding ? "Add a tag" : "Remove a tag"
+        alert.informativeText = adding
+            ? "The tag is applied to every message in the selection."
+            : "The tag is removed from every message in the selection that has it."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.placeholderString = "Tag"
+        alert.accessoryView = field
+        alert.addButton(withTitle: adding ? "Add" : "Remove")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: host) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            let tag = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            // An empty tag is not a tag. Refused here rather than sent, because the layer
+            // would refuse it and the refusal would arrive as a beep with no cause.
+            guard !tag.isEmpty else { return }
+            var gesture = SiftGesture()
+            let status = SiftText.withBytes(id) { idPtr, idLen in
+                SiftText.withBytes(tag) { tagPtr, tagLen in
+                    sift_invoke_action(
+                        UnsafeMutablePointer(app), idPtr, idLen, tagPtr, tagLen, 0, &gesture)
+                }
+            }
+            if status != Ok { NSSound.beep() }
+            for window in self.windows { window.refreshChrome() }
+        }
+        // The sheet is up; the field is where the person is going next.
+        DispatchQueue.main.async { host.makeFirstResponder(field) }
+    }
+
+    /// FR-14's one confirmation, as a sheet on the window that asked.
+    private func confirmPermanentDelete() {
+        guard let app, let host = windows.first?.hostWindow else {
+            NSSound.beep()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Delete permanently?"
+        alert.informativeText =
+            "This cannot be undone, and it is the one change Sift does not apply before the "
+            + "server has accepted it. Every other change can be reversed."
+        alert.addButton(withTitle: "Delete Permanently")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .critical
+        alert.beginSheetModal(for: host) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            var gesture = SiftGesture()
+            let id = "message.permanently-delete"
+            let status = SiftText.withBytes(id) { ptr, len in
+                sift_invoke_action(UnsafeMutablePointer(app), ptr, len, nil, 0, 1, &gesture)
+            }
+            if status != Ok { NSSound.beep() }
+            for window in self.windows { window.refreshChrome() }
+        }
     }
 
     @objc func openMainWindow() {

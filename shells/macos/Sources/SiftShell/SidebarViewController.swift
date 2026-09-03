@@ -83,6 +83,28 @@ final class SidebarViewController: NSViewController {
         outline.selectRowIndexes([row], byExtendingSelection: false)
     }
 
+    /// Where the keyboard goes when the sidebar is asked for — `navigate.focus-sidebar`.
+    var focusTarget: NSView { outline }
+
+    /// Move to the next or previous account, wrapping through the unified inbox.
+    ///
+    /// The unified row is part of the cycle rather than a separate destination: it is what
+    /// `navigate.unified-inbox` names directly, and stepping past the last account arriving
+    /// somewhere that is not an account would be a step the user cannot reverse.
+    func step(by delta: Int) {
+        guard entries.count > 1 else { return }
+        let current = outline.selectedRow < 0 ? 0 : outline.selectedRow
+        let next = (current + delta + entries.count) % entries.count
+        outline.selectRowIndexes([next], byExtendingSelection: false)
+        outline.scrollRowToVisible(next)
+    }
+
+    /// Select D-4's unified inbox — `navigate.unified-inbox`.
+    func selectUnified() {
+        guard !entries.isEmpty else { return }
+        outline.selectRowIndexes([0], byExtendingSelection: false)
+    }
+
     private func selectedAccount() -> SiftId {
         let row = outline.selectedRow
         guard row >= 0, row < entries.count else { return .zero }
