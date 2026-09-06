@@ -96,20 +96,27 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
                         // the entire mechanism by which wakeups coalesce. An exact timer here
                         // would satisfy the signature and fail NFR-11.
                         arm_timer: { _, run, ticket, delayMillis, leewayMillis in
-                            let timer = DispatchSource.makeTimerSource(queue: .main)
-                            timer.schedule(
-                                deadline: .now() + .milliseconds(Int(delayMillis)),
-                                leeway: .milliseconds(Int(leewayMillis))
-                            )
-                            timer.setEventHandler {
-                                // Released after it fires. A repeating source would be a
-                                // second schedule beside the wheel's, and the two would
-                                // disagree the moment an account was added.
-                                ApplicationShell.shared.timers.removeValue(forKey: ticket)
-                                run?(ticket)
+                            // **On the main queue, like `schedule` above it.** The layer may
+                            // call either from a worker, and `timers` is a Swift dictionary —
+                            // an insert racing the event handler's removal is heap corruption
+                            // rather than a lost entry. The two closures share one contract
+                            // and must share one confinement.
+                            DispatchQueue.main.async {
+                                let timer = DispatchSource.makeTimerSource(queue: .main)
+                                timer.schedule(
+                                    deadline: .now() + .milliseconds(Int(delayMillis)),
+                                    leeway: .milliseconds(Int(leewayMillis))
+                                )
+                                timer.setEventHandler {
+                                    // Released after it fires. A repeating source would be a
+                                    // second schedule beside the wheel's, and the two would
+                                    // disagree the moment an account was added.
+                                    ApplicationShell.shared.timers.removeValue(forKey: ticket)
+                                    run?(ticket)
+                                }
+                                ApplicationShell.shared.timers[ticket] = timer
+                                timer.resume()
                             }
-                            ApplicationShell.shared.timers[ticket] = timer
-                            timer.resume()
                         },
                         oauth_client_id: SiftStr(ptr: client.baseAddress, len: client.count),
                         registered_schemes: SiftStr(ptr: schemes.baseAddress, len: schemes.count)
@@ -172,6 +179,11 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         // D-70's teardown is bounded and flushes nothing. Nothing the user watched succeed
         // can be lost, because an intent is durably enqueued *before* it is applied
         // optimistically.
+        // Cancelled before the layer goes: a source that outlives it would fire into freed
+        // memory if the process lingered, and one that never fires holds its own allocation
+        // for the life of the process. `sift_shutdown` abandons the tickets on its side.
+        for timer in timers.values { timer.cancel() }
+        timers.removeAll()
         if let app { _ = sift_shutdown(UnsafeMutablePointer(app)) }
     }
 

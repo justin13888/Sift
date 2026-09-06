@@ -1253,10 +1253,19 @@ impl App {
                 continue;
             };
             match entry.kind {
+                // A paused account is armed like any other — disarming it would mean
+                // resuming had to re-arm from somewhere — but it is not *reported* as having
+                // polled. `sync` returns an empty report for it, so recording the name here
+                // would make FR-34's panel show a paused account polling every minute.
+                Work::Sync if self.is_paused(&name) => report.paused.push(name),
                 Work::Sync => match self.sync(&name, 1) {
-                    Ok(_) => report.synced.push(name),
+                    Ok(outcome) => {
+                        report.inserted += outcome.inserted;
+                        report.synced.push(name);
+                    }
                     Err(why) => report.failures.push((name, why)),
                 },
+                Work::FlushMutations if self.is_paused(&name) => {}
                 Work::FlushMutations => match self.flush(&name) {
                     Ok(f) if f.report.issued > 0 => report.flushed.push(name),
                     Ok(_) => {}
@@ -1508,6 +1517,11 @@ fn be_u128(bytes: &[u8]) -> u128 {
 #[derive(Debug, Default, Clone)]
 pub struct TickReport {
     pub synced: Vec<String>,
+    /// Envelopes the fire actually brought in. **The number that says mail arrived**, as
+    /// opposed to `synced`, which says only that the wheel reached the account.
+    pub inserted: usize,
     pub flushed: Vec<String>,
+    /// Accounts the wheel reached and did not poll, because the user paused them.
+    pub paused: Vec<String>,
     pub failures: Vec<(String, String)>,
 }

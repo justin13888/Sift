@@ -301,28 +301,47 @@ pub(crate) fn post(layer: &Layer, task: Task) {
 /// wake the machine to discover there was nothing to do.
 pub(crate) fn ensure_timer(layer: &Layer) {
     use std::sync::atomic::Ordering;
-    if layer.timer_pending.load(Ordering::SeqCst) {
+    // **Claimed with a compare-exchange, not a load then a store.** Two entry points can add
+    // an account at once — nothing in this ABI confines callers to one thread, and `Layer` is
+    // `Sync` — and a load-then-store lets both observe `false` and both arm. The doubling is
+    // permanent, because each fire re-arms its own successor, so a race that happened once
+    // spends a wakeup a minute forever against a budget of two.
+    if layer
+        .timer_pending
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         // One is already outstanding, and the fire it belongs to re-arms from the wheel as it
         // finds it then. Arming a second here would add a wakeup to say nothing new.
         return;
     }
     let next = {
-        let Ok(session) = layer.session.lock() else {
-            return;
-        };
-        session.app().next_wake()
+        match layer.session.lock() {
+            Ok(session) => session.app().next_wake(),
+            // Release the claim. Holding it would leave the flag true with no timer behind
+            // it, and nothing would ever arm one again.
+            Err(_) => {
+                layer.timer_pending.store(false, Ordering::SeqCst);
+                return;
+            }
+        }
     };
-    if let Some(delay) = next {
-        post_timer(layer, delay);
+    match next {
+        Some(delay) => post_timer(layer, delay),
+        // Nothing to schedule. The claim is released so that the next account added can take
+        // it — a resident process with no work takes no wakeups, and must still be able to
+        // start taking them.
+        None => layer.timer_pending.store(false, Ordering::SeqCst),
     }
 }
 
+/// Arm the platform timer. The caller has already claimed `timer_pending`.
 pub(crate) fn post_timer(layer: &Layer, delay: core::time::Duration) {
-    layer
-        .timer_pending
-        .store(true, std::sync::atomic::Ordering::SeqCst);
     let ticket = {
         let Ok(mut slab) = slab().lock() else {
+            layer
+                .timer_pending
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             return;
         };
         let ticket = slab.next;
@@ -335,6 +354,8 @@ pub(crate) fn post_timer(layer: &Layer, delay: core::time::Duration) {
         );
         ticket
     };
+    // A poisoned slab is the one path that reaches here with nothing armed, and it must not
+    // leave the claim standing — see the release in `ensure_timer` for why.
     (layer.arm_timer)(
         layer.schedule_context as *mut core::ffi::c_void,
         crate::entry::sift_run_scheduled,

@@ -794,26 +794,33 @@ pub unsafe extern "C" fn sift_complete_authorization(
                 flows.client_id.clone()
             };
 
-            let mut session = layer.session.lock().map_err(|_| ())?;
-            let app_ref = session.app_mut();
-            let identity = app_ref.reserve_identity();
-            let adapter = sift_app::authorize::complete(
-                &mut app_ref.broker,
-                &client_id,
-                identity,
-                callback,
-                now_millis(),
-            )
-            .map_err(|_| ())?;
-            let id = app_ref
-                .add_provider_account(display_name, adapter)
+            // **Scoped, because `rearm_accounts` takes this same lock.** `std::sync::Mutex`
+            // is not reentrant, so holding the guard across that call is a hard hang on the
+            // shell's main thread at the moment a user finishes signing in — no error, no
+            // status, just a beachball on the one path that most needs to work.
+            let id = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                let app_ref = session.app_mut();
+                let identity = app_ref.reserve_identity();
+                let adapter = sift_app::authorize::complete(
+                    &mut app_ref.broker,
+                    &client_id,
+                    identity,
+                    callback,
+                    now_millis(),
+                )
                 .map_err(|_| ())?;
+                app_ref
+                    .add_provider_account(display_name, adapter)
+                    .map_err(|_| ())?
+            };
             // The flow is spent. A verifier that outlived its exchange would be one a second
             // callback could be replayed against.
-            let mut flows = layer.flows.lock().map_err(|_| ())?;
-            flows.client_id.clear();
-            flows.url.clear();
-            drop(flows);
+            {
+                let mut flows = layer.flows.lock().map_err(|_| ())?;
+                flows.client_id.clear();
+                flows.url.clear();
+            }
             // A real account is the one that most needs polling, and it is added here rather
             // than through the replayed path — so without this the first account a person
             // ever connects would be the one the wheel never learned about.
@@ -1614,6 +1621,20 @@ fn run_tick(layer: &Layer) {
     layer
         .timer_pending
         .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // **Re-armed on every exit, including the ones that did no work.** Nothing else arms the
+    // timer once the process is running, so a single early return here — a poisoned session
+    // lock, a panic caught by the barrier — ends periodic work for the life of the process,
+    // silently, while the application keeps drawing. Mail simply stops arriving and nothing
+    // says so. The re-arm is therefore a guard that runs however this function leaves.
+    struct Rearm<'a>(&'a Layer);
+    impl Drop for Rearm<'_> {
+        fn drop(&mut self) {
+            crate::layer::ensure_timer(self.0);
+        }
+    }
+    let _rearm = Rearm(layer);
+
     {
         let Ok(mut session) = layer.session.lock() else {
             return;
@@ -1626,8 +1647,6 @@ fn run_tick(layer: &Layer) {
     // Outside the session lock, because it calls into the shell and a shell is permitted to
     // call back — that is the same self-deadlock the sink lock had.
     deliver(layer);
-
-    crate::layer::ensure_timer(layer);
 }
 
 /// Tell the shell about a condition that has changed since it was last told.
@@ -3947,10 +3966,19 @@ mod tests {
             u64::try_from(sift_foundation::limits::L31_WHEEL_SLACK.as_millis()).unwrap(),
             "the leeway is the coalescing hint; without it D-25 buys nothing"
         );
+        // The aligned instant is at most L-30 away, and the wheel fires at the *end* of the
+        // bucket containing it — so the bound is the interval plus the slack. Asserting the
+        // interval alone fails whenever the wall clock sits just past a minute boundary,
+        // which is a phantom CI failure roughly one run in twenty-five.
         let delay = LAST_DELAY.load(Ordering::SeqCst);
+        let bound = u64::try_from(
+            (sift_foundation::limits::L30_SYNC_POLL + sift_foundation::limits::L31_WHEEL_SLACK)
+                .as_millis(),
+        )
+        .unwrap();
         assert!(
-            delay <= u64::try_from(sift_foundation::limits::L30_SYNC_POLL.as_millis()).unwrap(),
-            "the first fire is {delay}ms away, past the aligned interval"
+            delay <= bound,
+            "the first fire is {delay}ms away, past the aligned interval plus its slack"
         );
 
         let _ = unsafe { sift_shutdown(app) };

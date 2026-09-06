@@ -87,6 +87,13 @@ fn an_idle_account_polls_without_anybody_asking() {
         "the fire did not sync the account: {report:?}"
     );
     assert!(report.failures.is_empty(), "{report:?}");
+    // **Mail, not merely a call.** `synced` records any `Ok`, and `App::sync` returns an
+    // empty report immediately for a paused account — so asserting the name alone would pass
+    // for a fire that did nothing at all. This is the number that says envelopes arrived.
+    assert!(
+        report.inserted > 0,
+        "the poll reached the account and brought nothing back: {report:?}"
+    );
 }
 
 #[test]
