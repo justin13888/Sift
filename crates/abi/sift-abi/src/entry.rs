@@ -438,7 +438,7 @@ pub unsafe extern "C" fn sift_accounts(
                 .collect();
             // One pass, and the condition first, because computing it needs the application
             // mutably and a borrow of the account cannot be alive across that call.
-            let mut gathered = Vec::with_capacity(names.len());
+            let mut gathered: Vec<Gathered> = Vec::with_capacity(names.len());
             for name in &names {
                 let condition = session
                     .app_mut()
@@ -451,6 +451,7 @@ pub unsafe extern "C" fn sift_accounts(
                 };
                 gathered.push(Gathered {
                     id: account.id.as_u128(),
+                    name: name.clone(),
                     kind: account.kind.clone(),
                     writes_enabled: account.writes_enabled,
                     held,
@@ -461,20 +462,25 @@ pub unsafe extern "C" fn sift_accounts(
 
             // The names and the kinds, in one vector the layer owns, because a `repr(C)` row
             // cannot own a `String` and the temporaries above die at the end of this call.
+            //
+            // **Pairs rather than two runs in one vector.** The kind of row *i* lived at
+            // `names.len() + i` and was read at `gathered.len() + i`; the two agree only while
+            // no account is skipped above, and a skip would have been silent — every index
+            // stays in bounds, so each row would have been handed a name and a kind belonging
+            // to different accounts. A pair cannot be indexed apart.
             let mut stored = layer.account_names.lock().map_err(|_| ())?;
-            *stored = names
-                .into_iter()
-                .chain(gathered.iter().map(|g| g.kind.clone()))
+            *stored = gathered
+                .iter()
+                .map(|g| (g.name.clone(), g.kind.clone()))
                 .collect();
-            let count = gathered.len();
             let mut table = layer.account_rows.lock().map_err(|_| ())?;
             *table = gathered
                 .iter()
-                .enumerate()
-                .map(|(i, g)| SiftAccount {
+                .zip(stored.iter())
+                .map(|(g, (name, kind))| SiftAccount {
                     id: SiftId::from_u128(g.id),
-                    name: SiftStr::new(extend(&stored[i])),
-                    kind: SiftStr::new(extend(&stored[count + i])),
+                    name: SiftStr::new(extend(name)),
+                    kind: SiftStr::new(extend(kind)),
                     condition: g.condition,
                     writes_enabled: u8::from(g.writes_enabled),
                     held: g.held,
@@ -488,6 +494,7 @@ pub unsafe extern "C" fn sift_accounts(
 /// One account's facts, read while the session is held and used after it is released.
 struct Gathered {
     id: u128,
+    name: String,
     kind: String,
     writes_enabled: bool,
     held: u32,
@@ -1616,15 +1623,25 @@ fn deliver(layer: &Layer) {
     };
     drop(session);
 
-    let Ok(sinks) = layer.sinks.lock() else {
-        return;
-    };
-    for d in &deliveries {
-        // A sink removed by cancellation is the guarantee doing its job: the delivery was
-        // computed before the cancel and finds nothing to call.
-        let Some(sink) = sinks.get(&d.observation.0) else {
-            continue;
+    // **Resolved under the lock, called outside it.** A shell is inside its own main loop when
+    // one of these runs, and D-48 lets it call back into the layer on the next turn — but the
+    // list it draws can also reach `observe` or `cancel` synchronously from a selection change,
+    // and both take this mutex. Holding it across the callback makes that a self-deadlock one
+    // call away, in a shell that has just grown several new selection-driven paths.
+    let targets: Vec<(usize, Sink)> = {
+        let Ok(sinks) = layer.sinks.lock() else {
+            return;
         };
+        deliveries
+            .iter()
+            .enumerate()
+            // A sink removed by cancellation is the guarantee doing its job: the delivery was
+            // computed before the cancel and finds nothing to call.
+            .filter_map(|(i, d)| sinks.get(&d.observation.0).map(|sink| (i, *sink)))
+            .collect()
+    };
+    for (index, sink) in targets {
+        let d = &deliveries[index];
         // **The window, not the rows entering it.** A shell given only the arrivals has no way
         // to express a removal, so it appends — and a sync that drops a message leaves the row
         // on screen pointing at something the store no longer holds. D-18's change vocabulary

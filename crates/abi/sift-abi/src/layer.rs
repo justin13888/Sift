@@ -127,7 +127,9 @@ pub(crate) struct Layer {
     /// so a shell could add an account and then never sync, pause, authorize or flush it
     /// again, and the runtime panel asked the user to type one in.
     pub(crate) account_rows: Mutex<Vec<crate::entry::SiftAccount<'static>>>,
-    pub(crate) account_names: Mutex<Vec<String>>,
+    /// Each account's label and kind, paired. Paired rather than concatenated so that an
+    /// index cannot mean one account's name and another's kind.
+    pub(crate) account_names: Mutex<Vec<(String, String)>>,
     /// The last account setting read back, held for the string handed out.
     pub(crate) account_setting_value: Mutex<String>,
     /// D-49's condition, per account, as the shell was last told it.
