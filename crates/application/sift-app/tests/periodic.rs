@@ -148,3 +148,63 @@ fn re_arming_does_not_accumulate_timers() {
         "the account was synced once per arming: {report:?}"
     );
 }
+
+#[test]
+fn a_tier_walks_all_the_way_back_to_l0_without_further_pressure_signals() {
+    // **The platform's signal is edge-triggered.** It fires when the state changes, so after
+    // a machine calms down there are no further signals — and `Governor::tick` releases one
+    // tier per call. Without the wheel re-ticking it, L3 would descend to L2 on the single
+    // `normal` event and stall there for the life of the process, with the body view and
+    // every cache below it still shed and nothing to say why.
+    let hand = std::sync::Arc::new(Hand::new());
+    let mut app = App::with_clock(Box::new(Shared(std::sync::Arc::clone(&hand))));
+    app.add_replayed_account("mail").expect("added");
+    app.arm_periodic();
+
+    assert!(
+        app.memory_pressure(sift_governor::Pressure::Critical)
+            .is_some()
+    );
+    assert_eq!(app.tier(), sift_governor::Tier::L3);
+
+    // One `normal` edge, and then nothing — which is all a real source delivers.
+    app.memory_pressure(sift_governor::Pressure::Normal);
+
+    // Only the wheel from here. Each fire is a minute apart, and L-19's dwell is a minute, so
+    // the tier should come down a step at a time rather than all at once or not at all.
+    for _ in 0..4 {
+        advance(&hand, Duration::from_secs(65));
+        let _ = app.tick();
+    }
+
+    assert_eq!(
+        app.tier(),
+        sift_governor::Tier::L0,
+        "the tier stalled on the way back down, so a shed outlived the pressure that caused it"
+    );
+}
+
+#[test]
+fn a_still_critical_system_is_not_released_by_the_wheel() {
+    // The re-tick uses the *last level the platform reported*, not an assumption of calm. A
+    // system that went critical and stayed there sends no further signal, and releasing on
+    // that silence would undo the shed while the pressure that caused it was still present.
+    let hand = std::sync::Arc::new(Hand::new());
+    let mut app = App::with_clock(Box::new(Shared(std::sync::Arc::clone(&hand))));
+    app.add_replayed_account("mail").expect("added");
+    app.arm_periodic();
+
+    app.memory_pressure(sift_governor::Pressure::Critical);
+    assert_eq!(app.tier(), sift_governor::Tier::L3);
+
+    for _ in 0..5 {
+        advance(&hand, Duration::from_secs(65));
+        let _ = app.tick();
+    }
+
+    assert_eq!(
+        app.tier(),
+        sift_governor::Tier::L3,
+        "the wheel released a tier while the system was still under critical pressure"
+    );
+}

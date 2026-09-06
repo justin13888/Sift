@@ -1642,14 +1642,21 @@ fn run_tick(layer: &Layer) {
     }
     let _rearm = Rearm(layer);
 
+    let entered_l3;
     {
         let Ok(mut session) = layer.session.lock() else {
             return;
         };
-        // The report is dropped here rather than returned: FR-34's panel reads the queue and
-        // the conditions directly, and a fire that reported into nothing would be a second
-        // source of truth for what the first one already says.
-        let _ = session.app_mut().tick();
+        // Mostly dropped: FR-34's panel reads the queue and the conditions directly, and a
+        // fire that reported into nothing would be a second source of truth. The one thing
+        // that cannot be read back is whether this fire's governor tick entered L3, because
+        // the response to that is a callback only a shell can perform.
+        entered_l3 = session.app_mut().tick().entered_l3;
+    }
+    if entered_l3 {
+        // Outside the session lock, for the reason every other host callback is: a shell
+        // destroying its windows will call back into the layer.
+        (layer.host.destroy_every_window)(layer.host.context);
     }
     // Outside the session lock, because it calls into the shell and a shell is permitted to
     // call back — that is the same self-deadlock the sink lock had.

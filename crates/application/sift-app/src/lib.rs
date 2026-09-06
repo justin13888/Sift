@@ -294,7 +294,20 @@ pub struct App {
     governor: sift_governor::Governor,
     /// When the last pressure signal was seen, so the hysteresis dwell is measured rather
     /// than assumed. L-19 releases a tier only after pressure has been clear for that long.
-    last_pressure_at: Option<std::time::Instant>,
+    ///
+    /// **On the same clock as the wheel**, deliberately. Reading `Instant::now()` here would
+    /// put a second clock in a struct that already has one — the dwell would then be
+    /// unmeasurable by any test that drives time, and the wheel that re-ticks the governor
+    /// would advance while the dwell it feeds did not.
+    last_pressure_at: Option<sift_scheduler::clock::Monotonic>,
+    /// The last level the platform reported.
+    ///
+    /// **Remembered because the signal is edge-triggered.** A platform pressure source fires
+    /// when the state *changes*, so after pressure clears there are no further signals — and
+    /// `Governor::tick` releases one tier per call. Without a remembered level and a clock to
+    /// re-tick against, the tier would descend one step and stall there for the life of the
+    /// process, with every cache below it still shed.
+    last_pressure: sift_governor::Pressure,
     /// FR-8's *load once* — **the one message in front of the user**.
     ///
     /// Keyed on the message rather than on a token because accepting re-renders, and a
@@ -360,6 +373,7 @@ impl App {
             armed: Vec::new(),
             governor: sift_governor::Governor::new(),
             last_pressure_at: None,
+            last_pressure: sift_governor::Pressure::Normal,
             allowed_once_message: None,
         }
     }
@@ -1299,6 +1313,19 @@ impl App {
                 _ => {}
             }
         }
+        // **The wheel is the governor's clock.** The platform's pressure source is
+        // edge-triggered, so once the machine is calm nothing signals again — and the
+        // hysteresis releases one tier per call. Re-ticking here against the last level the
+        // platform reported is what lets L3 walk back to L0 one step at a time, as D-93
+        // requires, instead of stopping at the first step. Re-ticking against the *last*
+        // level rather than assuming calm is what keeps a still-critical system at L3.
+        if self.governor.tier() > sift_governor::Tier::L0 {
+            let pressure = self.last_pressure;
+            if let Some(transition) = self.memory_pressure(pressure) {
+                report.entered_l3 = transition.to == sift_governor::Tier::L3;
+            }
+        }
+
         self.arm_periodic();
         report
     }
@@ -1333,11 +1360,12 @@ impl App {
         &mut self,
         pressure: sift_governor::Pressure,
     ) -> Option<sift_governor::Transition> {
-        let now = std::time::Instant::now();
+        let now = self.clock.monotonic();
         let elapsed = self
             .last_pressure_at
-            .map_or(core::time::Duration::ZERO, |then| now.duration_since(then));
+            .map_or(core::time::Duration::ZERO, |then| now.since(then));
         self.last_pressure_at = Some(now);
+        self.last_pressure = pressure;
         let transition = self.governor.tick(pressure, elapsed);
         if let Some(t) = &transition {
             self.shed(t);
@@ -1606,5 +1634,8 @@ pub struct TickReport {
     pub flushed: Vec<String>,
     /// Accounts the wheel reached and did not poll, because the user paused them.
     pub paused: Vec<String>,
+    /// Whether this fire's governor tick entered L3, so the boundary can issue the window
+    /// destruction only a shell can perform.
+    pub entered_l3: bool,
     pub failures: Vec<(String, String)>,
 }
