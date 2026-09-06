@@ -2228,8 +2228,17 @@ pub unsafe extern "C" fn sift_memory_pressure(
             let (transition, tier) = {
                 let mut session = layer.session.lock().map_err(|_| ())?;
                 let app = session.app_mut();
-                (app.memory_pressure(level), app.tier())
+                let transition = app.memory_pressure(level);
+                // **Arm the wheel here, or a held tier has no clock.** The governor's
+                // hysteresis is advanced by wheel fires, and on an installation with no
+                // accounts nothing else ever arms one — so pressure would raise the tier and
+                // it would stay raised for the life of the process, every window destroyed
+                // and nothing to bring it back. This is the only path that can put the
+                // application into a tier, so it is the path that has to give it a clock.
+                app.arm_periodic();
+                (transition, app.tier())
             };
+            crate::layer::ensure_timer(layer);
 
             // Outside the session lock, because it calls into the shell and a shell destroying
             // its windows will call back — which is the self-deadlock the sink lock had.

@@ -1384,6 +1384,10 @@ impl App {
         if let Some(t) = &transition {
             self.shed(t);
         }
+        // The wheel is the governor's clock, and a tier entered with nothing armed would never
+        // be released. Armed here rather than only at the boundary so that any caller which
+        // can raise a tier also gives it a way down.
+        self.arm_periodic();
         transition
     }
 

@@ -204,7 +204,6 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         _ = sift_set_window_present(UnsafeMutablePointer(app), 1)
     }
 
-    /// Bring an existing window forward. "Open Sift" means *show me Sift*, not *make another*.
     /// Close this shell's window — L3's shed, issued by the application shell.
     ///
     /// Goes through the window so that `windowWillClose` runs and the shell is forgotten the
@@ -212,9 +211,18 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     /// that would leave this controller in the array `syncActivationPolicy` reads, holding
     /// Sift in the dock with nothing on screen.
     func close() {
+        // **A window with a sheet attached is a user interaction in progress**, and on this
+        // window that is almost always the add-account flow. The platform disables the close
+        // button while a sheet is up, so `performClose` here is a beep and nothing else —
+        // memory pressure making the machine chime. Forcing it would be worse: ending the
+        // sheet cancels the flow through `windowWillClose`, and the user who then grants
+        // consent in the browser comes back to nothing, which is D-71's failure arriving from
+        // the memory governor.
+        guard window?.attachedSheet == nil else { return }
         window?.performClose(nil)
     }
 
+    /// Bring an existing window forward. "Open Sift" means *show me Sift*, not *make another*.
     func raise() {
         window?.makeKeyAndOrderFront(nil)
     }

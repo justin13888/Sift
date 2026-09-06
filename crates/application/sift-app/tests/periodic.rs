@@ -218,9 +218,12 @@ fn a_container_with_no_accounts_still_walks_a_tier_back_down() {
     let hand = std::sync::Arc::new(Hand::new());
     let mut app = App::with_clock(Box::new(Shared(std::sync::Arc::clone(&hand))));
 
+    // **No `arm_periodic` by hand.** Calling it here is what an earlier version of this test
+    // did, and it hid the defect exactly: the boundary never called it on the pressure path,
+    // so a real installation with no accounts stayed at L3 for the life of the process while
+    // this test passed. `App::memory_pressure` arms the wheel itself now.
     app.memory_pressure(sift_governor::Pressure::Critical);
     assert_eq!(app.tier(), sift_governor::Tier::L3);
-    app.arm_periodic();
     assert!(
         app.next_wake().is_some(),
         "nothing was armed, so the tier has no clock and can never come down"

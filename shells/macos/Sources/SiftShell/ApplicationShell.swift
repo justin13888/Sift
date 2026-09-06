@@ -212,6 +212,14 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// `forget` and `syncActivationPolicy` already treat as authoritative.
     fileprivate func destroyWindowShells() {
         for shell in windows { shell.close() }
+        // **Closed, then released.** `removeAll` on its own deallocates the controllers and
+        // leaves their windows on screen: an ordered-in window is retained by the platform,
+        // and a window controller's deallocation does not close one. The reader windows would
+        // have stayed visible with their body views intact — holding the memory L3 exists to
+        // release — while `Broker::shed` had just revoked their tokens, so every image in them
+        // would fail with nothing able to say why. A standalone reader is the window kind
+        // whose entire content is a body view, which makes it the one L3 most needs to go.
+        for reader in standaloneReaders { reader.close() }
         standaloneReaders.removeAll()
     }
 
@@ -692,7 +700,28 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// distrust in the whole design, and which is only credible if the user can *see* the
     /// difference between a closed window and a quit application.
     private func syncActivationPolicy() {
-        NSApp.setActivationPolicy(windows.isEmpty ? .accessory : .regular)
+        NSApp.setActivationPolicy(hasVisibleWindow ? .regular : .accessory)
+    }
+
+    /// Whether any window this shell owns is on screen.
+    ///
+    /// **Not just the main ones.** Reading `windows` alone was survivable while the only way
+    /// to empty it was a user closing a window by hand — they were looking at the window they
+    /// closed. L3 empties it without a gesture, and it can do so while Settings, the runtime
+    /// panel, the message-debug window or the add-account flow is open: Sift would drop out of
+    /// the dock and the switcher with one of its own windows still visible, which the comment
+    /// on the policy change calls a window "the activation machinery treats as belonging to
+    /// something the user cannot switch to". There would then be no way back to it.
+    private var hasVisibleWindow: Bool {
+        if !windows.isEmpty { return true }
+        let auxiliary: [NSWindow?] = [
+            addAccount?.window,
+            settingsWindow?.window,
+            runtimePanel?.window,
+            debugWindow?.window,
+        ]
+        if auxiliary.contains(where: { $0?.isVisible == true }) { return true }
+        return standaloneReaders.contains { $0.window?.isVisible == true }
     }
 
     /// The tray's one pause control, which is a toggle rather than a second verb.
