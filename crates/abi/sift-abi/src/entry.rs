@@ -2033,6 +2033,50 @@ pub unsafe extern "C" fn sift_document_withheld(
     }
 }
 
+/// FR-8 — the user allows this message's remote content, once or for this sender.
+///
+/// **The two controls are different things and this is where the difference lives.**
+/// `durable` zero lets the document that is open fetch, and dies with its token, so
+/// re-opening the same message asks again. `durable` non-zero writes the sender into the
+/// allowance list and survives. A single flag serving both would silently make a transient
+/// choice permanent, which is the failure a user can neither see nor undo.
+///
+/// The shell holds a token, never an origin. Which sender a durable allowance keys on is the
+/// layer's to resolve, from what authenticated the message — so a shell cannot name a sender
+/// it was not given, and cannot key an allowance on one that authenticated nothing. Where
+/// there is nothing to key on this **fails**, and the interface must not have offered the
+/// control: `SiftDocument::may_always_allow` is what says so before it is pressed.
+///
+/// # Safety
+/// `app` must be valid; `token` must point to `token_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_allow_remote_content(
+    app: *mut SiftApp,
+    token: *const u8,
+    token_len: usize,
+    durable: u8,
+) -> SiftStatus {
+    unsafe {
+        guard(|| {
+            let layer = layer(app).ok_or(())?;
+            let name = borrowed(token, token_len)?;
+            let mut session = layer.session.lock().map_err(|_| ())?;
+            let broker = &mut session.app_mut().resources;
+            if durable == 0 {
+                return broker.allow_once(name).then_some(()).ok_or(());
+            }
+            let origin = broker.origin_of(name).ok_or(())?;
+            // The durable allowance and the transient one, because the message in front of
+            // the user must load now as well as the next one from this sender. Ordering them
+            // the other way would leave the open document blocked by the very click that
+            // allowed its sender.
+            let allowed = broker.allow_origin(&origin);
+            broker.allow_once(name);
+            allowed.then_some(()).ok_or(())
+        })
+    }
+}
+
 /// FR-30: every navigation target, with the destination the confirmation sheet must show.
 ///
 /// # Safety
@@ -3137,6 +3181,74 @@ mod tests {
         let app = start(run_inline, scratch_str());
         let message = hostile_message(app);
         assert_eq!(open(app, message).may_always_allow, 0);
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// FR-8's *load once*, on the boundary.
+    ///
+    /// The bar's two buttons were assigned to nothing in the macOS shell — `onLoadOnce` and
+    /// `onAlwaysAllow` were declared and never set — so a user could read that content was
+    /// withheld and had no way to accept it. There was also no entry point to assign them
+    /// to: the broker could allow an origin and nothing across the boundary could ask it to.
+    #[test]
+    fn loading_once_is_scoped_to_the_open_document() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        let document = open(app, message);
+        let token = text(document.token);
+
+        assert_eq!(
+            unsafe { sift_allow_remote_content(app, token.as_ptr(), token.len(), 0) },
+            SiftStatus::Ok,
+            "the open document could not be allowed to load"
+        );
+
+        // The same message, opened again, is a new token and a new decision. A load-once that
+        // outlived its document would be a durable allowance the user never asked for and
+        // cannot find to revoke.
+        let again = open(app, message);
+        let fresh = text(again.token);
+        assert_ne!(fresh, token, "re-opening reused the token");
+        assert!(
+            again.blocked > 0,
+            "content stayed allowed across a re-open, so `once` did not mean once"
+        );
+
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// A durable allowance keyed on nothing would apply to every sender, so it must refuse
+    /// rather than key on a placeholder. The interface is told this before the button is
+    /// drawn — `may_always_allow` — and this is the boundary refusing anyway, because a shell
+    /// that offered it regardless must not be able to make it happen.
+    #[test]
+    fn a_durable_allowance_is_refused_where_nothing_authenticated_the_sender() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        let document = open(app, message);
+        assert_eq!(document.may_always_allow, 0, "the fixture changed");
+        let token = text(document.token);
+
+        assert_eq!(
+            unsafe { sift_allow_remote_content(app, token.as_ptr(), token.len(), 1) },
+            SiftStatus::Failed,
+            "an allowance was keyed on a sender nothing authenticated"
+        );
+
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// A token the layer never minted, or one already revoked, is a failure rather than a
+    /// silent success — the shell would otherwise report that content was allowed and show a
+    /// document that still blocks it.
+    #[test]
+    fn allowing_an_unknown_token_fails() {
+        let app = start(run_inline, scratch_str());
+        let bogus = "not-a-token";
+        assert_eq!(
+            unsafe { sift_allow_remote_content(app, bogus.as_ptr(), bogus.len(), 0) },
+            SiftStatus::Failed
+        );
         let _ = unsafe { sift_shutdown(app) };
     }
 

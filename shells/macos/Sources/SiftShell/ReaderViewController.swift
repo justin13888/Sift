@@ -143,6 +143,31 @@ final class ReaderViewController: NSViewController {
         show(showing, app: app)
     }
 
+    /// FR-8 — the user accepted the withheld content, once or for this sender.
+    ///
+    /// **Re-rendering is the whole of the effect**, and it is deliberate rather than lazy: the
+    /// document is opened again, so the layer decides afresh what may be fetched and the bar
+    /// redraws from what it now says. Reaching into the open view to unblock things would put
+    /// a second copy of the policy on this side of the boundary, where it could disagree with
+    /// the first.
+    private func allowRemoteContent(durable: Bool, app: OpaquePointer?) {
+        guard let app, let token = openToken else { return }
+        let ok = SiftText.withBytes(token) { ptr, len in
+            sift_allow_remote_content(UnsafeMutablePointer(app), ptr, len, durable ? 1 : 0) == Ok
+        }
+        guard ok else {
+            // The layer refused — a revoked token, or a sender nothing authenticated. Saying
+            // nothing would leave a button that visibly does nothing, which is the defect
+            // this method exists to fix arriving by a different door.
+            NSSound.beep()
+            return
+        }
+        show(showing, app: app)
+    }
+
+    /// The token of the document on screen, for the consent calls above.
+    private var openToken: String?
+
     func show(_ row: MessageRow?, app: OpaquePointer?) {
         // Force the load *first*, so it cannot happen part-way through this method and undo
         // it on the way out. `loadViewIfNeeded()` says this more clearly and is macOS 14; the
@@ -195,10 +220,21 @@ final class ReaderViewController: NSViewController {
         failure.isHidden = true
         let html = ReaderViewController.string(document.html)
         let token = ReaderViewController.string(document.token)
+        openToken = token
 
         // Native chrome, never markup. Every number here comes from the layer, and a number a
         // sender could write would not be a number.
         links = ReaderViewController.links(app: app, token: token)
+        // **Assigned here rather than at construction**, because the closures capture `app`
+        // and the bar outlives any one document. Declared and never assigned is what these
+        // were: the bar drew two buttons, named exactly what withholding had happened, and
+        // clicking either did nothing at all.
+        blockedBar.onLoadOnce = { [weak self] in
+            self?.allowRemoteContent(durable: false, app: app)
+        }
+        blockedBar.onAlwaysAllow = { [weak self] in
+            self?.allowRemoteContent(durable: true, app: app)
+        }
         blockedBar.show(
             app: app, token: token, blocked: document.blocked,
             mayAlwaysAllow: document.may_always_allow != 0)

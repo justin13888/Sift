@@ -99,6 +99,14 @@ pub struct Document {
     /// pool the store, the queue and search share.
     in_flight: usize,
     queued: usize,
+    /// FR-8's *load once*: this open document may fetch, and nothing outlives it.
+    ///
+    /// **Per document rather than per sender, and that is the distinction the two controls
+    /// are.** "Always allow" writes the sender into `allowed_origins` and survives; this
+    /// dies with the token, so re-opening the same message asks again. A single flag serving
+    /// both would make the transient choice permanent, which is the failure mode a user
+    /// cannot see and cannot undo.
+    allowed_once: bool,
 }
 
 /// A request as the engine hands it over.
@@ -143,6 +151,7 @@ impl Broker {
                 positions,
                 in_flight: 0,
                 queued: 0,
+                allowed_once: false,
             },
         );
         token
@@ -185,6 +194,30 @@ impl Broker {
         true
     }
 
+    /// FR-8's *load once* — let this open document fetch, and nothing after it.
+    ///
+    /// Returns false where the token names no live document, which is the ordinary outcome
+    /// when a view navigated away between the click and the call.
+    pub fn allow_once(&mut self, token: &str) -> bool {
+        match self.documents.get_mut(token) {
+            Some(document) => {
+                document.allowed_once = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The origin a live document came from, for keying a durable allowance on.
+    ///
+    /// The shell holds a token and not an origin — the origin is the layer's, derived from
+    /// what authenticated the message — so this is how "always allow this sender" resolves
+    /// the sender without the shell ever naming one.
+    #[must_use]
+    pub fn origin_of(&self, token: &str) -> Option<Origin> {
+        self.documents.get(token).map(|d| d.origin.clone())
+    }
+
     /// Answer one request.
     ///
     /// The order of the checks is the design. Identity first, because an address that names
@@ -224,11 +257,12 @@ impl Broker {
         }
 
         // 4. Has the user allowed this sender? Remote content is blocked **by default**.
-        let allowed = document.origin.domain().is_some_and(|d| {
-            self.allowed_origins
-                .iter()
-                .any(|a| a == &d.to_ascii_lowercase())
-        });
+        let allowed = document.allowed_once
+            || document.origin.domain().is_some_and(|d| {
+                self.allowed_origins
+                    .iter()
+                    .any(|a| a == &d.to_ascii_lowercase())
+            });
         let first_party = infrastructure.is_first_party(&document.origin, host_of(&position.url));
         if !allowed && !first_party {
             return Answer::Blocked(Reason::NotAllowedBySender);
