@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#MISE description="Ensure the pinned toolchain carries the components the gates need."
+#
+# `rust-toolchain.toml` declares `components = ["rustfmt", "clippy"]`, and rustup honours that
+# list **when rustup is the thing that installs the toolchain**. On a runner it often is not:
+# mise installs the pinned rust itself, and anything that invokes cargo before it — a cache
+# action computing a key, a shell hook — makes rustup auto-install the pinned toolchain first,
+# under the runner image's own default profile, which is `minimal`. mise then finds 1.96.0
+# present and adds nothing to it.
+#
+# The result is a toolchain with no rustfmt and no clippy and a gate that fails with
+#
+#     error: 'cargo-clippy' is not installed for the toolchain '1.96.0-x86_64-unknown-linux-gnu'
+#
+# which reads like a broken pin rather than a missing component. It is intermittent by nature:
+# it depends on whether anything touched cargo before mise finished, so one matrix leg passes
+# and its neighbour fails on the same commit.
+#
+# **No version is named here.** rustup resolves `rust-toolchain.toml` itself, so this operates
+# on whatever that file pins and cannot drift from it — the same reason D-17 wants one
+# derivation rather than two that agree today.
+set -euo pipefail
+
+command -v rustup >/dev/null 2>&1 || {
+    echo "toolchain: rustup is not on PATH, so the pinned toolchain's components cannot be" >&2
+    echo "           checked. The gates need rustfmt and clippy." >&2
+    exit 1
+}
+
+# Asked locally rather than by attempting the add. `rustup component add` on a component that
+# is already present still consults the server, and this task runs from the pre-commit hook on
+# every commit — a gate that reaches the network to tell you it had nothing to do is a gate
+# that fails when the network does.
+installed="$(rustup component list --installed 2>/dev/null || true)"
+missing=()
+for component in rustfmt clippy; do
+    # A prefix match, because a component is listed bare or target-suffixed depending on
+    # whether it is target-specific, and `\b` is not portable across the two greps this runs
+    # under. No other rustup component name begins with either of these two.
+    grep -q "^${component}" <<<"$installed" || missing+=("$component")
+done
+
+if [[ ${#missing[@]} -eq 0 ]]; then
+    exit 0
+fi
+
+echo "toolchain: adding ${missing[*]} to the pinned toolchain"
+rustup component add "${missing[@]}"
