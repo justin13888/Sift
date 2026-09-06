@@ -113,12 +113,20 @@ impl Origin {
 
     /// Whether a durable per-sender allowance can be keyed on this origin — FR-8.
     ///
-    /// False for a null origin, and the interface **MUST say so** rather than presenting a
-    /// control that silently does nothing. A one-off "show images once" is still available;
-    /// what is unavailable is "always", because there is nothing to remember it against.
+    /// **Attested, not merely non-null.** `sender-origin.md` states the rule directly — *"a
+    /// per-sender allowlist keyed on an unauthenticated From domain would be trivially
+    /// forgeable, so the allowlist MUST key on the synthetic origin, not on the displayed
+    /// sender"* — and this returned `!Null`, which admits priority 3: a `From:` header with
+    /// nothing behind it. Under that reading a user who allowed an attested `bank.test` had
+    /// also allowed every message that merely *claims* to be from it, and the spoof could
+    /// earn the allowance in the first place.
+    ///
+    /// The interface **MUST say so** rather than presenting a control that silently does
+    /// nothing. A one-off "show images once" remains available; what is unavailable is
+    /// "always", because there is nothing trustworthy to remember it against.
     #[must_use]
     pub const fn can_carry_a_durable_allowance(&self) -> bool {
-        !matches!(self, Self::Null)
+        self.is_attested()
     }
 }
 

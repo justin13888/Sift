@@ -289,6 +289,19 @@ pub struct App {
     clock: Box<dyn sift_scheduler::clock::Clock>,
     /// What `arm_periodic` armed last time, so it can take it back rather than adding to it.
     armed: Vec<sift_scheduler::wheel::TimerId>,
+    /// FR-8's *load once* — **the one message in front of the user**.
+    ///
+    /// Keyed on the message rather than on a token because accepting re-renders, and a
+    /// re-render mints a new token and revokes the old one: an allowance held against the
+    /// token died with the click that granted it.
+    ///
+    /// One rather than a set, and that is the contract rather than a size optimisation.
+    /// `pipeline.md` says show-once *"applies to the message in front of the user and is not
+    /// written down anywhere"*, so opening a different message ends it — a set would have made
+    /// "once" mean "for the rest of the session, every time this message is opened", in every
+    /// window at once, which is a durable allowance nobody asked for. It is also bounded by
+    /// construction, in a process specified to run for weeks.
+    allowed_once_message: Option<LocalId>,
 }
 
 impl std::fmt::Debug for App {
@@ -339,6 +352,7 @@ impl App {
             wheel: sift_scheduler::wheel::Wheel::new(sift_foundation::limits::L31_WHEEL_SLACK),
             clock,
             armed: Vec::new(),
+            allowed_once_message: None,
         }
     }
 
@@ -1287,6 +1301,15 @@ impl App {
             .iter()
             .find(|(_, a)| a.id == id)
             .map(|(name, _)| name.clone())
+    }
+
+    /// FR-8 — the user accepted this message's withheld content for this session.
+    ///
+    /// Recorded against the message rather than the open document, because accepting
+    /// re-renders and a re-render replaces the token. It is deliberately not persisted:
+    /// "once" that outlived the process would be a durable allowance nobody asked for.
+    pub fn allow_remote_content_once(&mut self, id: LocalId) {
+        self.allowed_once_message = Some(id);
     }
 
     /// Whether the user has paused this account — D-95, per account.

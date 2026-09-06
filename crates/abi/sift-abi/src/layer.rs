@@ -224,6 +224,13 @@ pub(crate) struct OpenAttachments {
 /// that makes every address in it dead.
 #[derive(Debug)]
 pub(crate) struct OpenDocument {
+    /// The message this document renders.
+    ///
+    /// Held because FR-8's consent is a decision about the *message*: accepting re-renders,
+    /// and a re-render mints a new token, so an allowance recorded against the token would
+    /// not survive the click that granted it. A shell has only a token, so this is where the
+    /// token resolves back to what the user actually decided about.
+    pub(crate) message: sift_foundation::identity::LocalId,
     pub(crate) document: sift_app::document::Document,
     /// Row arrays are handed out as pointers into a contiguous slice, so the rows are built
     /// once when the document opens rather than per call — a per-call `Vec` would be freed

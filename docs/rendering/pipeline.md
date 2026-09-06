@@ -170,9 +170,11 @@ means when they want to see one newsletter.
 
 **"Always" is unavailable for an unauthenticated sender, and the interface MUST say so rather than
 quietly doing something weaker.** [Sender origin](sender-origin.md) requires the allowlist to key on the
-synthetic origin, and an origin that resolved from nothing better than a From header is null — there is no
-stable thing to key on, and keying on the displayed sender would be trivially forgeable, which is the
-whole of D-11's argument. So an unattested message offers *show once* and an explanation, and the one-time
+synthetic origin, and an origin that resolved from nothing better than a From header is **unauthenticated
+rather than null** — it has a domain, and that is worse than having none, because the thing there is to key
+on is one the sender wrote. Keying on it would be trivially forgeable, which is the whole of D-11's
+argument. Both states therefore refuse "always", by different routes: null has nothing to key on, and
+unauthenticated has something that cannot be trusted. So an unattested message offers *show once* and an explanation, and the one-time
 affordance is what makes that an acceptable answer rather than a refusal.
 
 All body resources MUST route through the resource broker. The body view has no direct network access

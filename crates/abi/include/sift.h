@@ -1544,6 +1544,29 @@ SiftStatus sift_document_withheld(SiftApp *app,
                                   SiftRows_SiftWithheld *out);
 
 /**
+ * FR-8 — the user allows this message's remote content, once or for this sender.
+ *
+ * **The two controls are different things and this is where the difference lives.**
+ * `durable` zero lets the document that is open fetch, and dies with its token, so
+ * re-opening the same message asks again. `durable` non-zero writes the sender into the
+ * allowance list and survives. A single flag serving both would silently make a transient
+ * choice permanent, which is the failure a user can neither see nor undo.
+ *
+ * The shell holds a token, never an origin. Which sender a durable allowance keys on is the
+ * layer's to resolve, from what authenticated the message — so a shell cannot name a sender
+ * it was not given, and cannot key an allowance on one that authenticated nothing. Where
+ * there is nothing to key on this **fails**, and the interface must not have offered the
+ * control: `SiftDocument::may_always_allow` is what says so before it is pressed.
+ *
+ * # Safety
+ * `app` must be valid; `token` must point to `token_len` bytes of UTF-8.
+ */
+SiftStatus sift_allow_remote_content(SiftApp *app,
+                                     const uint8_t *token,
+                                     size_t token_len,
+                                     uint8_t durable);
+
+/**
  * FR-30: every navigation target, with the destination the confirmation sheet must show.
  *
  * # Safety
