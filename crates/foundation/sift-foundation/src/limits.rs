@@ -261,6 +261,26 @@ pub const L27_IMAP_IDLE_REISSUE: Duration = Duration::from_secs(29 * 60);
 /// a probe to a detection host — Sift contacts no detection endpoint of any kind.
 pub const L28_PORTAL_REATTEMPT: Duration = Duration::from_secs(60);
 
+/// L-30 · The aligned interval at which an otherwise idle account polls for new mail.
+///
+/// **Aligned rather than periodic-from-arming.** Two accounts computing this against the
+/// wall clock land on the same instant without coordinating, which is the whole of how they
+/// share one wakeup instead of taking two — see `next_aligned`. NFR-11's budget is two
+/// wakeups per minute for the *application* under D-94, so a minute is the largest interval
+/// that leaves headroom for a flush fire in the same minute and the smallest that does not
+/// spend the budget on polling alone.
+///
+/// This is a floor on freshness rather than the only way mail arrives: where a provider
+/// offers practical push it is preferred, and this is what runs when it does not.
+pub const L30_SYNC_POLL: Duration = Duration::from_secs(60);
+
+/// L-31 · The scheduler's coalescing window.
+///
+/// Deadlines inside one window fire together, so this *is* the "this may fire late, batch
+/// it" hint D-25 exists to express, and it is handed to the platform timer as its leeway.
+/// Larger means fewer wakeups and later work.
+pub const L31_WHEEL_SLACK: Duration = Duration::from_secs(5);
+
 // ---------------------------------------------------------------------------
 // The register.
 // ---------------------------------------------------------------------------
@@ -545,6 +565,18 @@ pub const ALL: &[Limit] = &[
         bounds: "interval between reattempts while a captive portal is present",
         consequence: Deadline,
     },
+    Limit {
+        id: "L-30",
+        magnitude: Time(L30_SYNC_POLL),
+        bounds: "aligned interval at which an idle account polls for new mail",
+        consequence: Deadline,
+    },
+    Limit {
+        id: "L-31",
+        magnitude: Time(L31_WHEEL_SLACK),
+        bounds: "the scheduler's coalescing window, handed to the platform timer as leeway",
+        consequence: Deadline,
+    },
 ];
 
 /// Look a limit up by identifier.
@@ -559,12 +591,12 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn the_register_holds_l1_through_l29_exactly_once() {
-        // docs/limits.md says it owns L-1 through L-29. A gap here means a bound that
+    fn the_register_holds_every_identifier_the_document_owns_exactly_once() {
+        // docs/limits.md says it owns L-1 through L-31. A gap here means a bound that
         // exists in the specification and is enforced by nothing, or the reverse.
         let ids: BTreeSet<&str> = ALL.iter().map(|l| l.id).collect();
         assert_eq!(ids.len(), ALL.len(), "an identifier appears twice");
-        for n in 1..=29 {
+        for n in 1..=31 {
             let id = format!("L-{n}");
             assert!(
                 ids.contains(id.as_str()),
@@ -573,7 +605,7 @@ mod tests {
         }
         assert_eq!(
             ALL.len(),
-            29,
+            31,
             "an identifier is here and not in docs/limits.md"
         );
     }

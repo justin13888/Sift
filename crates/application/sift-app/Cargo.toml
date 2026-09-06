@@ -23,6 +23,11 @@ sift-store.workspace = true
 # FR-20's operator grammar. The parser is the index's; executing it is the application's.
 sift-index.workspace = true
 sift-sync.workspace = true
+# D-25's single timing wheel. The crate existed, was tested, and was reached by nothing: no
+# edge to it from here meant every periodic obligation in the specification — the aligned
+# poll, the queue flush, the backoff retry — had no caller, and mail arrived only when a
+# person did something. This is that edge.
+sift-scheduler.workspace = true
 sift-mutations.workspace = true
 sift-credentials.workspace = true
 # The container's registry is sealed like any other database, under a key derived from the

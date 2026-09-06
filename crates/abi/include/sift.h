@@ -231,6 +231,23 @@ typedef void (*SiftRun)(uint64_t ticket);
 typedef void (*SiftSchedule)(void *context, SiftRun run, uint64_t ticket);
 
 /**
+ * Arm a coalescing platform timer, and call `run(ticket)` on the main loop when it fires.
+ *
+ * **The leeway is the whole point.** D-25 rejects the async runtime's own timer precisely
+ * because it cannot tell the kernel "this may fire late, batch it with something else", and
+ * that hint is the entire mechanism by which wakeups coalesce. A shell that ignores
+ * `leeway_millis` and arms an exact timer satisfies this signature and fails NFR-11.
+ *
+ * On macOS this is a dispatch source timer with an explicit leeway; on Linux, an
+ * absolute-mode timer file descriptor.
+ */
+typedef void (*SiftArmTimer)(void *context,
+                             SiftRun run,
+                             uint64_t ticket,
+                             uint64_t delay_millis,
+                             uint64_t leeway_millis);
+
+/**
  * What the layer needs from the shell that the host callbacks do not carry.
  */
 typedef struct {
@@ -248,6 +265,15 @@ typedef struct {
    */
   SiftSchedule schedule;
   void *schedule_context;
+  /**
+   * D-25's platform timer, armed by the shell on the layer's behalf.
+   *
+   * It shares `schedule_context`: both are the same shell object, and a second context
+   * would be a second thing to keep alive for no gain. The layer computes *when* from its
+   * own wheel; the shell owns the one thing only it can do, which is asking the platform
+   * for a timer that is allowed to fire late.
+   */
+  SiftArmTimer arm_timer;
   /**
    * The OAuth client this bundle was configured with — empty where there is none.
    *
