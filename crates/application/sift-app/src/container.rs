@@ -416,20 +416,24 @@ impl Container {
                 let _ = std::fs::remove_file(PathBuf::from(p));
             }
         }
-        // The account's own settings, which are its and not the installation's. Before the
-        // row, because the row is what they reference.
-        self.registry
+        // **One transaction, which is what the schema comment above claims.** The settings
+        // reference the row, so they go first — and both go or neither does, or a failure
+        // between them leaves an account whose per-account decisions have been erased and
+        // which is otherwise intact.
+        let removal = self.registry.transaction().map_err(|e| e.to_string())?;
+        removal
             .execute(
                 "DELETE FROM account_setting WHERE account = ?1",
                 [id.as_u128().to_be_bytes().to_vec()],
             )
             .map_err(|e| e.to_string())?;
-        self.registry
+        removal
             .execute(
                 "DELETE FROM account WHERE id = ?1",
                 [id.as_u128().to_be_bytes().to_vec()],
             )
             .map_err(|e| e.to_string())?;
+        removal.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 

@@ -350,8 +350,17 @@ impl App {
             let capabilities = stored_capabilities(&account).unwrap_or_else(|| {
                 shape_named("rich").unwrap_or_else(|_| unreachable!("`rich` is a shape"))
             });
+            // **Made unique rather than allowed to collide.** A container written before the
+            // refusal above could hold two rows with one display name, and inserting both
+            // under it would drop the first — the same silent loss, arriving at every launch
+            // instead of once. The ordinal is what already distinguishes them and never
+            // repeats, so it is what the label borrows.
+            let mut label = row.display_name.clone();
+            if self.accounts.contains_key(&label) {
+                label = format!("{} ({})", row.display_name, row.ordinal.get());
+            }
             self.accounts.insert(
-                row.display_name.clone(),
+                label,
                 OpenAccount {
                     id: row.id,
                     kind: row.kind.clone(),
@@ -404,6 +413,15 @@ impl App {
         adapter: Live,
         kind: &str,
     ) -> Result<AccountId, String> {
+        // **The label is the handle, so two accounts cannot share one.** Every account-taking
+        // call names an account by it, and the map is keyed on it — so a second account under
+        // an existing label used to replace the first in memory while leaving its row in the
+        // registry, dropping a sealed store handle and a queue rebuilt from a journal, with
+        // nothing said and nothing to say it to. D-89 warns rather than refuses about the same
+        // *mailbox* being added twice; this is about the name, which is a different thing.
+        if self.accounts.contains_key(name) {
+            return Err(format!("an account named `{name}` already exists"));
+        }
         let capabilities = adapter.capabilities().clone();
         let id = self.create_account(name, capabilities, kind)?;
         self.accounts
@@ -875,11 +893,24 @@ impl App {
     /// The account has no provider behind it, or the walk failed. The adapter is returned to
     /// the account either way — a failed sync must not leave an account unreachable.
     pub fn sync(&mut self, name: &str, pages: usize) -> Result<SyncReport, String> {
+        // D-95's pause, honoured where the work is rather than only where the badge is. It was
+        // a flag that produced a condition and nothing else read it, so "Pause Syncing"
+        // painted the annunciator and the next gesture that reached this function synced
+        // anyway.
+        if self.is_paused(name) {
+            return Ok(SyncReport::default());
+        }
         // An account the last run left behind opens with no adapter: the store is sealed on
         // disk and its queue is rebuilt from the journal, but nothing reaches the provider.
         // Reconnecting here rather than at `open_container` is deliberate — it is a network
         // round trip, and a launch that waits on the network is the opposite of what a
         // resident mail client should do. This is already a network call.
+        if self.account(name)?.adapter.is_none() {
+            self.reconnect(name)?;
+        }
+        // Reconnect for the same reason `sync` does: an account the last run left behind opens
+        // with no adapter, and a person who triaged before the first sync of a session and
+        // then pressed send would be told Sift could not reach an account it can reach.
         if self.account(name)?.adapter.is_none() {
             self.reconnect(name)?;
         }
@@ -1067,6 +1098,18 @@ impl App {
     /// There is no such account, it has no provider behind it, or the journal refused the
     /// durable marker D-85 requires before a request goes out.
     pub fn flush(&mut self, name: &str) -> Result<Flushed, String> {
+        // A paused account holds its queue for the same reason a watched one does: the user
+        // asked it to stop. D-58 makes pause a policy tier everything resolves to, and the
+        // tier that still flushes is the network's rather than the user's.
+        if self.is_paused(name) {
+            return Ok(Flushed {
+                authorized: false,
+                held: self.account(name)?.queue.len(),
+                report: sift_mutations::flush::FlushReport::default(),
+                queued: self.account(name)?.queue.len(),
+                error: None,
+            });
+        }
         if !self.may_issue(name) {
             return Ok(Flushed {
                 authorized: false,
@@ -1121,6 +1164,13 @@ impl App {
             queued: account.queue.len(),
             error,
         })
+    }
+
+    /// Whether the user has paused this account — D-95, per account.
+    #[must_use]
+    pub fn is_paused(&self, name: &str) -> bool {
+        self.account_setting(name, "sync.paused")
+            .is_ok_and(|v| v == settings::Value::Flag(true))
     }
 
     /// How many intents are being held because writes are not authorized.
@@ -1200,9 +1250,7 @@ impl App {
         // it a condition of its own rather than a flag — the three pauses are three
         // conditions, because "you stopped this" and "the data cap stopped this" are answered
         // by the user differently.
-        let paused = self
-            .account_setting(name, "sync.paused")
-            .is_ok_and(|v| v == settings::Value::Flag(true));
+        let paused = self.is_paused(name);
         let account = self.account(name)?;
         if paused {
             applicable.push(AccountCondition::PausedByUser);
