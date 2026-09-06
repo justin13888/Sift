@@ -26,6 +26,13 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// The same, for the two facts the layer is given about this bundle's OAuth configuration.
     private var oauthClientID: [UInt8] = []
     private var registeredSchemes: [UInt8] = []
+    /// The platform timers the layer has asked for, by ticket.
+    ///
+    /// Held because a `DispatchSourceTimer` that nothing retains is cancelled when it is
+    /// deallocated, and a cancelled timer fires nothing — which would look exactly like a
+    /// wheel that stopped. Each is removed as it fires, so this holds at most one.
+    fileprivate var timers: [UInt64: DispatchSourceTimer] = [:]
+
     private var statusItem: NSStatusItem?
     private var windows: [MainWindowController] = []
 
@@ -83,6 +90,27 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
                             DispatchQueue.main.async { run?(ticket) }
                         },
                         schedule_context: nil,
+                        // D-25's platform timer, which is the one thing only a shell can do.
+                        // The layer decides *when* from its own wheel; this asks the platform
+                        // for a timer that is **allowed to fire late**, and that permission is
+                        // the entire mechanism by which wakeups coalesce. An exact timer here
+                        // would satisfy the signature and fail NFR-11.
+                        arm_timer: { _, run, ticket, delayMillis, leewayMillis in
+                            let timer = DispatchSource.makeTimerSource(queue: .main)
+                            timer.schedule(
+                                deadline: .now() + .milliseconds(Int(delayMillis)),
+                                leeway: .milliseconds(Int(leewayMillis))
+                            )
+                            timer.setEventHandler {
+                                // Released after it fires. A repeating source would be a
+                                // second schedule beside the wheel's, and the two would
+                                // disagree the moment an account was added.
+                                ApplicationShell.shared.timers.removeValue(forKey: ticket)
+                                run?(ticket)
+                            }
+                            ApplicationShell.shared.timers[ticket] = timer
+                            timer.resume()
+                        },
                         oauth_client_id: SiftStr(ptr: client.baseAddress, len: client.count),
                         registered_schemes: SiftStr(ptr: schemes.baseAddress, len: schemes.count)
                     )

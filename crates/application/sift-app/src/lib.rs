@@ -278,6 +278,17 @@ pub struct App {
     pub container: Option<container::Container>,
     next_intent: u128,
     next_ordinal: u16,
+    /// D-25's wheel. **One, for the whole application**, which is what makes an additional
+    /// account cost nothing at idle: its deadlines join fires that already exist rather than
+    /// adding their own. `cargo xtask invariants` forbids a per-account sleep loop everywhere
+    /// but in the scheduler crate, and this is the field that makes obeying it possible.
+    wheel: sift_scheduler::wheel::Wheel,
+    /// Boxed so a test can drive time by hand. A wheel whose only clock is the system's is
+    /// a wheel whose wiring can only be tested by waiting a minute, which is the kind of test
+    /// that gets marked ignored and then gets deleted.
+    clock: Box<dyn sift_scheduler::clock::Clock>,
+    /// What `arm_periodic` armed last time, so it can take it back rather than adding to it.
+    armed: Vec<sift_scheduler::wheel::TimerId>,
 }
 
 impl std::fmt::Debug for App {
@@ -297,6 +308,15 @@ impl Default for App {
 impl App {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_clock(Box::new(sift_scheduler::clock::SystemClock))
+    }
+
+    /// The same, with the clock the scheduler reads supplied.
+    ///
+    /// The only caller that passes anything but the system clock is a test that needs a
+    /// minute to pass without one elapsing.
+    #[must_use]
+    pub fn with_clock(clock: Box<dyn sift_scheduler::clock::Clock>) -> Self {
         Self {
             accounts: BTreeMap::new(),
             // On a platform with no backend this refuses every write, which is D-71 doing
@@ -314,6 +334,11 @@ impl App {
             container: None,
             next_intent: 0,
             next_ordinal: 0,
+            // L-31 is the coalescing window, and it is the same number the platform timer is
+            // given as its leeway — one value, so the structure and the hint cannot disagree.
+            wheel: sift_scheduler::wheel::Wheel::new(sift_foundation::limits::L31_WHEEL_SLACK),
+            clock,
+            armed: Vec::new(),
         }
     }
 
@@ -1168,6 +1193,93 @@ impl App {
         })
     }
 
+    /// Arm every account's periodic obligations on the one wheel.
+    ///
+    /// **Aligned, and both kinds on the same instant.** The poll and the flush for one
+    /// account land in one bucket, and every account's land on the same wall-clock multiple,
+    /// so five accounts at idle cost the fires of one. That is D-94's arithmetic made real:
+    /// an additional account is free as long as its work joins a fire that already exists.
+    ///
+    /// Idempotent by construction — it clears what it armed before re-arming, so a caller
+    /// that runs it after every account change cannot accumulate duplicate timers, which
+    /// would be a per-account sleep loop wearing the wheel's clothes.
+    pub fn arm_periodic(&mut self) {
+        use sift_scheduler::wheel::Work;
+
+        for id in std::mem::take(&mut self.armed) {
+            self.wheel.cancel(id);
+        }
+
+        let deadline = sift_scheduler::clock::next_aligned(
+            self.clock.as_ref(),
+            sift_foundation::limits::L30_SYNC_POLL,
+        );
+        let accounts: Vec<AccountId> = self.accounts.values().map(|a| a.id).collect();
+        for account in accounts {
+            self.armed
+                .push(self.wheel.arm(deadline, Some(account), Work::Sync));
+            self.armed.push(
+                self.wheel
+                    .arm(deadline, Some(account), Work::FlushMutations),
+            );
+        }
+    }
+
+    /// How long until the wheel's next fire, if anything is armed.
+    ///
+    /// The shell arms one platform timer for this and hands L-31 alongside it as the leeway,
+    /// which is the "this may fire late, batch it" hint D-25 exists to express. `None` means
+    /// nothing is scheduled and no timer should be armed at all — a resident process with
+    /// nothing to do takes no wakeups, which is the requirement rather than an optimisation.
+    #[must_use]
+    pub fn next_wake(&self) -> Option<core::time::Duration> {
+        let next = self.wheel.next_fire()?;
+        let now = self.clock.monotonic();
+        Some(next.since(now))
+    }
+
+    /// Fire everything due, do its work, and re-arm.
+    ///
+    /// A failure is recorded rather than propagated: one account that cannot reach its
+    /// provider must not stop the fire that four other accounts are sharing.
+    pub fn tick(&mut self) -> TickReport {
+        use sift_scheduler::wheel::Work;
+
+        let mut report = TickReport::default();
+        let due = self.wheel.fire_due(self.clock.monotonic());
+        for entry in due {
+            let Some(id) = entry.account else { continue };
+            let Some(name) = self.name_of(id) else {
+                continue;
+            };
+            match entry.kind {
+                Work::Sync => match self.sync(&name, 1) {
+                    Ok(_) => report.synced.push(name),
+                    Err(why) => report.failures.push((name, why)),
+                },
+                Work::FlushMutations => match self.flush(&name) {
+                    Ok(f) if f.report.issued > 0 => report.flushed.push(name),
+                    Ok(_) => {}
+                    Err(why) => report.failures.push((name, why)),
+                },
+                // The remaining kinds are armed by the paths that own them — a retry by the
+                // backoff curve, a watch renewal by the provider that holds the watch. Firing
+                // them from here would be this function deciding policy it does not own.
+                _ => {}
+            }
+        }
+        self.arm_periodic();
+        report
+    }
+
+    /// The label an identity is open under, if it is open at all.
+    fn name_of(&self, id: AccountId) -> Option<String> {
+        self.accounts
+            .iter()
+            .find(|(_, a)| a.id == id)
+            .map(|(name, _)| name.clone())
+    }
+
     /// Whether the user has paused this account — D-95, per account.
     #[must_use]
     pub fn is_paused(&self, name: &str) -> bool {
@@ -1387,4 +1499,15 @@ fn be_u128(bytes: &[u8]) -> u128 {
     let n = bytes.len().min(16);
     out[16 - n..].copy_from_slice(&bytes[..n]);
     u128::from_be_bytes(out)
+}
+
+/// What one wheel fire did.
+///
+/// Reported rather than logged, because FR-34's runtime panel is what makes "an account Sift
+/// is only watching has sent nothing" a thing a user can see rather than infer.
+#[derive(Debug, Default, Clone)]
+pub struct TickReport {
+    pub synced: Vec<String>,
+    pub flushed: Vec<String>,
+    pub failures: Vec<(String, String)>,
 }

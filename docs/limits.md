@@ -2,7 +2,7 @@
 
 Every numeric bound Sift enforces at runtime, in one place.
 
-**Owns:** L-1 through L-29.
+**Owns:** L-1 through L-31.
 
 **"Enforces at runtime" is the boundary, and it is narrower than the old wording.** This page previously
 claimed every numeric bound in the project, which reached two populations it does not own and should not.
@@ -114,6 +114,8 @@ does rather than how fast it does it.
 | **L-24** | Cap on reconnection and retry backoff | 15 minutes, with ±25% jitter | The cap and jitter [scheduling](runtime/scheduling.md) requires and does not supply, and the number NFR-38's "no retry storm on wake" rests on. The cap matches the longest aligned poll interval, so a backed-off account rejoins an existing wheel fire rather than adding one |
 | **L-27** | Interval at which an IMAP idle watch is re-issued | 29 minutes | Stated loosely as "roughly every 29 minutes" in [IMAP](mail/providers/imap.md). It is a bound rather than a preference: it sits below the protocol's own 30-minute expectation and below common network-address-translation timeouts, and exceeding it drops a watch silently |
 | **L-28** | Interval between reattempts while a captive portal is present | 60 seconds | The cadence in [network conditions](runtime/network-conditions.md)'s offline-portal tier. Under [D-96](runtime/network-conditions.md) it is a bounded reattempt of the account's own next operation rather than a probe to a detection host |
+| **L-30** | Aligned interval at which an idle account polls for new mail | 60 seconds | The cadence [scheduling](runtime/scheduling.md) requires and does not number. Aligned to the wall clock rather than to its own arming, so two accounts land on one instant without coordinating — which is how they share a wakeup instead of taking two. [D-94](runtime/scheduling.md) makes NFR-11's budget two wakeups per minute for the whole application, so a minute is the largest interval leaving room for a flush in the same minute and the smallest that does not spend the budget on polling alone. A floor on freshness rather than the only way mail arrives: push is preferred where a provider offers it |
+| **L-31** | The scheduler's coalescing window | 5 seconds | Deadlines inside one window fire together, so this *is* [D-25](runtime/scheduling.md)'s "this may fire late, batch it" hint expressed as structure, and it is what the platform timer is given as its leeway. Larger means fewer wakeups and later work |
 | **L-19** | Time the pressure signal must stay clear before a shed tier is released | 60 seconds | The hysteresis [D-93](runtime/memory-pressure.md) requires. Without it a system oscillating around the threshold reparses the 40 MB filter engine on every crossing. One value serves every tier, which that decision records as its weakest point |
 
 ## Changing a limit

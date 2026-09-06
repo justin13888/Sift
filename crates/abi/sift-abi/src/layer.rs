@@ -41,6 +41,23 @@ pub type SiftRun = extern "C" fn(ticket: u64);
 /// call that produced it, which is the reentrancy D-48 forbids outright.
 pub type SiftSchedule = extern "C" fn(context: *mut core::ffi::c_void, run: SiftRun, ticket: u64);
 
+/// Arm a coalescing platform timer, and call `run(ticket)` on the main loop when it fires.
+///
+/// **The leeway is the whole point.** D-25 rejects the async runtime's own timer precisely
+/// because it cannot tell the kernel "this may fire late, batch it with something else", and
+/// that hint is the entire mechanism by which wakeups coalesce. A shell that ignores
+/// `leeway_millis` and arms an exact timer satisfies this signature and fails NFR-11.
+///
+/// On macOS this is a dispatch source timer with an explicit leeway; on Linux, an
+/// absolute-mode timer file descriptor.
+pub type SiftArmTimer = extern "C" fn(
+    context: *mut core::ffi::c_void,
+    run: SiftRun,
+    ticket: u64,
+    delay_millis: u64,
+    leeway_millis: u64,
+);
+
 /// What the layer needs from the shell that the host callbacks do not carry.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -55,6 +72,13 @@ pub struct SiftInit {
     /// D-48's hop.
     pub schedule: SiftSchedule,
     pub schedule_context: *mut core::ffi::c_void,
+    /// D-25's platform timer, armed by the shell on the layer's behalf.
+    ///
+    /// It shares `schedule_context`: both are the same shell object, and a second context
+    /// would be a second thing to keep alive for no gain. The layer computes *when* from its
+    /// own wheel; the shell owns the one thing only it can do, which is asking the platform
+    /// for a timer that is allowed to fire late.
+    pub arm_timer: SiftArmTimer,
     /// The OAuth client this bundle was configured with — empty where there is none.
     ///
     /// **Configuration, not a secret.** A public client's identifier appears in every
@@ -91,6 +115,16 @@ pub(crate) struct Layer {
     pub(crate) host: SiftHostCallbacks,
     pub(crate) schedule: SiftSchedule,
     pub(crate) schedule_context: usize,
+    /// D-25's platform timer. Shares `schedule_context`.
+    pub(crate) arm_timer: SiftArmTimer,
+    /// Whether a platform timer is outstanding.
+    ///
+    /// **One at a time, or an account added is a wakeup added.** Every path that changes what
+    /// is armed — initialization, adding an account, opening a container — has to make sure a
+    /// timer exists, and without this each of them would arm its own. Five accounts added in
+    /// one session would then be five timers firing a second apart, which is precisely the
+    /// per-account sleep loop the wheel exists to replace.
+    pub(crate) timer_pending: std::sync::atomic::AtomicBool,
     /// Observation handle to the shell's callback for it.
     pub(crate) sinks: Mutex<BTreeMap<u64, Sink>>,
     /// Open documents, by token.
@@ -219,6 +253,8 @@ unsafe impl Sync for Layer {}
 pub(crate) enum Task {
     /// Deliver whatever the session has to say.
     Deliver { layer: usize },
+    /// A wheel fire came due. Do its work, then re-arm for the next one.
+    Tick { layer: usize },
 }
 
 struct Slab {
@@ -255,6 +291,56 @@ pub(crate) fn post(layer: &Layer, task: Task) {
         layer.schedule_context as *mut core::ffi::c_void,
         crate::entry::sift_run_scheduled,
         ticket,
+    );
+}
+
+/// Arm the platform timer for the layer's next wheel fire.
+///
+/// **Nothing armed means no timer at all.** A resident process with no work outstanding must
+/// take no wakeups, so an absent deadline arms nothing rather than arming a poll that would
+/// wake the machine to discover there was nothing to do.
+pub(crate) fn ensure_timer(layer: &Layer) {
+    use std::sync::atomic::Ordering;
+    if layer.timer_pending.load(Ordering::SeqCst) {
+        // One is already outstanding, and the fire it belongs to re-arms from the wheel as it
+        // finds it then. Arming a second here would add a wakeup to say nothing new.
+        return;
+    }
+    let next = {
+        let Ok(session) = layer.session.lock() else {
+            return;
+        };
+        session.app().next_wake()
+    };
+    if let Some(delay) = next {
+        post_timer(layer, delay);
+    }
+}
+
+pub(crate) fn post_timer(layer: &Layer, delay: core::time::Duration) {
+    layer
+        .timer_pending
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let ticket = {
+        let Ok(mut slab) = slab().lock() else {
+            return;
+        };
+        let ticket = slab.next;
+        slab.next += 1;
+        slab.tasks.insert(
+            ticket,
+            Task::Tick {
+                layer: core::ptr::from_ref(layer) as usize,
+            },
+        );
+        ticket
+    };
+    (layer.arm_timer)(
+        layer.schedule_context as *mut core::ffi::c_void,
+        crate::entry::sift_run_scheduled,
+        ticket,
+        u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+        u64::try_from(sift_foundation::limits::L31_WHEEL_SLACK.as_millis()).unwrap_or(u64::MAX),
     );
 }
 

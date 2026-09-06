@@ -1698,6 +1698,7 @@ dependencies = [
  "sift-pipeline",
  "sift-provider",
  "sift-registry",
+ "sift-scheduler",
  "sift-store",
  "sift-sync",
 ]
