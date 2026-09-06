@@ -131,12 +131,16 @@ Sift checks the registration again at launch, and refuses to start a sign-in whe
 does not claim the scheme its client requires — before opening a browser, rather than after you
 have granted consent.
 
-**3. Watch before you write.** The account is added read-only. Let it sync, read some mail,
-archive something, then open **Runtime** (turn it on in Settings first — it is off by default)
-and look at the queue: every intent should read `Pending`, and the window says so in a sentence.
-When you are satisfied, enable writes for that account. Sift will then be able to archive, move,
-flag, label, mark read, report junk, and move messages to Gmail's own Trash. It can never
-permanently delete one, and it can never send one.
+**3. Watch before you write.** The account is added read-only — [D-110](docs/mail/mutations.md).
+Let it sync, read some mail, archive something, then open **Runtime** (turn it on in Settings
+first — it is off by default) and look at the queue: every intent should read `Pending`, and the
+window says so in a sentence.
+
+When you are satisfied, tick **Sift may change this mailbox** in that same window and press
+**Send Queued Changes**. Sift can then archive, move, flag, label, mark read, report junk, and
+move messages to Gmail's own Trash. It can never permanently delete one, and it can never send
+one. Untick it and anything not already issued stops again; what has left cannot be recalled,
+and Sift does not pretend otherwise.
 
 The two native shells are [`crates/shells/sift-gtk`](crates/shells/sift-gtk) and
 [`shells/macos`](shells/macos/README.md), built by `mise run linux` and `mise run macos`.

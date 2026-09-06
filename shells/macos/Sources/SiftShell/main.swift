@@ -13,9 +13,9 @@ application.delegate = ApplicationShell.shared
 // `.regular` while any window is open and lowers it again when the last one closes, which is
 // what makes "until one opens" true rather than aspirational.
 //
-// Note what that means today: `hasAnyAccount()` is a stub answering false, so every launch
-// takes the add-account branch and opens a window immediately. The window-less accessory state
-// is reached by closing it, not by starting.
+// Note what that means today: a launch opens a window either way — the mail if the container
+// holds an account, the add-account screen if it does not. The window-less accessory state is
+// reached by closing it, not by starting.
 //
 // Background residency itself is registered through the platform's own per-user mechanism — a
 // login item, never a system-wide service and never with elevated privileges.

@@ -220,6 +220,7 @@ as such"*.
 | Watched folder set | the inbox and the account's special-use folders | [FR-43](../runtime/scheduling.md) |
 | Per-folder notification rules | inherited from the installation default at account creation | [FR-23](ui-shell.md) |
 | Paused | not paused, including for an account added while others are paused | [D-95](../runtime/network-conditions.md) |
+| Write authorisation | **off** — the account is watched and not written to | [D-110](../mail/mutations.md), and the control is beside the queue it releases rather than here |
 | Per-sender remote-content allowlist | empty | [FR-8](../rendering/pipeline.md) — **security state**, and presented as such rather than as a preference list |
 | Per-sender dark-mode choices | empty | [FR-31](../rendering/dark-mode.md) |
 

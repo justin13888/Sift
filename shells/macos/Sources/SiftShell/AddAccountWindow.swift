@@ -25,7 +25,22 @@ import CSift
 final class AddAccountWindow: NSWindowController {
     private let app: OpaquePointer
     private let onAdded: () -> Void
+    /// Told when the flow ends, added or not, so the shell releases this controller — and so a
+    /// callback arriving afterwards is not handed to a screen that is gone.
+    private let onDismissed: () -> Void
     private let status = NSTextField(labelWithString: "")
+    /// A sheet has no chrome, so it needs a way out that a window of its own gets from the
+    /// platform. Hidden in the window frame, where the close button already says this.
+    private let dismissButton = NSButton(title: "Not Now", target: nil, action: nil)
+    /// Ends the flow exactly once. `close()` re-enters through the window delegate.
+    private var finished = false
+    /// What to call this mailbox.
+    ///
+    /// **A name the user chooses, because it is the handle.** Every account-taking call across
+    /// the boundary names an account by this label, so a hardcoded one — this was `"Mail"` —
+    /// makes a second account collide with the first and gives a person no way to tell two
+    /// mailboxes apart in the sidebar they both appear in.
+    private let nameField = NSTextField(string: "")
 
     /// The OAuth client this build was configured with, from the bundle.
     ///
@@ -40,9 +55,14 @@ final class AddAccountWindow: NSWindowController {
     /// Held for the life of the flow, because the session is cancelled when it is released.
     private var session: ASWebAuthenticationSession?
 
-    init(app: OpaquePointer, onAdded: @escaping () -> Void) {
+    init(
+        app: OpaquePointer,
+        onAdded: @escaping () -> Void,
+        onDismissed: @escaping () -> Void
+    ) {
         self.app = app
         self.onAdded = onAdded
+        self.onDismissed = onDismissed
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 620, height: 560),
             styleMask: [.titled, .closable, .miniaturizable],
@@ -50,9 +70,53 @@ final class AddAccountWindow: NSWindowController {
         window.title = "Add an Account"
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        window.delegate = self
         window.contentView = build()
         window.center()
     }
+
+    /// D-97: **a window of its own on first run, a sheet on the window that started it.**
+    ///
+    /// The same screen in the frame that fits where it was asked for, rather than two
+    /// implementations of one flow. The account-less state has no window to attach to; adding
+    /// a second account always does.
+    func present(over host: NSWindow?) {
+        guard let window else { return }
+        if let host, host !== window {
+            dismissButton.isHidden = false
+            host.beginSheet(window) { _ in }
+        } else {
+            dismissButton.isHidden = true
+            showWindow(nil)
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Bring a flow already in progress forward rather than starting a second one — two
+    /// authorizations in flight is two PKCE verifiers and one of them cannot be returned to.
+    func raise() {
+        guard let window else { return }
+        (window.sheetParent ?? window).makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// End the flow, in whichever frame it was presented in.
+    private func finish(added: Bool) {
+        guard !finished else { return }
+        finished = true
+        // The session is cancelled when it is released, and a flow that has ended holds none.
+        session = nil
+        if let window, let host = window.sheetParent {
+            host.endSheet(window)
+            window.orderOut(nil)
+        } else {
+            close()
+        }
+        if added { onAdded() }
+        onDismissed()
+    }
+
+    @objc private func dismissWithoutAdding() { finish(added: false) }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
@@ -94,6 +158,14 @@ final class AddAccountWindow: NSWindowController {
         disclosure.font = .preferredFont(forTextStyle: .callout)
         disclosure.preferredMaxLayoutWidth = 560
 
+        nameField.placeholderString = "Work, Personal, …"
+        nameField.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        let nameLabel = NSTextField(labelWithString: "Call this account")
+        nameLabel.font = .preferredFont(forTextStyle: .body)
+        let naming = NSStackView(views: [nameLabel, nameField])
+        naming.orientation = .horizontal
+        naming.spacing = 10
+
         status.font = .preferredFont(forTextStyle: .callout)
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byWordWrapping
@@ -108,6 +180,11 @@ final class AddAccountWindow: NSWindowController {
             title: "Look Around First", target: self, action: #selector(useFixtures))
         fixtures.bezelStyle = .rounded
 
+        dismissButton.bezelStyle = .rounded
+        dismissButton.target = self
+        dismissButton.action = #selector(dismissWithoutAdding)
+        dismissButton.isHidden = true
+
         if AddAccountWindow.clientID == nil {
             connect.isEnabled = false
             status.stringValue = """
@@ -120,11 +197,11 @@ final class AddAccountWindow: NSWindowController {
                 "Sift will open your browser to sign in. The reply comes back to Sift directly."
         }
 
-        let buttons = NSStackView(views: [fixtures, connect])
+        let buttons = NSStackView(views: [dismissButton, fixtures, connect])
         buttons.orientation = .horizontal
         buttons.spacing = 12
 
-        let stack = NSStackView(views: [heading, body, disclosure, status, buttons])
+        let stack = NSStackView(views: [heading, body, disclosure, naming, status, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 18
@@ -238,7 +315,7 @@ final class AddAccountWindow: NSWindowController {
     /// answered rather than dropped.
     func callbackArrived(_ url: String) {
         var id = SiftId.zero
-        let name = "Mail"
+        let name = chosenName()
         let ok = SiftText.withBytes(url) { urlPtr, urlLen in
             SiftText.withBytes(name) { namePtr, nameLen in
                 sift_complete_authorization(
@@ -252,13 +329,35 @@ final class AddAccountWindow: NSWindowController {
             status.stringValue = "That sign-in did not complete. You can try again."
             return
         }
-        close()
-        onAdded()
+        // **The first sync happens here, or the account a person just signed in to shows them
+        // an empty list.** Nothing else asks: there is no periodic scheduler across this
+        // boundary yet, so an account that is never synced from a gesture is never synced.
+        //
+        // It blocks this thread, which is stated rather than hidden. The walk belongs on a
+        // worker under D-19 and moving it there changes nothing a shell can see, because every
+        // delivery already arrives through D-48's hop rather than out of this call.
+        status.stringValue = "Signed in. Fetching your mail…"
+        status.displayIfNeeded()
+        _ = SiftText.withBytes(name) { ptr, len in
+            sift_sync_account(UnsafeMutablePointer(app), ptr, len)
+        }
+        finish(added: true)
+    }
+
+    /// The label to add the account under.
+    ///
+    /// Empty is a name too, and it is the one that would make the account unnameable — so it
+    /// is defaulted rather than refused. A person who typed nothing gets something they can
+    /// rename later, not a dialog telling them what they did wrong.
+    private func chosenName() -> String {
+        let typed = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return typed.isEmpty ? "Mail" : typed
     }
 
     @objc private func useFixtures() {
         var id = SiftId.zero
-        let label = "fixtures"
+        let label = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty ? "fixtures" : chosenName()
         let added = SiftText.withBytes(label) { ptr, len in
             sift_add_replayed_account(UnsafeMutablePointer(app), ptr, len, &id) == Ok
         }
@@ -269,8 +368,7 @@ final class AddAccountWindow: NSWindowController {
         _ = SiftText.withBytes(label) { ptr, len in
             sift_sync_account(UnsafeMutablePointer(app), ptr, len)
         }
-        close()
-        onAdded()
+        finish(added: true)
     }
 }
 
@@ -283,5 +381,15 @@ extension AddAccountWindow: ASWebAuthenticationPresentationContextProviding {
     /// one: the sign-in belongs to the account being added.
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         window ?? NSApp.keyWindow ?? NSWindow()
+    }
+}
+
+// MARK: - A window the user closed is a flow they left
+
+extension AddAccountWindow: NSWindowDelegate {
+    /// The close button, in the window frame. Without this the controller would be held after
+    /// its screen had gone, and the next `Add Account` would raise a window nobody can see.
+    func windowWillClose(_ notification: Notification) {
+        finish(added: false)
     }
 }

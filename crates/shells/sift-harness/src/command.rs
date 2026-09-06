@@ -577,11 +577,9 @@ fn flush(app: &mut App, args: &[&str]) -> Output {
         [name, "--leave-in-flight"] => ((*name).to_owned(), true),
         _ => return Err("flush <account> [--leave-in-flight]".to_owned()),
     };
-    // The read-only posture, checked **before** anything is issued and before the adapter is
-    // even taken. Everything up to here already happened: the intents were built, checked
-    // against declared capabilities, written durably and applied optimistically. This is the
-    // one step that cannot be taken back, and it is the one step an unauthorized account
-    // does not take.
+    // The read-only posture, and the account with no provider behind it, are the two branches
+    // this shell keeps. Everything after them is `App::flush`, which is where it belongs: both
+    // shells need it and D-17 makes a capability that exists in only one of them a defect.
     if !app.may_issue(&name) {
         let held = app.held(&name);
         return Ok(vec![
@@ -592,11 +590,12 @@ fn flush(app: &mut App, args: &[&str]) -> Output {
             ),
         ]);
     }
-    let account = app.account(&name)?;
 
     // An account with no provider behind it: the queue's own state machine, driven without a
     // wire. This is what the planner tests use, and it is deliberately still a real queue.
-    let Some(adapter) = account.adapter.take() else {
+    // It stays here because it is a test affordance rather than something a person does.
+    if app.account(&name)?.adapter.is_none() {
+        let account = app.account(&name)?;
         let limit = account.capabilities.batch_size();
         let batch: Vec<u128> = account
             .queue
@@ -625,50 +624,21 @@ fn flush(app: &mut App, args: &[&str]) -> Output {
             account.queue.len()
         ));
         return Ok(out);
-    };
+    }
 
     if in_flight {
         // Against a real provider there is nothing to stop between the marker and the
         // request: the whole point of D-85's ordering is that the two are not separable from
         // outside. The crash path is driven with `restart` instead.
-        account.adapter = Some(adapter);
         return Err(
-            "--leave-in-flight is for an account with no provider; use `restart` to drive              what a crash leaves"
+            "--leave-in-flight is for an account with no provider; use `restart` to drive \
+             what a crash leaves"
                 .to_owned(),
         );
     }
 
-    // The durable half of D-85's marker. It is a callback because the journal is the store's
-    // and the queue cannot reach it — the two sit side by side in the application layer and
-    // D-59 gives neither an edge to the other.
-    let journal = &account.store.journal;
-    let mut mark_issued = |ids: &[u128]| -> Result<(), String> {
-        let transaction = journal.unchecked_transaction().map_err(|e| e.to_string())?;
-        for id in ids {
-            transaction
-                .execute(
-                    "UPDATE intent SET state = 'Issued' WHERE id = ?1",
-                    rusqlite::params![id.to_be_bytes().to_vec()],
-                )
-                .map_err(|e| e.to_string())?;
-        }
-        transaction.commit().map_err(|e| e.to_string())
-    };
-
-    let resolve = sift_app::Remote(&account.store.store);
-    let outcome = sift_mutations::flush::flush_once(
-        adapter.as_ref(),
-        &mut account.queue,
-        &resolve,
-        &mut mark_issued,
-    );
-    account.adapter = Some(adapter);
-
-    let (report, failure) = match outcome {
-        Ok(report) => (report, None),
-        Err(failure) => (failure.report.clone(), Some(failure.error)),
-    };
-
+    let flushed = app.flush(&name)?;
+    let report = &flushed.report;
     let mut out = vec![format!(
         "{} issued: {} applied, {} refused, {} deferred, {} reconciling, {} quarantined",
         report.issued,
@@ -683,10 +653,10 @@ fn flush(app: &mut App, args: &[&str]) -> Output {
             "the provider stated {delay} ms — a deadline on the wheel, never a sleep"
         ));
     }
-    if let Some(error) = failure {
+    if let Some(error) = flushed.error {
         out.push(format!("failed: {error}"));
     }
-    out.push(format!("{} still queued", account.queue.len()));
+    out.push(format!("{} still queued", flushed.queued));
     Ok(out)
 }
 

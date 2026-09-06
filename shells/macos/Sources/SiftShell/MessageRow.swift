@@ -49,14 +49,22 @@ struct MessageRow: Equatable {
         return String(decoding: UnsafeBufferPointer(start: ptr, count: s.len), as: UTF8.self)
     }
 
-    static func == (a: MessageRow, b: MessageRow) -> Bool {
-        withUnsafeBytes(of: a.id.bytes) { l in
-            withUnsafeBytes(of: b.id.bytes) { r in l.elementsEqual(r) }
-        }
-    }
+    static func == (a: MessageRow, b: MessageRow) -> Bool { a.id.same(as: b.id) }
 }
 
 extension SiftId {
+    /// Sixteen bytes, compared as sixteen bytes.
+    ///
+    /// **A method rather than `Equatable`.** Conforming an imported C type to a protocol it
+    /// does not declare is a conformance that breaks the day the header grows its own, and
+    /// this is a shell rather than the owner of that header. Comparing the hex key instead
+    /// would allocate two strings to answer a question about memory.
+    func same(as other: SiftId) -> Bool {
+        withUnsafeBytes(of: bytes) { l in
+            withUnsafeBytes(of: other.bytes) { r in l.elementsEqual(r) }
+        }
+    }
+
     /// A stable key for a dictionary or a selection set.
     var key: String {
         withUnsafeBytes(of: bytes) { raw in

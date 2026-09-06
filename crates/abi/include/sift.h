@@ -332,6 +332,151 @@ typedef struct {
 } SiftUndoable;
 
 /**
+ * D-49's eight conditions, in precedence order. Lower is worse.
+ *
+ * A `#[repr(transparent)]` newtype with constants rather than a C enum, because cbindgen
+ * emits an enum as both a tagged type and a typedef and Swift then sees the name twice.
+ */
+typedef uint32_t SiftCondition;
+/**
+ * FR-2. **The one condition that must reach the user with no window open.**
+ */
+#define SiftCondition_NEEDS_AUTHENTICATION 0
+/**
+ * Also what a full disk produces: mutations stop rather than being applied optimistically
+ * to a store Sift cannot write.
+ */
+#define SiftCondition_STORAGE_UNAVAILABLE 1
+/**
+ * FR-22. Never resumes on its own, which is why it is not the same as the next one.
+ */
+#define SiftCondition_PAUSED_BY_USER 2
+/**
+ * FR-36. Resumes when the accounting period rolls over.
+ */
+#define SiftCondition_PAUSED_BY_DATA_CAP 3
+/**
+ * **Progress, not a fault.** The user action is nothing, and presenting it as a fault
+ * would be dishonest.
+ */
+#define SiftCondition_RECOVERING 4
+/**
+ * NFR-29. A capability went away, or resynchronization has no efficient path.
+ */
+#define SiftCondition_DEGRADED 5
+/**
+ * A quarantined intent, or triage held on an account that is watched but not written to.
+ */
+#define SiftCondition_ATTENTION 6
+/**
+ * Draws nothing.
+ */
+#define SiftCondition_HEALTHY 7
+
+/**
+ * One account, as a shell needs to see it.
+ *
+ * **The label is the handle.** Every account-taking entry point across this boundary names an
+ * account by the label it was added under, and until this existed nothing said what those
+ * labels were — so a shell could add an account and then never reach it again, and the
+ * runtime panel had to ask the user to type one. D-89 makes the identity Sift's own; the
+ * label is what a person calls it and what the container recorded.
+ */
+typedef struct {
+  /**
+   * D-89's Sift-assigned identity — the anchor a message-list observation takes.
+   */
+  SiftId id;
+  /**
+   * What the account was added as, and what every other entry point takes.
+   */
+  SiftStr name;
+  /**
+   * What the container recorded so a later run knows how to reconnect it. **Not something
+   * to branch on**: the provider model plans against declared capabilities, and this is a
+   * name for a reconnection route rather than a provider a shell may reason about.
+   */
+  SiftStr kind;
+  /**
+   * D-49's single condition for this account.
+   */
+  SiftCondition condition;
+  /**
+   * Whether Sift may change this mailbox. An account is added watching and nothing else,
+   * and this is the flag that says so.
+   */
+  uint8_t writes_enabled;
+  /**
+   * Intents recorded and held because writes are not authorized. Zero once they are.
+   */
+  uint32_t held;
+} SiftAccount;
+
+/**
+ * A contiguous, borrowed array of fixed-layout records.
+ *
+ * The alternative — an opaque row handle with a per-field accessor — was excluded
+ * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
+ * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
+ * hundred thousand boundary crossings per fling, against one delivery.
+ *
+ * # Safety
+ *
+ * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
+ * pointing into layer-owned storage with the same lifetime.
+ */
+typedef struct {
+  const SiftAccount *ptr;
+  size_t len;
+} SiftRows_SiftAccount;
+
+/**
+ * What one turn of the flush did.
+ *
+ * **`authorized` is not a failure.** An account that is only being watched has a queue that
+ * grows and sends nothing, and that is the state the user chose — so it crosses as a result
+ * with a count in it rather than as an error, which is what lets a surface say *nothing has
+ * been sent, and nothing will be until you say so* instead of drawing a fault.
+ */
+typedef struct {
+  /**
+   * Zero where writes are not authorized for this account. Nothing was issued.
+   */
+  uint8_t authorized;
+  /**
+   * Intents held because writes are not authorized. Zero once they are.
+   */
+  uint32_t held;
+  uint32_t issued;
+  uint32_t applied;
+  /**
+   * The provider refused, in its own terms. Settled: retrying changes nothing.
+   */
+  uint32_t refused;
+  /**
+   * Left for the scheduler to try again.
+   */
+  uint32_t deferred;
+  /**
+   * The request went out and no answer came back — D-85's `Reconciling`.
+   */
+  uint32_t reconciling;
+  /**
+   * Held rather than executed: unrecognised, or its gating capability has gone away.
+   */
+  uint32_t quarantined;
+  /**
+   * What is still queued afterwards.
+   */
+  uint32_t queued;
+  /**
+   * Whether the flush ended in a stated failure. **The state, not the sentence** — D-56
+   * keeps prose on the shell's side of this boundary.
+   */
+  uint8_t failed;
+} SiftFlush;
+
+/**
  * A message row, as the list receives it.
  *
  * **Fixed layout, and the text fields are pointers into layer-owned storage valid for the
@@ -555,48 +700,6 @@ typedef struct {
   const SiftStr *ptr;
   size_t len;
 } SiftRows_SiftStr;
-
-/**
- * D-49's eight conditions, in precedence order. Lower is worse.
- *
- * A `#[repr(transparent)]` newtype with constants rather than a C enum, because cbindgen
- * emits an enum as both a tagged type and a typedef and Swift then sees the name twice.
- */
-typedef uint32_t SiftCondition;
-/**
- * FR-2. **The one condition that must reach the user with no window open.**
- */
-#define SiftCondition_NEEDS_AUTHENTICATION 0
-/**
- * Also what a full disk produces: mutations stop rather than being applied optimistically
- * to a store Sift cannot write.
- */
-#define SiftCondition_STORAGE_UNAVAILABLE 1
-/**
- * FR-22. Never resumes on its own, which is why it is not the same as the next one.
- */
-#define SiftCondition_PAUSED_BY_USER 2
-/**
- * FR-36. Resumes when the accounting period rolls over.
- */
-#define SiftCondition_PAUSED_BY_DATA_CAP 3
-/**
- * **Progress, not a fault.** The user action is nothing, and presenting it as a fault
- * would be dishonest.
- */
-#define SiftCondition_RECOVERING 4
-/**
- * NFR-29. A capability went away, or resynchronization has no efficient path.
- */
-#define SiftCondition_DEGRADED 5
-/**
- * A quarantined intent, or triage held on an account that is watched but not written to.
- */
-#define SiftCondition_ATTENTION 6
-/**
- * Draws nothing.
- */
-#define SiftCondition_HEALTHY 7
 
 /**
  * What the badge draws.
@@ -992,6 +1095,64 @@ SiftStatus sift_undoable(SiftApp *app, SiftUndoable *out);
 uint32_t sift_account_count(SiftApp *app);
 
 /**
+ * Every account the container holds.
+ *
+ * The rows are borrowed for the duration of the call, like every other row array here, and
+ * the text behind them lives in the layer until the next call replaces it.
+ *
+ * # Safety
+ * `app` and `out` must be valid.
+ */
+SiftStatus sift_accounts(SiftApp *app, SiftRows_SiftAccount *out);
+
+/**
+ * Authorize, or withdraw authorization for, writes to one account.
+ *
+ * **An account is added watching and nothing else**, and this is the only thing that changes
+ * it. Until it existed, triage on a macOS account was journaled durably, applied
+ * optimistically, and could never be issued — the posture was settable from the test harness
+ * and from nowhere a person could reach.
+ *
+ * Withdrawing takes effect immediately for anything not yet issued. Intents already on the
+ * wire are not recalled: a request that has left cannot be unsent, and pretending otherwise
+ * is the one lie a mutation queue must not tell.
+ *
+ * # Safety
+ * `app` must be valid; `label` must point to `label_len` bytes of UTF-8.
+ */
+SiftStatus sift_set_writes_enabled(SiftApp *app,
+                                   const uint8_t *label,
+                                   size_t label_len,
+                                   uint8_t enabled);
+
+/**
+ * Send what is queued for one account, once.
+ *
+ * **This blocks the calling thread**, which is a limitation rather than a design, and the same
+ * one [`sift_sync_account`] carries: the work belongs on a worker under D-19, and moving it
+ * there changes nothing a shell can see because every delivery already arrives through D-48's
+ * hop rather than out of this call.
+ *
+ * # Safety
+ * `app` and `out` must be valid; `label` must point to `label_len` bytes of UTF-8.
+ */
+SiftStatus sift_flush_account(SiftApp *app, const uint8_t *label, size_t label_len, SiftFlush *out);
+
+/**
+ * FR-15 — reverse the last reversible gesture.
+ *
+ * **Not an action.** `undo.last-gesture` is in D-98's register and has no intent behind it, so
+ * invoking it through [`sift_invoke_action`] returns success and does nothing — which is what
+ * the undo toast was wired to. The reversal is a gesture of its own shape: it acts over
+ * D-85's undo group rather than over a message, so a bulk operation reverses as the one
+ * gesture FR-17 promises.
+ *
+ * # Safety
+ * `app` and `out` must be valid.
+ */
+SiftStatus sift_undo_last(SiftApp *app, SiftGesture *out);
+
+/**
  * The URI scheme this client's authorization callback comes back on — D-36 and D-109.
  *
  * # Why a shell asks rather than derives
@@ -1057,6 +1218,12 @@ SiftStatus sift_complete_authorization(SiftApp *app,
 /**
  * FR-19, FR-20 and FR-21 — search, with the interpretation the user is shown.
  *
+ * `account` narrows it to one account, and zero is every account — the same anchor
+ * [`sift_observe_messages`] takes, so a window that is looking at one mailbox can search the
+ * one it is looking at. FR-20's *narrow to this account* is a scope rather than a query term:
+ * spelling it as an operator would mean parsing, translating and explaining a word for
+ * something the shell already knows.
+ *
  * **The interpretation crosses the boundary as a result, not as a debug aid.** A query that
  * found nothing and one that was misread look identical from the results alone, and
  * `form:alice` is a plausible typo for `from:alice`. So is the caveat list: empty results and
@@ -1070,6 +1237,7 @@ SiftStatus sift_complete_authorization(SiftApp *app,
 SiftStatus sift_search(SiftApp *app,
                        const uint8_t *query,
                        size_t query_len,
+                       SiftId account,
                        uint32_t limit,
                        SiftSearch *out);
 
@@ -1097,6 +1265,45 @@ SiftStatus sift_set_setting(SiftApp *app,
                             size_t key_len,
                             const uint8_t *value,
                             size_t value_len);
+
+/**
+ * Record an account setting — D-101's other table.
+ *
+ * **Separate from [`sift_set_setting`] because the scope split is the storage split.** An
+ * account setting goes with the account when it is removed and an installation setting does
+ * not, and a single entry point taking a key would have to guess which table a key belongs to
+ * from the key itself — which is exactly the ambiguity the two tables exist to remove.
+ *
+ * The two security-state rows are refused here as they are there: the per-sender lists are
+ * records of decisions the user made in context, shown and revoked where the decision was
+ * made rather than bulk-edited in a screen away from any message.
+ *
+ * # Safety
+ * `app` must be valid; every string must point to its length in UTF-8.
+ */
+SiftStatus sift_set_account_setting(SiftApp *app,
+                                    const uint8_t *label,
+                                    size_t label_len,
+                                    const uint8_t *key,
+                                    size_t key_len,
+                                    const uint8_t *value,
+                                    size_t value_len);
+
+/**
+ * What an account setting currently holds.
+ *
+ * The text lives in the layer until the next call replaces it, like every other borrowed
+ * string here.
+ *
+ * # Safety
+ * `app` and `out` must be valid; both strings must point to their lengths in UTF-8.
+ */
+SiftStatus sift_account_setting(SiftApp *app,
+                                const uint8_t *label,
+                                size_t label_len,
+                                const uint8_t *key,
+                                size_t key_len,
+                                SiftStr *out);
 
 /**
  * FR-34's queue: what is durably enqueued, per account, by state.

@@ -199,6 +199,10 @@ pub unsafe extern "C" fn sift_initialize(
                 stage_rows: std::sync::Mutex::new(Vec::new()),
                 setting_rows: std::sync::Mutex::new(Vec::new()),
                 setting_values: std::sync::Mutex::new(Vec::new()),
+                account_rows: std::sync::Mutex::new(Vec::new()),
+                account_names: std::sync::Mutex::new(Vec::new()),
+                account_setting_value: std::sync::Mutex::new(String::new()),
+                conditions: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 search: std::sync::Mutex::new(crate::layer::SearchResult::default()),
             });
             Ok(Box::into_raw(layer).cast::<SiftApp>())
@@ -383,6 +387,269 @@ pub unsafe extern "C" fn sift_account_count(app: *mut SiftApp) -> u32 {
     }
 }
 
+/// One account, as a shell needs to see it.
+///
+/// **The label is the handle.** Every account-taking entry point across this boundary names an
+/// account by the label it was added under, and until this existed nothing said what those
+/// labels were — so a shell could add an account and then never reach it again, and the
+/// runtime panel had to ask the user to type one. D-89 makes the identity Sift's own; the
+/// label is what a person calls it and what the container recorded.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftAccount<'a> {
+    /// D-89's Sift-assigned identity — the anchor a message-list observation takes.
+    pub id: SiftId,
+    /// What the account was added as, and what every other entry point takes.
+    pub name: SiftStr<'a>,
+    /// What the container recorded so a later run knows how to reconnect it. **Not something
+    /// to branch on**: the provider model plans against declared capabilities, and this is a
+    /// name for a reconnection route rather than a provider a shell may reason about.
+    pub kind: SiftStr<'a>,
+    /// D-49's single condition for this account.
+    pub condition: SiftCondition,
+    /// Whether Sift may change this mailbox. An account is added watching and nothing else,
+    /// and this is the flag that says so.
+    pub writes_enabled: u8,
+    /// Intents recorded and held because writes are not authorized. Zero once they are.
+    pub held: u32,
+}
+
+/// Every account the container holds.
+///
+/// The rows are borrowed for the duration of the call, like every other row array here, and
+/// the text behind them lives in the layer until the next call replaces it.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_accounts(
+    app: *mut SiftApp,
+    out: *mut SiftRows<'static, SiftAccount<'static>>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let mut session = layer.session.lock().map_err(|_| ())?;
+
+            let names: Vec<String> = session
+                .app()
+                .accounts()
+                .map(|(name, _)| name.clone())
+                .collect();
+            // One pass, and the condition first, because computing it needs the application
+            // mutably and a borrow of the account cannot be alive across that call.
+            let mut gathered: Vec<Gathered> = Vec::with_capacity(names.len());
+            for name in &names {
+                let condition = session
+                    .app_mut()
+                    .condition_of(name)
+                    .map_or(SiftCondition::HEALTHY, SiftCondition::of);
+                let app = session.app();
+                let held = u32::try_from(app.held(name)).unwrap_or(u32::MAX);
+                let Some((_, account)) = app.accounts().find(|(n, _)| *n == name) else {
+                    continue;
+                };
+                gathered.push(Gathered {
+                    id: account.id.as_u128(),
+                    name: name.clone(),
+                    kind: account.kind.clone(),
+                    writes_enabled: account.writes_enabled,
+                    held,
+                    condition,
+                });
+            }
+            drop(session);
+
+            // The names and the kinds, in one vector the layer owns, because a `repr(C)` row
+            // cannot own a `String` and the temporaries above die at the end of this call.
+            //
+            // **Pairs rather than two runs in one vector.** The kind of row *i* lived at
+            // `names.len() + i` and was read at `gathered.len() + i`; the two agree only while
+            // no account is skipped above, and a skip would have been silent — every index
+            // stays in bounds, so each row would have been handed a name and a kind belonging
+            // to different accounts. A pair cannot be indexed apart.
+            let mut stored = layer.account_names.lock().map_err(|_| ())?;
+            *stored = gathered
+                .iter()
+                .map(|g| (g.name.clone(), g.kind.clone()))
+                .collect();
+            let mut table = layer.account_rows.lock().map_err(|_| ())?;
+            *table = gathered
+                .iter()
+                .zip(stored.iter())
+                .map(|(g, (name, kind))| SiftAccount {
+                    id: SiftId::from_u128(g.id),
+                    name: SiftStr::new(extend(name)),
+                    kind: SiftStr::new(extend(kind)),
+                    condition: g.condition,
+                    writes_enabled: u8::from(g.writes_enabled),
+                    held: g.held,
+                })
+                .collect();
+            Ok(SiftRows::new(extend_rows(&table)))
+        })
+    }
+}
+
+/// One account's facts, read while the session is held and used after it is released.
+struct Gathered {
+    id: u128,
+    name: String,
+    kind: String,
+    writes_enabled: bool,
+    held: u32,
+    condition: SiftCondition,
+}
+
+/// Authorize, or withdraw authorization for, writes to one account.
+///
+/// **An account is added watching and nothing else**, and this is the only thing that changes
+/// it. Until it existed, triage on a macOS account was journaled durably, applied
+/// optimistically, and could never be issued — the posture was settable from the test harness
+/// and from nowhere a person could reach.
+///
+/// Withdrawing takes effect immediately for anything not yet issued. Intents already on the
+/// wire are not recalled: a request that has left cannot be unsent, and pretending otherwise
+/// is the one lie a mutation queue must not tell.
+///
+/// # Safety
+/// `app` must be valid; `label` must point to `label_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_set_writes_enabled(
+    app: *mut SiftApp,
+    label: *const u8,
+    label_len: usize,
+    enabled: u8,
+) -> SiftStatus {
+    guard(|| {
+        // SAFETY: the caller's obligation.
+        let name = unsafe { borrowed(label, label_len)? };
+        // SAFETY: as above.
+        let layer = (unsafe { layer(app) }).ok_or(())?;
+        let mut session = layer.session.lock().map_err(|_| ())?;
+        session
+            .app_mut()
+            .set_writes_enabled(name, enabled != 0)
+            .map_err(|_| ())
+    })
+}
+
+/// What one turn of the flush did.
+///
+/// **`authorized` is not a failure.** An account that is only being watched has a queue that
+/// grows and sends nothing, and that is the state the user chose — so it crosses as a result
+/// with a count in it rather than as an error, which is what lets a surface say *nothing has
+/// been sent, and nothing will be until you say so* instead of drawing a fault.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftFlush {
+    /// Zero where writes are not authorized for this account. Nothing was issued.
+    pub authorized: u8,
+    /// Intents held because writes are not authorized. Zero once they are.
+    pub held: u32,
+    pub issued: u32,
+    pub applied: u32,
+    /// The provider refused, in its own terms. Settled: retrying changes nothing.
+    pub refused: u32,
+    /// Left for the scheduler to try again.
+    pub deferred: u32,
+    /// The request went out and no answer came back — D-85's `Reconciling`.
+    pub reconciling: u32,
+    /// Held rather than executed: unrecognised, or its gating capability has gone away.
+    pub quarantined: u32,
+    /// What is still queued afterwards.
+    pub queued: u32,
+    /// Whether the flush ended in a stated failure. **The state, not the sentence** — D-56
+    /// keeps prose on the shell's side of this boundary.
+    pub failed: u8,
+}
+
+/// Send what is queued for one account, once.
+///
+/// **This blocks the calling thread**, which is a limitation rather than a design, and the same
+/// one [`sift_sync_account`] carries: the work belongs on a worker under D-19, and moving it
+/// there changes nothing a shell can see because every delivery already arrives through D-48's
+/// hop rather than out of this call.
+///
+/// # Safety
+/// `app` and `out` must be valid; `label` must point to `label_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_flush_account(
+    app: *mut SiftApp,
+    label: *const u8,
+    label_len: usize,
+    out: *mut SiftFlush,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let name = borrowed(label, label_len)?;
+            let layer = layer(app).ok_or(())?;
+            let flushed = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                session.app_mut().flush(name).map_err(|_| ())?
+            };
+            // The list is an observation, and a settled intent removes the overlay row that was
+            // hiding a message. Posted rather than run: running it here would hand the shell a
+            // callback from inside the call that caused it, which is D-48's reentrancy.
+            crate::layer::post(
+                layer,
+                Task::Deliver {
+                    layer: app as usize,
+                },
+            );
+            let report = &flushed.report;
+            let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+            Ok(SiftFlush {
+                authorized: u8::from(flushed.authorized),
+                held: count(flushed.held),
+                issued: count(report.issued),
+                applied: count(report.applied),
+                refused: count(report.refused),
+                deferred: count(report.deferred),
+                reconciling: count(report.reconciling),
+                quarantined: count(report.quarantined),
+                queued: count(flushed.queued),
+                failed: u8::from(flushed.error.is_some()),
+            })
+        })
+    }
+}
+
+/// FR-15 — reverse the last reversible gesture.
+///
+/// **Not an action.** `undo.last-gesture` is in D-98's register and has no intent behind it, so
+/// invoking it through [`sift_invoke_action`] returns success and does nothing — which is what
+/// the undo toast was wired to. The reversal is a gesture of its own shape: it acts over
+/// D-85's undo group rather than over a message, so a bulk operation reverses as the one
+/// gesture FR-17 promises.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_undo_last(app: *mut SiftApp, out: *mut SiftGesture) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let gesture = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                session.undo_last(now_millis()).map_err(|_| ())?
+            };
+            crate::layer::post(
+                layer,
+                Task::Deliver {
+                    layer: app as usize,
+                },
+            );
+            Ok(SiftGesture {
+                mutated: u8::from(gesture.mutates),
+                enqueued: u32::try_from(gesture.enqueued.len()).unwrap_or(u32::MAX),
+                skipped: u32::try_from(gesture.skipped.len()).unwrap_or(u32::MAX),
+                optimistic: u8::from(gesture.optimistic),
+            })
+        })
+    }
+}
+
 /// The URI scheme this client's authorization callback comes back on — D-36 and D-109.
 ///
 /// # Why a shell asks rather than derives
@@ -533,6 +800,12 @@ pub unsafe extern "C" fn sift_complete_authorization(
 
 /// FR-19, FR-20 and FR-21 — search, with the interpretation the user is shown.
 ///
+/// `account` narrows it to one account, and zero is every account — the same anchor
+/// [`sift_observe_messages`] takes, so a window that is looking at one mailbox can search the
+/// one it is looking at. FR-20's *narrow to this account* is a scope rather than a query term:
+/// spelling it as an operator would mean parsing, translating and explaining a word for
+/// something the shell already knows.
+///
 /// **The interpretation crosses the boundary as a result, not as a debug aid.** A query that
 /// found nothing and one that was misread look identical from the results alone, and
 /// `form:alice` is a plausible typo for `from:alice`. So is the caveat list: empty results and
@@ -547,6 +820,7 @@ pub unsafe extern "C" fn sift_search(
     app: *mut SiftApp,
     query: *const u8,
     query_len: usize,
+    account: SiftId,
     limit: u32,
     out: *mut SiftSearch<'static>,
 ) -> SiftStatus {
@@ -556,9 +830,23 @@ pub unsafe extern "C" fn sift_search(
             let layer = layer(app).ok_or(())?;
             let report = {
                 let mut session = layer.session.lock().map_err(|_| ())?;
+                // The same anchor a message-list observation takes, and zero means the same
+                // thing: D-4's unified stream rather than an account nobody has. FR-20's
+                // narrowing is a scope rather than a query term — an operator would have to be
+                // parsed, spelled and translated, and the account is a fact the shell already
+                // holds.
+                let named = if account == SiftId::from_u128(0) {
+                    None
+                } else {
+                    session
+                        .app()
+                        .accounts()
+                        .find(|(_, a)| a.id.as_u128() == account.to_u128())
+                        .map(|(name, _)| name.clone())
+                };
                 session
                     .app_mut()
-                    .search(query, None, limit)
+                    .search(query, named.as_deref(), limit)
                     .map_err(|_| ())?
             };
 
@@ -690,6 +978,79 @@ pub unsafe extern "C" fn sift_set_setting(
         let mut session = layer.session.lock().map_err(|_| ())?;
         session.app_mut().set_setting(key, value).map_err(|_| ())
     })
+}
+
+/// Record an account setting — D-101's other table.
+///
+/// **Separate from [`sift_set_setting`] because the scope split is the storage split.** An
+/// account setting goes with the account when it is removed and an installation setting does
+/// not, and a single entry point taking a key would have to guess which table a key belongs to
+/// from the key itself — which is exactly the ambiguity the two tables exist to remove.
+///
+/// The two security-state rows are refused here as they are there: the per-sender lists are
+/// records of decisions the user made in context, shown and revoked where the decision was
+/// made rather than bulk-edited in a screen away from any message.
+///
+/// # Safety
+/// `app` must be valid; every string must point to its length in UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_set_account_setting(
+    app: *mut SiftApp,
+    label: *const u8,
+    label_len: usize,
+    key: *const u8,
+    key_len: usize,
+    value: *const u8,
+    value_len: usize,
+) -> SiftStatus {
+    guard(|| {
+        // SAFETY: the caller's obligation.
+        let (name, key, value) = unsafe {
+            (
+                borrowed(label, label_len)?,
+                borrowed(key, key_len)?,
+                borrowed(value, value_len)?,
+            )
+        };
+        // SAFETY: as above.
+        let layer = (unsafe { layer(app) }).ok_or(())?;
+        let mut session = layer.session.lock().map_err(|_| ())?;
+        session
+            .app_mut()
+            .set_account_setting(name, key, value)
+            .map_err(|_| ())
+    })
+}
+
+/// What an account setting currently holds.
+///
+/// The text lives in the layer until the next call replaces it, like every other borrowed
+/// string here.
+///
+/// # Safety
+/// `app` and `out` must be valid; both strings must point to their lengths in UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_account_setting(
+    app: *mut SiftApp,
+    label: *const u8,
+    label_len: usize,
+    key: *const u8,
+    key_len: usize,
+    out: *mut SiftStr<'static>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let (name, key) = (borrowed(label, label_len)?, borrowed(key, key_len)?);
+            let layer = layer(app).ok_or(())?;
+            let text = {
+                let session = layer.session.lock().map_err(|_| ())?;
+                session.app().account_setting(name, key).map_err(|_| ())?
+            };
+            let mut held = layer.account_setting_value.lock().map_err(|_| ())?;
+            *held = text.as_text();
+            Ok(SiftStr::new(extend(&held)))
+        })
+    }
 }
 
 /// A boolean.
@@ -1193,8 +1554,64 @@ pub extern "C" fn sift_run_scheduled(ticket: u64) {
     });
 }
 
+/// Tell the shell about a condition that has changed since it was last told.
+///
+/// **D-67's callbacks, finally invoked.** The set was registered at initialization and stored
+/// whole, and nothing on this side ever called one — so FR-2's requirement that
+/// re-authentication reach the user *with no window open* could not be met by any shell,
+/// because the only thing that could have woken one never fired.
+///
+/// Called from the main-loop hop, which is where D-48 requires every callback to arrive. The
+/// session lock is released before any of them, because a shell is permitted to call back into
+/// the layer on the next turn of its loop and holding it here would make that a deadlock
+/// waiting for a schedule.
+fn announce_conditions(layer: &Layer) {
+    let Ok(mut session) = layer.session.lock() else {
+        return;
+    };
+    let names: Vec<String> = session
+        .app()
+        .accounts()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut now = Vec::with_capacity(names.len());
+    for name in &names {
+        let Ok(condition) = session.app_mut().condition_of(name) else {
+            continue;
+        };
+        let Some((_, account)) = session.app().accounts().find(|(n, _)| *n == name) else {
+            continue;
+        };
+        now.push((account.id.as_u128(), SiftCondition::of(condition).0));
+    }
+    drop(session);
+
+    let Ok(mut last) = layer.conditions.lock() else {
+        return;
+    };
+    let mut changed = Vec::new();
+    for (id, condition) in now {
+        if last.insert(id, condition) != Some(condition) {
+            changed.push((id, condition));
+        }
+    }
+    drop(last);
+
+    for (id, condition) in changed {
+        let account = SiftId::from_u128(id);
+        (layer.host.account_condition_changed)(layer.host.context, account, condition);
+        // FR-2 is the one that must arrive with nothing on screen, so it gets its own
+        // callback rather than being inferred from the condition by a shell that may have no
+        // window to infer it in.
+        if condition == SiftCondition::NEEDS_AUTHENTICATION.0 {
+            (layer.host.reauthentication_needed)(layer.host.context, account);
+        }
+    }
+}
+
 /// Compute what changed and hand each batch to the observation that asked for it.
 fn deliver(layer: &Layer) {
+    announce_conditions(layer);
     let Ok(mut session) = layer.session.lock() else {
         return;
     };
@@ -1206,16 +1623,32 @@ fn deliver(layer: &Layer) {
     };
     drop(session);
 
-    let Ok(sinks) = layer.sinks.lock() else {
-        return;
-    };
-    for d in &deliveries {
-        // A sink removed by cancellation is the guarantee doing its job: the delivery was
-        // computed before the cancel and finds nothing to call.
-        let Some(sink) = sinks.get(&d.observation.0) else {
-            continue;
+    // **Resolved under the lock, called outside it.** A shell is inside its own main loop when
+    // one of these runs, and D-48 lets it call back into the layer on the next turn — but the
+    // list it draws can also reach `observe` or `cancel` synchronously from a selection change,
+    // and both take this mutex. Holding it across the callback makes that a self-deadlock one
+    // call away, in a shell that has just grown several new selection-driven paths.
+    let targets: Vec<(usize, Sink)> = {
+        let Ok(sinks) = layer.sinks.lock() else {
+            return;
         };
-        let rows: Vec<SiftMessageRow<'_>> = d.batch.incoming.iter().map(row_of).collect();
+        deliveries
+            .iter()
+            .enumerate()
+            // A sink removed by cancellation is the guarantee doing its job: the delivery was
+            // computed before the cancel and finds nothing to call.
+            .filter_map(|(i, d)| sinks.get(&d.observation.0).map(|sink| (i, *sink)))
+            .collect()
+    };
+    for (index, sink) in targets {
+        let d = &deliveries[index];
+        // **The window, not the rows entering it.** A shell given only the arrivals has no way
+        // to express a removal, so it appends — and a sync that drops a message leaves the row
+        // on screen pointing at something the store no longer holds. D-18's change vocabulary
+        // is the specified answer and `SiftChange` is written and tested; nothing carries it
+        // across this boundary yet, and until something does, the whole window is the honest
+        // delivery.
+        let rows: Vec<SiftMessageRow<'_>> = d.window.iter().map(row_of).collect();
         (sink.callback)(
             sink.context as *mut c_void,
             SiftObservation(d.observation.0),
@@ -1511,15 +1944,21 @@ pub unsafe extern "C" fn sift_open_document(
             let Some(layer) = layer(app) else {
                 return Err(());
             };
+            let id = sift_foundation::identity::LocalId::from_u128(message.to_u128());
             let document = {
                 let mut session = layer.session.lock().map_err(|_| ())?;
-                session
+                let document = session
                     .app_mut()
-                    .open_document(
-                        sift_foundation::identity::LocalId::from_u128(message.to_u128()),
-                        dark != 0,
-                    )
-                    .map_err(|_| ())?
+                    .open_document(id, dark != 0)
+                    .map_err(|_| ())?;
+                // **What makes D-98's `OpenMessage` scope reachable at all.** The field was
+                // set to `None` at initialization and assigned nowhere, so every action scoped
+                // to an open message — the dark transform, FR-41's three handoffs, FR-33's
+                // debug view — was absent from every menu and every palette, permanently, and
+                // the register's own reconciliation could not see it because both sides agreed
+                // the identifiers existed.
+                session.app_mut().open_message = Some(id);
+                document
             };
             let blocked = u32::try_from(document.blocked).unwrap_or(u32::MAX);
             let positions = u32::try_from(document.fetching_positions).unwrap_or(u32::MAX);
@@ -1834,7 +2273,18 @@ pub unsafe extern "C" fn sift_close_document(
         let Some(layer) = (unsafe { layer(app) }) else {
             return Err(());
         };
-        layer.documents.lock().map_err(|_| ())?.remove(name);
+        let remaining = {
+            let mut documents = layer.documents.lock().map_err(|_| ())?;
+            documents.remove(name);
+            documents.len()
+        };
+        // **Only when the last one goes.** A reader that closed its message and left the menu
+        // offering to reply to it would be offering a gesture over nothing — but the reader
+        // opens the next document *before* revoking the previous token, under D-90, so
+        // clearing on every close would clear the message that had just been opened.
+        if remaining == 0 {
+            layer.session.lock().map_err(|_| ())?.app_mut().open_message = None;
+        }
         let revoked = layer
             .session
             .lock()
@@ -2956,7 +3406,16 @@ mod tests {
             delegable_accounts: 0,
         };
         assert_eq!(
-            unsafe { sift_search(app, query.as_ptr(), query.len(), 50, &raw mut found) },
+            unsafe {
+                sift_search(
+                    app,
+                    query.as_ptr(),
+                    query.len(),
+                    SiftId::from_u128(0),
+                    50,
+                    &raw mut found,
+                )
+            },
             SiftStatus::Ok
         );
 
@@ -2987,7 +3446,16 @@ mod tests {
             caveats: SiftStr::null(),
             delegable_accounts: 0,
         };
-        let _ = unsafe { sift_search(app, query.as_ptr(), query.len(), 50, &raw mut found) };
+        let _ = unsafe {
+            sift_search(
+                app,
+                query.as_ptr(),
+                query.len(),
+                SiftId::from_u128(0),
+                50,
+                &raw mut found,
+            )
+        };
         let read = text(found.interpretation);
         assert!(read.contains("read as text, not as an operator"), "{read}");
         let _ = unsafe { sift_shutdown(app) };
@@ -3006,10 +3474,321 @@ mod tests {
             caveats: SiftStr::null(),
             delegable_accounts: 0,
         };
-        let _ = unsafe { sift_search(app, query.as_ptr(), query.len(), 50, &raw mut found) };
+        let _ = unsafe {
+            sift_search(
+                app,
+                query.as_ptr(),
+                query.len(),
+                SiftId::from_u128(0),
+                50,
+                &raw mut found,
+            )
+        };
         assert_eq!(found.delegable_accounts, 0);
         assert!(!found.rows.is_empty(), "the local search found nothing");
         let _ = unsafe { sift_shutdown(app) };
+    }
+
+    #[test]
+    fn the_account_list_names_what_a_shell_must_name_to_reach_it() {
+        let app = start(drop_it, scratch_str());
+        let name = "mail";
+        let mut id = SiftId::from_u128(0);
+        assert_eq!(
+            unsafe { sift_add_replayed_account(app, name.as_ptr(), name.len(), &raw mut id) },
+            SiftStatus::Ok
+        );
+
+        let mut rows = SiftRows::<SiftAccount<'static>>::empty();
+        assert_eq!(unsafe { sift_accounts(app, &raw mut rows) }, SiftStatus::Ok);
+        let listed = unsafe { rows.as_slice() };
+        assert_eq!(
+            listed.len(),
+            1,
+            "one account was added and one should be listed"
+        );
+
+        let row = &listed[0];
+        assert_eq!(unsafe { row.name.as_str() }, Some(name));
+        assert_eq!(
+            row.id.bytes, id.bytes,
+            "the listed identity must be the one adding it handed back, or an observation \
+             anchored on it would watch a different account"
+        );
+        assert_eq!(
+            row.writes_enabled, 0,
+            "an account is added watching and nothing else"
+        );
+        assert_eq!(row.held, 0, "nothing has been queued yet");
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    #[test]
+    fn an_account_that_was_never_added_is_not_listed() {
+        let app = start(drop_it, scratch_str());
+        let mut rows = SiftRows::<SiftAccount<'static>>::empty();
+        assert_eq!(unsafe { sift_accounts(app, &raw mut rows) }, SiftStatus::Ok);
+        assert_eq!(
+            unsafe { rows.as_slice() }.len(),
+            0,
+            "the account-less state is what makes the add-account flow the right first screen"
+        );
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    /// A flush against the recorded corpus, before and after the posture is changed.
+    ///
+    /// The corpus is a real adapter over recorded exchanges, so this drives the same path a
+    /// real mailbox does — including the one step an account that is only watched skips.
+    #[test]
+    fn a_watched_account_issues_nothing_and_says_how_much_it_is_holding() {
+        let app = start(run_inline, scratch_str());
+        let name = "mail";
+        let message = hostile_message(app);
+
+        assert_eq!(
+            unsafe { sift_select(app, &raw const message, 1) },
+            SiftStatus::Ok
+        );
+        assert_eq!(do_action(app, "message.archive"), SiftStatus::Ok);
+
+        let mut flushed = SiftFlush {
+            authorized: 1,
+            held: 0,
+            issued: 0,
+            applied: 0,
+            refused: 0,
+            deferred: 0,
+            reconciling: 0,
+            quarantined: 0,
+            queued: 0,
+            failed: 0,
+        };
+        assert_eq!(
+            unsafe { sift_flush_account(app, name.as_ptr(), name.len(), &raw mut flushed) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            flushed.authorized, 0,
+            "an account is added watching, so the one step that cannot be taken back is the \
+             one step it does not take"
+        );
+        assert_eq!(
+            flushed.issued, 0,
+            "nothing may leave an unauthorized account"
+        );
+        assert_eq!(
+            flushed.held, 1,
+            "the intent is durably recorded and held, and the count is what makes that \
+             checkable rather than something a user is told"
+        );
+
+        assert_eq!(
+            unsafe { sift_set_writes_enabled(app, name.as_ptr(), name.len(), 1) },
+            SiftStatus::Ok
+        );
+        let mut rows = SiftRows::<SiftAccount<'static>>::empty();
+        assert_eq!(unsafe { sift_accounts(app, &raw mut rows) }, SiftStatus::Ok);
+        assert_eq!(
+            unsafe { rows.as_slice() }[0].writes_enabled,
+            1,
+            "the posture the list reports is the one that was just set"
+        );
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    #[test]
+    fn undo_reverses_the_gesture_the_register_could_only_report() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        assert_eq!(
+            unsafe { sift_select(app, &raw const message, 1) },
+            SiftStatus::Ok
+        );
+        assert_eq!(do_action(app, "message.archive"), SiftStatus::Ok);
+
+        let mut undoable = SiftUndoable {
+            messages: 0,
+            timed: 0,
+            remaining_millis: 0,
+            intent: SiftStr::new(""),
+        };
+        assert_eq!(
+            unsafe { sift_undoable(app, &raw mut undoable) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            undoable.messages, 1,
+            "an archive over one message is reversible"
+        );
+
+        let mut gesture = SiftGesture {
+            mutated: 0,
+            enqueued: 0,
+            skipped: 0,
+            optimistic: 0,
+        };
+        assert_eq!(
+            unsafe { sift_undo_last(app, &raw mut gesture) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            gesture.enqueued, 1,
+            "the reversal is its own gesture with its own intent — invoking the register \
+             entry returned success and enqueued nothing"
+        );
+
+        // Nothing to undo is an identified failure rather than a zero row: the affordance
+        // is absent, and `SiftUndoable` has no way to say "none" that a shell could not
+        // mistake for a gesture over no messages.
+        assert_eq!(
+            unsafe { sift_undoable(app, &raw mut undoable) },
+            SiftStatus::Failed,
+            "the record is spent once it has been used"
+        );
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    /// D-98's `OpenMessage` scope, which nothing ever satisfied.
+    ///
+    /// The field behind it was initialized to `None` and assigned nowhere, so every action
+    /// scoped to an open message was absent from every menu and every palette for the life of
+    /// the process — and the register's reconciliation could not see it, because both sides
+    /// agreed the identifiers existed. Only availability disagreed, with nobody.
+    #[test]
+    fn opening_a_message_is_what_makes_the_open_message_scope_true() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+
+        let mut available: u8 = 1;
+        let id = "read.toggle-dark-transform";
+        assert_eq!(
+            unsafe { sift_action_available(app, id.as_ptr(), id.len(), &raw mut available) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            available, 0,
+            "nothing is open yet, so an action over an open message must be absent"
+        );
+
+        let mut document = SiftDocument {
+            html: SiftStr::new(""),
+            token: SiftStr::new(""),
+            fetching_positions: 0,
+            blocked: 0,
+            links: 0,
+            may_always_allow: 0,
+            has_unsubscribe: 0,
+        };
+        assert_eq!(
+            unsafe { sift_open_document(app, message, 0, &raw mut document) },
+            SiftStatus::Ok
+        );
+        let token = unsafe { document.token.as_str() }
+            .expect("a token")
+            .to_owned();
+
+        assert_eq!(
+            unsafe { sift_action_available(app, id.as_ptr(), id.len(), &raw mut available) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            available, 1,
+            "a message is open, so the actions over one are reachable"
+        );
+
+        assert_eq!(
+            unsafe { sift_close_document(app, token.as_ptr(), token.len()) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sift_action_available(app, id.as_ptr(), id.len(), &raw mut available) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            available, 0,
+            "a reader that closed its message must not go on offering gestures over it"
+        );
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    /// D-67's callbacks were registered and never invoked.
+    ///
+    /// The set was stored whole at initialization behind an `allow(dead_code)`, and nothing on
+    /// the layer's side ever called one — so FR-2's requirement that re-authentication reach
+    /// the user *with no window open* could not be met by any shell, because the only thing
+    /// that could have woken one never fired.
+    #[test]
+    fn a_condition_that_changes_reaches_the_shell_once() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEEN: AtomicU32 = AtomicU32::new(0);
+        static CONDITION: AtomicU32 = AtomicU32::new(u32::MAX);
+
+        extern "C" fn note(_: *mut c_void, _: SiftId, condition: u32) {
+            SEEN.fetch_add(1, Ordering::Relaxed);
+            CONDITION.store(condition, Ordering::Relaxed);
+        }
+
+        ephemeral();
+        let mut app: *mut SiftApp = core::ptr::null_mut();
+        let mut callbacks = callbacks();
+        callbacks.account_condition_changed = note;
+        let init = SiftInit {
+            container_root: SiftStr::new(scratch_str()),
+            schedule: run_inline,
+            schedule_context: core::ptr::null_mut(),
+            oauth_client_id: SiftStr::new(""),
+            registered_schemes: SiftStr::new(""),
+        };
+        assert_eq!(
+            unsafe { sift_initialize(callbacks, init, &raw mut app) },
+            SiftStatus::Ok
+        );
+
+        let message = hostile_message(app);
+        assert!(
+            SEEN.load(Ordering::Relaxed) > 0,
+            "an account that appeared is a condition the shell has never been told"
+        );
+        assert_eq!(
+            CONDITION.load(Ordering::Relaxed),
+            SiftCondition::HEALTHY.0,
+            "a freshly synced account with nothing queued is healthy"
+        );
+
+        // Triage on an account that is only being watched is a change, and it is the one a
+        // person sees first: the queue grows, nothing leaves, and that is the state they
+        // chose — which they have to be able to see they chose.
+        assert_eq!(
+            unsafe { sift_select(app, &raw const message, 1) },
+            SiftStatus::Ok
+        );
+        assert_eq!(do_action(app, "message.archive"), SiftStatus::Ok);
+        assert_eq!(
+            CONDITION.load(Ordering::Relaxed),
+            SiftCondition::ATTENTION.0,
+            "the condition the shell was told is not the one that is now true"
+        );
+
+        // An unchanged condition is not re-announced. A callback that fires on every delivery
+        // with the same answer is a wakeup NFR-11 counts and a badge that redraws for nothing.
+        let before = SEEN.load(Ordering::Relaxed);
+        let name = "mail";
+        assert_eq!(
+            unsafe { sift_sync_account(app, name.as_ptr(), name.len()) },
+            SiftStatus::Ok
+        );
+        assert_eq!(
+            SEEN.load(Ordering::Relaxed),
+            before,
+            "the same condition was announced twice"
+        );
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
     }
 
     #[test]

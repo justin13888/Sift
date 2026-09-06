@@ -35,14 +35,14 @@ final class MessageListViewController: NSViewController {
     /// that never ran.
     private var searching = false
 
-    func search(_ query: String, app: OpaquePointer) {
+    func search(_ query: String, app: OpaquePointer, account: SiftId = .zero) {
         guard !query.trimmingCharacters(in: .whitespaces).isEmpty else {
             clearSearch()
             return
         }
         var found = SiftSearch()
         let ok = SiftText.withBytes(query) { ptr, len in
-            sift_search(UnsafeMutablePointer(app), ptr, len, 200, &found) == Ok
+            sift_search(UnsafeMutablePointer(app), ptr, len, account, 200, &found) == Ok
         }
         guard ok else { return }
 
@@ -152,16 +152,19 @@ final class MessageListViewController: NSViewController {
 
     /// A delivery arrived.
     ///
-    /// The layer sends only the rows entering the window, and today it sends them whole on
-    /// first fill. Applying the change vocabulary row by row — so a move animates as a move
-    /// and a cell keeps its identity — is what the batch is for and is wired next; until
-    /// then this keeps the array and the layer's window equal, which is the invariant that
-    /// matters most.
+    /// **The window, replaced.** This used to append what arrived, which is only correct while
+    /// nothing ever leaves: a sync that removes a message left its row on screen, and opening
+    /// it failed with the store saying no account holds that message — because none did any
+    /// more. The layer now sends the whole window, and this array and that window are the same
+    /// list, which is the invariant that matters most.
+    ///
+    /// D-18's change vocabulary is still the right answer and is still unwired: a move drawn
+    /// as a move keeps a row's identity and a cell's state, and `reloadData` keeps neither.
+    /// What it costs today is animation. What appending cost was correctness.
     private func received(_ incoming: [MessageRow]) {
-        guard !incoming.isEmpty else { return }
         let previous = selectedRow()
         let wasEmpty = rows.isEmpty
-        rows.append(contentsOf: incoming)
+        rows = incoming
         table.reloadData()
         restore(previous)
 
@@ -176,6 +179,31 @@ final class MessageListViewController: NSViewController {
 
     /// What is selected, for the window's own surfaces.
     var selection: MessageRow? { selectedRow() }
+
+    /// Move the selection — `read.next-message` and the three beside it.
+    ///
+    /// **The shell's own work, and it was crossing the boundary to nobody.** These are in
+    /// D-98's register, they have no intent behind them, and invoking them returned success
+    /// and moved nothing. Where the caret goes in a list this shell draws is not something the
+    /// layer can answer.
+    ///
+    /// `unreadOnly` walks to the next row the list says is unread rather than to the next row,
+    /// which is what ⇧⌘↓ means in a mail client.
+    func move(by step: Int, unreadOnly: Bool) {
+        guard !rows.isEmpty else { return }
+        let current = table.selectedRow
+        var index = current < 0 ? (step > 0 ? -1 : rows.count) : current
+        while true {
+            index += step
+            guard index >= 0, index < rows.count else { return }
+            if !unreadOnly || rows[index].unread { break }
+        }
+        table.selectRowIndexes([index], byExtendingSelection: false)
+        table.scrollRowToVisible(index)
+    }
+
+    /// Where the keyboard goes when the list is asked for — `navigate.focus-list`.
+    var focusTarget: NSView { table }
 
     private func selectedRow() -> MessageRow? {
         let index = table.selectedRow

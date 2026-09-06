@@ -169,6 +169,105 @@ fn erasing_an_account_leaves_nothing_that_names_it() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// D-101's scope split is the storage split, and the account half had nowhere to live.
+///
+/// Every account-scoped key was refused on the way in, so both shells drew controls that were
+/// disabled beside a comment saying a value accepted there would be dropped. These check the
+/// three properties that make the table worth having: it holds, it is the account's rather
+/// than the installation's, and it goes when the account does.
+#[test]
+fn an_account_setting_is_that_accounts_and_survives_being_reopened() {
+    use sift_app::container::Container;
+    let dir = scratch("account-setting");
+    let store = InMemory::default();
+    let mut container = Container::open(&dir, &store).expect("open");
+    let one = container.register("gmail", "work").expect("register");
+    let two = container.register("gmail", "personal").expect("register");
+
+    container
+        .set_account_setting(one.id, "sync.paused", "true")
+        .expect("record");
+
+    assert_eq!(
+        container
+            .account_setting(one.id, "sync.paused")
+            .expect("read"),
+        Some("true".to_owned())
+    );
+    assert_eq!(
+        container
+            .account_setting(two.id, "sync.paused")
+            .expect("read"),
+        None,
+        "pausing one account must not pause the other — the whole reason D-95 puts the flag \
+         on the account is that the three pauses are three conditions"
+    );
+
+    drop(container);
+    let container = Container::open(&dir, &store).expect("reopen");
+    assert_eq!(
+        container
+            .account_setting(one.id, "sync.paused")
+            .expect("read"),
+        Some("true".to_owned()),
+        "a pause the user asked for that a restart undoes is worse than one that was refused"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn an_account_setting_is_erased_with_the_account() {
+    use sift_app::container::Container;
+    let dir = scratch("account-setting-erase");
+    let store = InMemory::default();
+    let mut container = Container::open(&dir, &store).expect("open");
+    let account = container.register("gmail", "work").expect("register");
+    container
+        .set_account_setting(account.id, "sync.paused", "true")
+        .expect("record");
+
+    container.forget(account.id, &store).expect("forget");
+
+    assert_eq!(
+        container
+            .account_setting(account.id, "sync.paused")
+            .expect("read"),
+        None,
+        "FR-4 is provable by enumeration, and a setting outliving its account is a row that \
+         names one the registry says does not exist"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn the_two_security_state_rows_are_still_refused_by_the_table_that_now_exists() {
+    use sift_app::container::Container;
+    let dir = scratch("account-setting-security");
+    let store = InMemory::default();
+    let mut container = Container::open(&dir, &store).expect("open");
+    let account = container.register("gmail", "work").expect("register");
+
+    // Giving the account half of D-101 somewhere to live must not give these two a bulk
+    // editor by accident: they are records of decisions made in context, revoked where the
+    // decision was made.
+    for key in ["render.sender-allowlist", "render.sender-dark-choices"] {
+        assert!(
+            container
+                .set_account_setting(account.id, key, "example.test")
+                .is_err(),
+            "`{key}` is security state and must not be settable through settings"
+        );
+    }
+    // And an installation key does not belong in this table either.
+    assert!(
+        container
+            .set_account_setting(account.id, "cache.budget-days", "30")
+            .is_err(),
+        "an installation setting recorded per account is one the installation would never read"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A crash between creating an account's files and recording it leaves exactly this. The files
 /// are unreadable — the key is filed under an identity nothing lists — so they are dead bytes
 /// rather than a disclosure, and NFR-14's budget is not a place to leave any.

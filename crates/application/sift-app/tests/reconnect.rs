@@ -132,3 +132,30 @@ fn a_capability_shape_is_not_something_that_can_be_reconnected() {
         .expect_err("a shape has no provider");
     assert!(why.contains("capability shape"), "{why}");
 }
+
+#[test]
+fn a_restored_account_can_still_be_flushed() {
+    // The queue is rebuilt from the journal at open, so a restart leaves intents to issue and
+    // no provider to issue them to. `sync` recovered from that and `flush` did not, which is
+    // the worse half: a person who triaged before the first sync of a session was told Sift
+    // could not reach an account it can reach, and the intents stayed held with nothing
+    // saying why.
+    let mut app = App::new();
+    app.add_replayed_account("mail").expect("added");
+    app.sync("mail", 1).expect("the first sync");
+    app.set_writes_enabled("mail", true)
+        .expect("writes authorized");
+
+    as_if_restarted(&mut app, "mail");
+    assert!(
+        app.account("mail").expect("still open").adapter.is_none(),
+        "the fixture did not reproduce a restart"
+    );
+
+    app.flush("mail")
+        .expect("a restored account could not be flushed");
+    assert!(
+        app.account("mail").expect("still open").adapter.is_some(),
+        "the flush did not leave the account reachable"
+    );
+}
