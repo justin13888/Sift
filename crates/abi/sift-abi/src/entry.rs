@@ -1623,10 +1623,17 @@ fn run_tick(layer: &Layer) {
         .store(false, std::sync::atomic::Ordering::SeqCst);
 
     // **Re-armed on every exit, including the ones that did no work.** Nothing else arms the
-    // timer once the process is running, so a single early return here — a poisoned session
-    // lock, a panic caught by the barrier — ends periodic work for the life of the process,
-    // silently, while the application keeps drawing. Mail simply stops arriving and nothing
-    // says so. The re-arm is therefore a guard that runs however this function leaves.
+    // timer once the process is running, so an early return that skipped the re-arm would end
+    // periodic work for the life of the layer.
+    //
+    // Be precise about which exits that covers, because the obvious one is not the interesting
+    // one. A poisoned session lock is *not* recoverable here — `ensure_timer` reads the same
+    // lock and bails on the same condition — and it is not a case worth special-handling
+    // either: every other entry point already fails on a poisoned session, so that layer is
+    // dead rather than quietly un-scheduled. What this guard genuinely covers is a panic below
+    // the session lock, chiefly in `deliver`'s callback loop, which runs with the lock
+    // released: there the layer is healthy afterwards, and a plain early return would have
+    // left it healthy and never scheduled again.
     struct Rearm<'a>(&'a Layer);
     impl Drop for Rearm<'_> {
         fn drop(&mut self) {
