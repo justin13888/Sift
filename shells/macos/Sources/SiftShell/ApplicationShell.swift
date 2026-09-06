@@ -50,6 +50,11 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         // without it can be neither quit deliberately nor re-authenticated.
         installStatusItem()
 
+        // D-93's signal, **subscribed to rather than polled**. Polling free memory is both a
+        // wakeup counted against NFR-11 and a worse answer than the one the system already
+        // has — it knows about pressure before free memory reflects it.
+        installMemoryPressureSource()
+
         // A minimal bar first, so that a launch which fails before the layer exists is still
         // quittable from the keyboard — FR-24 does not allow an application that is frontmost
         // with no way out of it. The register-driven bar replaces this once there is a layer
@@ -184,7 +189,64 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         // for the life of the process. `sift_shutdown` abandons the tickets on its side.
         for timer in timers.values { timer.cancel() }
         timers.removeAll()
+        // The same hazard, and it was left standing two lines below the comment describing it:
+        // a pressure event already queued on the main loop would call into a freed layer.
+        pressureSource?.cancel()
+        pressureSource = nil
         if let app { _ = sift_shutdown(UnsafeMutablePointer(app)) }
+        // Cleared, so anything that still holds this shell cannot reach a freed pointer.
+        app = nil
+    }
+
+    /// L3 — destroy every **window shell**, and leave the application shell.
+    ///
+    /// `NSApp.windows` is not this list, and the difference is the whole of the correctness
+    /// here. It contains the add-account window, Settings, every standalone reader, any modal
+    /// alert, and the window backing the status item — so closing all of it mid-sign-in
+    /// cancels the flow through `windowWillClose`, and the user who then grants consent in
+    /// the browser comes back to nothing. Removing the status item would be worse still: L3
+    /// exists to leave the always-on surface standing, because a resident process the user
+    /// can only kill is worse than one that used more memory.
+    ///
+    /// So this destroys what the shell owns and knows how to rebuild, which is the array
+    /// `forget` and `syncActivationPolicy` already treat as authoritative.
+    fileprivate func destroyWindowShells() {
+        for shell in windows { shell.close() }
+        // **Closed, then released.** `removeAll` on its own deallocates the controllers and
+        // leaves their windows on screen: an ordered-in window is retained by the platform,
+        // and a window controller's deallocation does not close one. The reader windows would
+        // have stayed visible with their body views intact — holding the memory L3 exists to
+        // release — while `Broker::shed` had just revoked their tokens, so every image in them
+        // would fail with nothing able to say why. A standalone reader is the window kind
+        // whose entire content is a body view, which makes it the one L3 most needs to go.
+        for reader in standaloneReaders { reader.close() }
+        standaloneReaders.removeAll()
+    }
+
+    /// The platform's own memory-pressure source.
+    ///
+    /// Held for the life of the process: a `DispatchSource` that nothing retains is cancelled
+    /// when it is deallocated, and a cancelled source delivers nothing — which would look
+    /// exactly like a system that never came under pressure.
+    private var pressureSource: DispatchSourceMemoryPressure?
+
+    private func installMemoryPressureSource() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.normal, .warning, .critical], queue: .main)
+        source.setEventHandler { [weak self, weak source] in
+            // `weak source` deliberately: capturing it strongly makes the source retain itself
+            // through its own handler, so releasing the property would neither free nor cancel
+            // it — and cancelling is what stops it firing into a layer that has been torn down.
+            guard let self, let source, let app = self.app else { return }
+            let data = source.data
+            // Ordered worst-first: the mask can carry more than one bit, and the honest
+            // reading of "warning and critical" is critical.
+            let level: UInt32 = data.contains(.critical) ? 2 : (data.contains(.warning) ? 1 : 0)
+            var tier: UInt32 = 0
+            _ = sift_memory_pressure(UnsafeMutablePointer(app), level, &tier)
+        }
+        source.resume()
+        pressureSource = source
     }
 
     // MARK: - The always-on surface
@@ -638,7 +700,28 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// distrust in the whole design, and which is only credible if the user can *see* the
     /// difference between a closed window and a quit application.
     private func syncActivationPolicy() {
-        NSApp.setActivationPolicy(windows.isEmpty ? .accessory : .regular)
+        NSApp.setActivationPolicy(hasVisibleWindow ? .regular : .accessory)
+    }
+
+    /// Whether any window this shell owns is on screen.
+    ///
+    /// **Not just the main ones.** Reading `windows` alone was survivable while the only way
+    /// to empty it was a user closing a window by hand — they were looking at the window they
+    /// closed. L3 empties it without a gesture, and it can do so while Settings, the runtime
+    /// panel, the message-debug window or the add-account flow is open: Sift would drop out of
+    /// the dock and the switcher with one of its own windows still visible, which the comment
+    /// on the policy change calls a window "the activation machinery treats as belonging to
+    /// something the user cannot switch to". There would then be no way back to it.
+    private var hasVisibleWindow: Bool {
+        if !windows.isEmpty { return true }
+        let auxiliary: [NSWindow?] = [
+            addAccount?.window,
+            settingsWindow?.window,
+            runtimePanel?.window,
+            debugWindow?.window,
+        ]
+        if auxiliary.contains(where: { $0?.isVisible == true }) { return true }
+        return standaloneReaders.contains { $0.window?.isVisible == true }
     }
 
     /// The tray's one pause control, which is a toggle rather than a second verb.
@@ -888,7 +971,7 @@ private func hostCallbacks() -> SiftHostCallbacks {
         destroy_every_window: { _ in
             // L3. Destroys every window shell and leaves this one, because removing the tray
             // would leave the application unreachable.
-            DispatchQueue.main.async { NSApp.windows.forEach { $0.close() } }
+            DispatchQueue.main.async { ApplicationShell.shared.destroyWindowShells() }
         },
         reauthentication_needed: { _, _ in
             // FR-2 — the one account condition that must reach the user with **no window

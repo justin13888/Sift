@@ -148,3 +148,120 @@ fn re_arming_does_not_accumulate_timers() {
         "the account was synced once per arming: {report:?}"
     );
 }
+
+#[test]
+fn a_tier_walks_all_the_way_back_to_l0_without_further_pressure_signals() {
+    // **The platform's signal is edge-triggered.** It fires when the state changes, so after
+    // a machine calms down there are no further signals — and `Governor::tick` releases one
+    // tier per call. Without the wheel re-ticking it, L3 would descend to L2 on the single
+    // `normal` event and stall there for the life of the process, with the body view and
+    // every cache below it still shed and nothing to say why.
+    let hand = std::sync::Arc::new(Hand::new());
+    let mut app = App::with_clock(Box::new(Shared(std::sync::Arc::clone(&hand))));
+    app.add_replayed_account("mail").expect("added");
+    app.arm_periodic();
+
+    assert!(
+        app.memory_pressure(sift_governor::Pressure::Critical)
+            .is_some()
+    );
+    assert_eq!(app.tier(), sift_governor::Tier::L3);
+
+    // One `normal` edge, and then nothing — which is all a real source delivers.
+    app.memory_pressure(sift_governor::Pressure::Normal);
+
+    // Only the wheel from here. Each fire is a minute apart, and L-19's dwell is a minute, so
+    // the tier should come down a step at a time rather than all at once or not at all.
+    for _ in 0..4 {
+        advance(&hand, Duration::from_secs(65));
+        let _ = app.tick();
+    }
+
+    assert_eq!(
+        app.tier(),
+        sift_governor::Tier::L0,
+        "the tier stalled on the way back down, so a shed outlived the pressure that caused it"
+    );
+}
+
+#[test]
+fn a_still_critical_system_is_not_released_by_the_wheel() {
+    // The re-tick uses the *last level the platform reported*, not an assumption of calm. A
+    // system that went critical and stayed there sends no further signal, and releasing on
+    // that silence would undo the shed while the pressure that caused it was still present.
+    let hand = std::sync::Arc::new(Hand::new());
+    let mut app = App::with_clock(Box::new(Shared(std::sync::Arc::clone(&hand))));
+    app.add_replayed_account("mail").expect("added");
+    app.arm_periodic();
+
+    app.memory_pressure(sift_governor::Pressure::Critical);
+    assert_eq!(app.tier(), sift_governor::Tier::L3);
+
+    for _ in 0..5 {
+        advance(&hand, Duration::from_secs(65));
+        let _ = app.tick();
+    }
+
+    assert_eq!(
+        app.tier(),
+        sift_governor::Tier::L3,
+        "the wheel released a tier while the system was still under critical pressure"
+    );
+}
+
+#[test]
+fn a_container_with_no_accounts_still_walks_a_tier_back_down() {
+    // The governor's clock is the wheel, and the wheel used to be armed per account — so a
+    // fresh install with nothing added went to L3 under pressure and stayed there for the
+    // life of the process: every window destroyed, nothing to poll, and therefore nothing to
+    // bring it back. A held tier is installation work, not an account's.
+    let hand = std::sync::Arc::new(Hand::new());
+    let mut app = App::with_clock(Box::new(Shared(std::sync::Arc::clone(&hand))));
+
+    // **No `arm_periodic` by hand.** Calling it here is what an earlier version of this test
+    // did, and it hid the defect exactly: the boundary never called it on the pressure path,
+    // so a real installation with no accounts stayed at L3 for the life of the process while
+    // this test passed. `App::memory_pressure` arms the wheel itself now.
+    app.memory_pressure(sift_governor::Pressure::Critical);
+    assert_eq!(app.tier(), sift_governor::Tier::L3);
+    assert!(
+        app.next_wake().is_some(),
+        "nothing was armed, so the tier has no clock and can never come down"
+    );
+
+    app.memory_pressure(sift_governor::Pressure::Normal);
+    for _ in 0..4 {
+        advance(&hand, Duration::from_secs(65));
+        let _ = app.tick();
+    }
+    assert_eq!(app.tier(), sift_governor::Tier::L0);
+}
+
+#[test]
+fn a_warning_tier_does_not_revoke_the_open_documents_token() {
+    // Only L3 destroys the views that hold a capability token, and D-67's callback set is
+    // closed at six with nothing that can destroy a body view. Revoking at L2 would leave the
+    // reader on screen with a document whose every resource request answers `Revoked` and
+    // whose consent buttons fail — with no way for the shell to say why. FR-33 requires the
+    // reason be stated, and a dead view that says nothing is worse than an unreleased cache.
+    let mut app = App::new();
+    app.add_replayed_account("mail").expect("added");
+    app.sync("mail", 1).expect("sync");
+    let listed = sift_app::list_messages(app.account("mail").expect("open")).expect("list");
+    let id = listed.first().expect("a message").0;
+
+    let document = app.open_document(id, false).expect("opened");
+    app.memory_pressure(sift_governor::Pressure::Warning);
+    assert_eq!(app.tier(), sift_governor::Tier::L2);
+    assert!(
+        app.resources.origin_of(&document.token).is_some(),
+        "L2 revoked the token of a document still on screen"
+    );
+
+    app.memory_pressure(sift_governor::Pressure::Critical);
+    assert_eq!(app.tier(), sift_governor::Tier::L3);
+    assert!(
+        app.resources.origin_of(&document.token).is_none(),
+        "L3 destroys every window, so a token that outlived one would be unrevocable"
+    );
+}

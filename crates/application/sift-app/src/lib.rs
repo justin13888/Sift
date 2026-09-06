@@ -289,6 +289,25 @@ pub struct App {
     clock: Box<dyn sift_scheduler::clock::Clock>,
     /// What `arm_periodic` armed last time, so it can take it back rather than adding to it.
     armed: Vec<sift_scheduler::wheel::TimerId>,
+    /// D-93's governor. **One serialized owner of "the current tier"**, so a critical signal
+    /// arriving mid-L2 supersedes rather than interleaving.
+    governor: sift_governor::Governor,
+    /// When the last pressure signal was seen, so the hysteresis dwell is measured rather
+    /// than assumed. L-19 releases a tier only after pressure has been clear for that long.
+    ///
+    /// **On the same clock as the wheel**, deliberately. Reading `Instant::now()` here would
+    /// put a second clock in a struct that already has one — the dwell would then be
+    /// unmeasurable by any test that drives time, and the wheel that re-ticks the governor
+    /// would advance while the dwell it feeds did not.
+    last_pressure_at: Option<sift_scheduler::clock::Monotonic>,
+    /// The last level the platform reported.
+    ///
+    /// **Remembered because the signal is edge-triggered.** A platform pressure source fires
+    /// when the state *changes*, so after pressure clears there are no further signals — and
+    /// `Governor::tick` releases one tier per call. Without a remembered level and a clock to
+    /// re-tick against, the tier would descend one step and stall there for the life of the
+    /// process, with every cache below it still shed.
+    last_pressure: sift_governor::Pressure,
     /// FR-8's *load once* — **the one message in front of the user**.
     ///
     /// Keyed on the message rather than on a token because accepting re-renders, and a
@@ -352,6 +371,9 @@ impl App {
             wheel: sift_scheduler::wheel::Wheel::new(sift_foundation::limits::L31_WHEEL_SLACK),
             clock,
             armed: Vec::new(),
+            governor: sift_governor::Governor::new(),
+            last_pressure_at: None,
+            last_pressure: sift_governor::Pressure::Normal,
             allowed_once_message: None,
         }
     }
@@ -1237,6 +1259,17 @@ impl App {
                     .arm(deadline, Some(account), Work::FlushMutations),
             );
         }
+
+        // **A held tier arms the wheel even with no accounts.** The governor's hysteresis is
+        // clocked by these fires, and arming only per account meant a fresh install with
+        // nothing added went to L3 under pressure and stayed there for the life of the
+        // process — every window destroyed, nothing to poll, and so nothing to bring it back.
+        // This work belongs to the installation rather than to an account, which is what
+        // `Maintenance` is for.
+        if self.governor.tier() > sift_governor::Tier::L0 {
+            self.armed
+                .push(self.wheel.arm(deadline, None, Work::Maintenance));
+        }
     }
 
     /// How long until the wheel's next fire, if anything is armed.
@@ -1291,6 +1324,22 @@ impl App {
                 _ => {}
             }
         }
+        // **The wheel is the governor's clock.** The platform's pressure source is
+        // edge-triggered, so once the machine is calm nothing signals again — and the
+        // hysteresis releases one tier per call. Re-ticking here against the last level the
+        // platform reported is what lets L3 walk back to L0 one step at a time, as D-93
+        // requires, instead of stopping at the first step. Re-ticking against the *last*
+        // level rather than assuming calm is what keeps a still-critical system at L3.
+        if self.governor.tier() > sift_governor::Tier::L0 {
+            let pressure = self.last_pressure;
+            // Discarded deliberately, and this is the reason: on a wheel fire the tier is
+            // already at least what `last_pressure` demands — the entry point raised it when
+            // the signal arrived — so this call can only release, never deepen. There is no
+            // L3 to issue from here, and a branch pretending otherwise would be dead code
+            // carrying a host callback.
+            let _ = self.memory_pressure(pressure);
+        }
+
         self.arm_periodic();
         report
     }
@@ -1310,6 +1359,63 @@ impl App {
     /// "once" that outlived the process would be a durable allowance nobody asked for.
     pub fn allow_remote_content_once(&mut self, id: LocalId) {
         self.allowed_once_message = Some(id);
+    }
+
+    /// The operating system says memory is under pressure — D-93.
+    ///
+    /// **Subscribed to, never polled.** Polling free memory is both a wakeup counted against
+    /// NFR-11 and a worse signal than the one the system already computes, so this is only
+    /// ever called from a platform pressure source.
+    ///
+    /// Returns the transition where one happened, so the boundary can issue its sheds. A shed
+    /// is *issued* and never awaited: at L3 destroying windows is a host callback on the
+    /// shell's main loop, and waiting on it from here would be a deadlock rather than a delay.
+    pub fn memory_pressure(
+        &mut self,
+        pressure: sift_governor::Pressure,
+    ) -> Option<sift_governor::Transition> {
+        let now = self.clock.monotonic();
+        let elapsed = self
+            .last_pressure_at
+            .map_or(core::time::Duration::ZERO, |then| now.since(then));
+        self.last_pressure_at = Some(now);
+        self.last_pressure = pressure;
+        let transition = self.governor.tick(pressure, elapsed);
+        if let Some(t) = &transition {
+            self.shed(t);
+        }
+        // The wheel is the governor's clock, and a tier entered with nothing armed would never
+        // be released. Armed here rather than only at the boundary so that any caller which
+        // can raise a tier also gives it a way down.
+        self.arm_periodic();
+        transition
+    }
+
+    /// The tier the governor is holding.
+    #[must_use]
+    pub fn tier(&self) -> sift_governor::Tier {
+        self.governor.tier()
+    }
+
+    /// Release what a tier says to release, for the caches this layer owns.
+    ///
+    /// The window destruction L3 also requires is not here and cannot be: only a shell owns a
+    /// window. The boundary issues that one as a host callback.
+    fn shed(&mut self, transition: &sift_governor::Transition) {
+        // **Tokens are revoked only where the views holding them are actually destroyed**,
+        // which today is L3 and only L3. D-67's callback set is closed at six and contains
+        // nothing that can destroy a body view, so at L2 the window and the reader stay on
+        // screen — and revoking there would leave a live document whose every resource
+        // request answers `Revoked`, whose "Load images" button fails, and whose reason the
+        // shell has no way to state. FR-33 requires the reason be given; a dead view that
+        // says nothing is worse than a cache that was not released.
+        //
+        // L2's own targets — the body view, parsed-MIME, database memory, the search index —
+        // are not held by this layer yet, so L2 transitions and releases nothing. That is
+        // stated rather than hidden: the tier is real and the release is outstanding.
+        if transition.to == sift_governor::Tier::L3 {
+            self.resources.shed();
+        }
     }
 
     /// Whether the user has paused this account — D-95, per account.

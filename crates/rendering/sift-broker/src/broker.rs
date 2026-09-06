@@ -213,6 +213,25 @@ impl Broker {
         }
     }
 
+    /// Release what a shed tier says to release — D-93.
+    ///
+    /// **Every live document goes**, which means every capability token with it — so this is
+    /// called only where the views holding those tokens are actually destroyed, which today is
+    /// L3 and only L3.
+    ///
+    /// That qualification is the correction of an earlier premise. This used to say "L2
+    /// destroys the body view and L3 destroys every window", and the first half was not true
+    /// of anything that exists: D-67's callback set is closed at six and contains nothing that
+    /// can destroy a body view, so revoking at L2 left a reader on screen whose every resource
+    /// request answered `Revoked` and whose reason no shell could state.
+    ///
+    /// Durable per-sender allowances are **kept**. They are the user's decisions rather than a
+    /// cache, and a shed that silently withdrew consent would make memory pressure quietly
+    /// change what Sift is permitted to fetch.
+    pub fn shed(&mut self) {
+        self.documents.clear();
+    }
+
     /// Whether this document carries a one-off allowance.
     ///
     /// The state is otherwise only observable through a fetch, and a fetch also passes through

@@ -1646,9 +1646,11 @@ fn run_tick(layer: &Layer) {
         let Ok(mut session) = layer.session.lock() else {
             return;
         };
-        // The report is dropped here rather than returned: FR-34's panel reads the queue and
-        // the conditions directly, and a fire that reported into nothing would be a second
-        // source of truth for what the first one already says.
+        // The report is dropped: FR-34's panel reads the queue and the conditions directly,
+        // and a fire that reported into nothing would be a second source of truth. A wheel
+        // fire cannot deepen a tier — it re-ticks the governor against the last level the
+        // platform reported, and the tier already satisfies that — so there is no L3 to issue
+        // from here either.
         let _ = session.app_mut().tick();
     }
     // Outside the session lock, because it calls into the shell and a shell is permitted to
@@ -2191,6 +2193,79 @@ pub unsafe extern "C" fn sift_allow_remote_content(
     }
 }
 
+/// D-93 — the operating system says memory is under pressure.
+///
+/// `pressure` is 0 normal, 1 warning, 2 critical, and anything else is treated as critical:
+/// an unrecognised level from a platform source is not an argument for doing less.
+///
+/// **Subscribed to, never polled.** Polling free memory is both a wakeup counted against
+/// NFR-11 and a worse signal than the one the system already computes, so a shell arms a
+/// platform pressure source and calls this from it.
+///
+/// Returns the tier the governor now holds, so a shell can show it. The sheds are *issued*
+/// here and never awaited — NFR-13's deadline is an issue deadline, and at L3 window
+/// destruction is a host callback on the shell's own loop, so waiting on it from inside this
+/// call would be a deadlock rather than a delay.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_memory_pressure(
+    app: *mut SiftApp,
+    pressure: u32,
+    out: *mut u32,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let level = match pressure {
+                0 => sift_governor::Pressure::Normal,
+                1 => sift_governor::Pressure::Warning,
+                // Including every value the enumeration does not name. A platform that grows a
+                // level Sift does not know is telling it about *more* pressure, not less.
+                _ => sift_governor::Pressure::Critical,
+            };
+            let (transition, tier) = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                let app = session.app_mut();
+                let transition = app.memory_pressure(level);
+                // **Arm the wheel here, or a held tier has no clock.** The governor's
+                // hysteresis is advanced by wheel fires, and on an installation with no
+                // accounts nothing else ever arms one — so pressure would raise the tier and
+                // it would stay raised for the life of the process, every window destroyed
+                // and nothing to bring it back. This is the only path that can put the
+                // application into a tier, so it is the path that has to give it a clock.
+                app.arm_periodic();
+                (transition, app.tier())
+            };
+            crate::layer::ensure_timer(layer);
+
+            // Outside the session lock, because it calls into the shell and a shell destroying
+            // its windows will call back — which is the self-deadlock the sink lock had.
+            if let Some(transition) = transition
+                && transition.to == sift_governor::Tier::L3
+            {
+                // L3 destroys every window and every window shell's view hierarchy, and leaves
+                // the application shell that owns the always-on surface. Removing that too
+                // would make a resident process the user can only kill.
+                (layer.host.destroy_every_window)(layer.host.context);
+            }
+            Ok(tier_ordinal(tier))
+        })
+    }
+}
+
+/// The tier as a number the boundary can carry. Ordinal rather than a bitfield: the tiers are
+/// ordered, and the ordering is what the hysteresis releases one step at a time.
+const fn tier_ordinal(tier: sift_governor::Tier) -> u32 {
+    match tier {
+        sift_governor::Tier::L0 => 0,
+        sift_governor::Tier::L1 => 1,
+        sift_governor::Tier::L2 => 2,
+        sift_governor::Tier::L3 => 3,
+    }
+}
+
 /// FR-30: every navigation target, with the destination the confirmation sheet must show.
 ///
 /// # Safety
@@ -2639,6 +2714,22 @@ mod tests {
         TIMERS_ARMED.fetch_add(1, Ordering::SeqCst);
         LAST_DELAY.store(delay, Ordering::SeqCst);
         LAST_LEEWAY.store(leeway, Ordering::SeqCst);
+    }
+
+    /// Counts L3's window destruction. **One counter per test**, because the tests run in
+    /// parallel and a shared one makes each of them fail depending on the other's timing —
+    /// which reads as a defect in the code under test and is not one.
+    static DESTROYED_BY_CRITICAL: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    static DESTROYED_BY_UNKNOWN: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    extern "C" fn count_destroy_critical(_: *mut c_void) {
+        DESTROYED_BY_CRITICAL.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    extern "C" fn count_destroy_unknown(_: *mut c_void) {
+        DESTROYED_BY_UNKNOWN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// A schedule that drops the ticket on the floor, as a shell whose window closed does.
@@ -3392,6 +3483,89 @@ mod tests {
             unsafe { sift_allow_remote_content(app, bogus.as_ptr(), bogus.len(), 0) },
             SiftStatus::Failed
         );
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// D-93, on the boundary. The governor was a complete tier machine with hysteresis that
+    /// **no crate depended on**, so the operating system's pressure signal had nowhere to
+    /// arrive and L3 destroyed nothing, ever.
+    #[test]
+    fn critical_pressure_reaches_l3_and_destroys_every_window() {
+        use std::sync::atomic::Ordering;
+        ephemeral();
+        DESTROYED_BY_CRITICAL.store(0, Ordering::SeqCst);
+
+        let mut app: *mut SiftApp = core::ptr::null_mut();
+        let mut callbacks = callbacks();
+        callbacks.destroy_every_window = count_destroy_critical;
+        let init = SiftInit {
+            container_root: SiftStr::new(scratch_str()),
+            schedule: run_inline,
+            schedule_context: core::ptr::null_mut(),
+            arm_timer: never_fires,
+            oauth_client_id: SiftStr::new(""),
+            registered_schemes: SiftStr::new(""),
+        };
+        assert_eq!(
+            unsafe { sift_initialize(callbacks, init, &raw mut app) },
+            SiftStatus::Ok
+        );
+
+        let mut tier = 0u32;
+        assert_eq!(
+            unsafe { sift_memory_pressure(app, 0, &raw mut tier) },
+            SiftStatus::Ok
+        );
+        assert_eq!(tier, 0, "normal pressure moved off L0");
+        assert_eq!(
+            DESTROYED_BY_CRITICAL.load(Ordering::SeqCst),
+            0,
+            "windows were destroyed with no pressure at all"
+        );
+
+        assert_eq!(
+            unsafe { sift_memory_pressure(app, 2, &raw mut tier) },
+            SiftStatus::Ok
+        );
+        assert_eq!(tier, 3, "critical pressure did not reach L3");
+        assert_eq!(
+            DESTROYED_BY_CRITICAL.load(Ordering::SeqCst),
+            1,
+            "L3 did not destroy every window, which is the whole of what L3 is"
+        );
+
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// A level the enumeration does not name is *more* pressure, not less. A platform that
+    /// grows one must not be able to make Sift do nothing by naming it.
+    #[test]
+    fn an_unrecognised_pressure_level_is_treated_as_critical() {
+        use std::sync::atomic::Ordering;
+        ephemeral();
+        DESTROYED_BY_UNKNOWN.store(0, Ordering::SeqCst);
+
+        let mut app: *mut SiftApp = core::ptr::null_mut();
+        let mut callbacks = callbacks();
+        callbacks.destroy_every_window = count_destroy_unknown;
+        let init = SiftInit {
+            container_root: SiftStr::new(scratch_str()),
+            schedule: run_inline,
+            schedule_context: core::ptr::null_mut(),
+            arm_timer: never_fires,
+            oauth_client_id: SiftStr::new(""),
+            registered_schemes: SiftStr::new(""),
+        };
+        assert_eq!(
+            unsafe { sift_initialize(callbacks, init, &raw mut app) },
+            SiftStatus::Ok
+        );
+
+        let mut tier = 0u32;
+        let _ = unsafe { sift_memory_pressure(app, 99, &raw mut tier) };
+        assert_eq!(tier, 3);
+        assert_eq!(DESTROYED_BY_UNKNOWN.load(Ordering::SeqCst), 1);
+
         let _ = unsafe { sift_shutdown(app) };
     }
 
