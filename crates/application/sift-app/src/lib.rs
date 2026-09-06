@@ -289,6 +289,12 @@ pub struct App {
     clock: Box<dyn sift_scheduler::clock::Clock>,
     /// What `arm_periodic` armed last time, so it can take it back rather than adding to it.
     armed: Vec<sift_scheduler::wheel::TimerId>,
+    /// D-93's governor. **One serialized owner of "the current tier"**, so a critical signal
+    /// arriving mid-L2 supersedes rather than interleaving.
+    governor: sift_governor::Governor,
+    /// When the last pressure signal was seen, so the hysteresis dwell is measured rather
+    /// than assumed. L-19 releases a tier only after pressure has been clear for that long.
+    last_pressure_at: Option<std::time::Instant>,
     /// FR-8's *load once* — **the one message in front of the user**.
     ///
     /// Keyed on the message rather than on a token because accepting re-renders, and a
@@ -352,6 +358,8 @@ impl App {
             wheel: sift_scheduler::wheel::Wheel::new(sift_foundation::limits::L31_WHEEL_SLACK),
             clock,
             armed: Vec::new(),
+            governor: sift_governor::Governor::new(),
+            last_pressure_at: None,
             allowed_once_message: None,
         }
     }
@@ -1310,6 +1318,58 @@ impl App {
     /// "once" that outlived the process would be a durable allowance nobody asked for.
     pub fn allow_remote_content_once(&mut self, id: LocalId) {
         self.allowed_once_message = Some(id);
+    }
+
+    /// The operating system says memory is under pressure — D-93.
+    ///
+    /// **Subscribed to, never polled.** Polling free memory is both a wakeup counted against
+    /// NFR-11 and a worse signal than the one the system already computes, so this is only
+    /// ever called from a platform pressure source.
+    ///
+    /// Returns the transition where one happened, so the boundary can issue its sheds. A shed
+    /// is *issued* and never awaited: at L3 destroying windows is a host callback on the
+    /// shell's main loop, and waiting on it from here would be a deadlock rather than a delay.
+    pub fn memory_pressure(
+        &mut self,
+        pressure: sift_governor::Pressure,
+    ) -> Option<sift_governor::Transition> {
+        let now = std::time::Instant::now();
+        let elapsed = self
+            .last_pressure_at
+            .map_or(core::time::Duration::ZERO, |then| now.duration_since(then));
+        self.last_pressure_at = Some(now);
+        let transition = self.governor.tick(pressure, elapsed);
+        if let Some(t) = &transition {
+            self.shed(t);
+        }
+        transition
+    }
+
+    /// The tier the governor is holding.
+    #[must_use]
+    pub fn tier(&self) -> sift_governor::Tier {
+        self.governor.tier()
+    }
+
+    /// Release what a tier says to release, for the caches this layer owns.
+    ///
+    /// The window destruction L3 also requires is not here and cannot be: only a shell owns a
+    /// window. The boundary issues that one as a host callback.
+    fn shed(&mut self, transition: &sift_governor::Transition) {
+        use sift_subsystem::Subsystem;
+        for subsystem in &transition.sheds {
+            match subsystem {
+                // The broker's decoded-resource state and every live document token with it.
+                // A body view being destroyed at L2 and L3 makes the tokens unreachable
+                // anyway, and a token that outlived its view would be a capability nothing
+                // could revoke.
+                Subsystem::Broker | Subsystem::Bodyview => self.resources.shed(),
+                // The remaining subsystems own caches this layer does not hold yet. Naming
+                // them and doing nothing would be worse than the match being partial, so they
+                // are listed where the reader can see what is outstanding.
+                _ => {}
+            }
+        }
     }
 
     /// Whether the user has paused this account — D-95, per account.

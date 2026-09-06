@@ -28,6 +28,13 @@ sift-sync.workspace = true
 # poll, the queue flush, the backoff retry — had no caller, and mail arrived only when a
 # person did something. This is that edge.
 sift-scheduler.workspace = true
+# D-93's governor. The same story as the scheduler above it: a complete tier machine with
+# hysteresis, tested, and reached by no crate in the workspace — so the operating system's
+# pressure signal had nowhere to arrive and L3 never destroyed anything.
+sift-governor.workspace = true
+# The shed targets the governor names. One enum, so a tier and a cache cannot disagree
+# about which subsystem is which.
+sift-subsystem.workspace = true
 sift-mutations.workspace = true
 sift-credentials.workspace = true
 # The container's registry is sealed like any other database, under a key derived from the

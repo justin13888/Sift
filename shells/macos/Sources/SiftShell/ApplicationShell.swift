@@ -50,6 +50,11 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         // without it can be neither quit deliberately nor re-authenticated.
         installStatusItem()
 
+        // D-93's signal, **subscribed to rather than polled**. Polling free memory is both a
+        // wakeup counted against NFR-11 and a worse answer than the one the system already
+        // has — it knows about pressure before free memory reflects it.
+        installMemoryPressureSource()
+
         // A minimal bar first, so that a launch which fails before the layer exists is still
         // quittable from the keyboard — FR-24 does not allow an application that is frontmost
         // with no way out of it. The register-driven bar replaces this once there is a layer
@@ -185,6 +190,29 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         for timer in timers.values { timer.cancel() }
         timers.removeAll()
         if let app { _ = sift_shutdown(UnsafeMutablePointer(app)) }
+    }
+
+    /// The platform's own memory-pressure source.
+    ///
+    /// Held for the life of the process: a `DispatchSource` that nothing retains is cancelled
+    /// when it is deallocated, and a cancelled source delivers nothing — which would look
+    /// exactly like a system that never came under pressure.
+    private var pressureSource: DispatchSourceMemoryPressure?
+
+    private func installMemoryPressureSource() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.normal, .warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            guard let self, let app = self.app else { return }
+            let data = source.data
+            // Ordered worst-first: the mask can carry more than one bit, and the honest
+            // reading of "warning and critical" is critical.
+            let level: UInt32 = data.contains(.critical) ? 2 : (data.contains(.warning) ? 1 : 0)
+            var tier: UInt32 = 0
+            _ = sift_memory_pressure(UnsafeMutablePointer(app), level, &tier)
+        }
+        source.resume()
+        pressureSource = source
     }
 
     // MARK: - The always-on surface

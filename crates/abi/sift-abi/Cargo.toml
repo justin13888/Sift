@@ -21,6 +21,8 @@ todo = "warn"
 dbg_macro = "deny"
 
 [dependencies]
+# D-93 tiers cross the boundary as an ordinal, so the enumeration is needed here.
+sift-governor.workspace = true
 sift-foundation.workspace = true
 sift-presentation.workspace = true
 # D-18's registry and the assembled application beneath it. The ABI is still a leaf: the

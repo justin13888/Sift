@@ -1567,6 +1567,26 @@ SiftStatus sift_allow_remote_content(SiftApp *app,
                                      uint8_t durable);
 
 /**
+ * D-93 — the operating system says memory is under pressure.
+ *
+ * `pressure` is 0 normal, 1 warning, 2 critical, and anything else is treated as critical:
+ * an unrecognised level from a platform source is not an argument for doing less.
+ *
+ * **Subscribed to, never polled.** Polling free memory is both a wakeup counted against
+ * NFR-11 and a worse signal than the one the system already computes, so a shell arms a
+ * platform pressure source and calls this from it.
+ *
+ * Returns the tier the governor now holds, so a shell can show it. The sheds are *issued*
+ * here and never awaited — NFR-13's deadline is an issue deadline, and at L3 window
+ * destruction is a host callback on the shell's own loop, so waiting on it from inside this
+ * call would be a deadlock rather than a delay.
+ *
+ * # Safety
+ * `app` and `out` must be valid.
+ */
+SiftStatus sift_memory_pressure(SiftApp *app, uint32_t pressure, uint32_t *out);
+
+/**
  * FR-30: every navigation target, with the destination the confirmation sheet must show.
  *
  * # Safety

@@ -1668,6 +1668,7 @@ dependencies = [
  "sift-app",
  "sift-broker",
  "sift-foundation",
+ "sift-governor",
  "sift-presentation",
  "sift-session",
  "sift-subsystem",
@@ -1691,6 +1692,7 @@ dependencies = [
  "sift-credentials",
  "sift-crypto",
  "sift-foundation",
+ "sift-governor",
  "sift-http",
  "sift-index",
  "sift-mime",
@@ -1700,6 +1702,7 @@ dependencies = [
  "sift-registry",
  "sift-scheduler",
  "sift-store",
+ "sift-subsystem",
  "sift-sync",
 ]
 
