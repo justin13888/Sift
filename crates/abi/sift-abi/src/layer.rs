@@ -88,7 +88,6 @@ pub(crate) struct Layer {
     /// it against later. They are invoked as the states they carry become computable; the
     /// set is closed and stored whole so that a shell cannot be asked for one it did not
     /// supply.
-    #[allow(dead_code, reason = "D-67's set is stored whole at initialization")]
     pub(crate) host: SiftHostCallbacks,
     pub(crate) schedule: SiftSchedule,
     pub(crate) schedule_context: usize,
@@ -121,6 +120,26 @@ pub(crate) struct Layer {
     pub(crate) memory_rows: Mutex<Vec<crate::entry::SiftSubsystemBytes<'static>>>,
     pub(crate) stage_rows: Mutex<Vec<crate::repr::SiftStr<'static>>>,
     pub(crate) setting_rows: Mutex<Vec<crate::entry::SiftSetting<'static>>>,
+    /// The account list, and the text it borrows.
+    ///
+    /// **A shell cannot name an account without this.** Every other account-taking entry point
+    /// takes a label, and until now nothing across the boundary said what the labels were —
+    /// so a shell could add an account and then never sync, pause, authorize or flush it
+    /// again, and the runtime panel asked the user to type one in.
+    pub(crate) account_rows: Mutex<Vec<crate::entry::SiftAccount<'static>>>,
+    /// Each account's label and kind, paired. Paired rather than concatenated so that an
+    /// index cannot mean one account's name and another's kind.
+    pub(crate) account_names: Mutex<Vec<(String, String)>>,
+    /// The last account setting read back, held for the string handed out.
+    pub(crate) account_setting_value: Mutex<String>,
+    /// D-49's condition, per account, as the shell was last told it.
+    ///
+    /// **What makes the push a push.** The condition is computable at any moment and a shell
+    /// can poll it, but FR-2's re-authentication has to reach a user with no window open —
+    /// and a window-less process has nothing to poll from. So the layer compares against what
+    /// it last said and calls the host callback on a change, which is also what keeps the
+    /// callback from firing on every delivery with the same answer.
+    pub(crate) conditions: Mutex<BTreeMap<u128, u32>>,
     /// The text the setting rows borrow. Held separately because the rows are `repr(C)` and
     /// cannot own a `String`.
     pub(crate) setting_values: Mutex<Vec<String>>,

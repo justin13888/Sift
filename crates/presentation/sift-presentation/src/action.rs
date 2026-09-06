@@ -39,6 +39,28 @@ pub enum Scope {
     OpenMessage,
 }
 
+/// Whether anything behind this boundary can actually carry an action out.
+///
+/// **The third reason an action can be absent, and the one that was missing.** D-98 makes an
+/// unavailable action absent rather than greyed, and the mechanism for deciding that expressed
+/// only two things: whether the scope is satisfied and whether the account's capabilities
+/// permit the mutation. An action that no shell could perform at all was therefore offered in
+/// every menu and every palette, and pressing it did nothing or beeped — which is precisely
+/// what D-98's rule exists to prevent, arriving by a door the rule did not cover.
+///
+/// The reason travels with the identifier rather than living in a commit message, so a person
+/// adding the missing piece finds the sentence that says what is missing next to the thing
+/// that is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// A shell can carry it out.
+    Now,
+    /// Nothing can, yet. **Not a preference and not a capability** — those are the other two
+    /// reasons, and conflating them would tell a user their provider cannot do something that
+    /// no provider can do here.
+    NotYet(&'static str),
+}
+
 /// One action.
 #[derive(Debug, Clone, Copy)]
 pub struct Action {
@@ -53,6 +75,8 @@ pub struct Action {
     /// path outside the queue, which is a write with no compensation, no undo, and no
     /// crash-consistency.
     pub mutates: Option<MutationKind>,
+    /// Whether anything can carry it out yet, and why not where it cannot.
+    pub reach: Reach,
 }
 
 /// A mutating action's intent, named without its parameters — the parameters come from the
@@ -102,6 +126,7 @@ const fn act(id: &'static str, scope: Scope) -> Action {
         id,
         scope,
         mutates: None,
+        reach: Reach::Now,
     }
 }
 const fn mutate(id: &'static str, kind: MutationKind) -> Action {
@@ -109,6 +134,27 @@ const fn mutate(id: &'static str, kind: MutationKind) -> Action {
         id,
         scope: Scope::Selection,
         mutates: Some(kind),
+        reach: Reach::Now,
+    }
+}
+
+/// An action the register declares and nothing can perform yet, with the reason.
+const fn not_yet(id: &'static str, scope: Scope, why: &'static str) -> Action {
+    Action {
+        id,
+        scope,
+        mutates: None,
+        reach: Reach::NotYet(why),
+    }
+}
+
+/// The same, for one of FR-13's intents whose gesture has no surface to supply its parameter.
+const fn mutate_not_yet(id: &'static str, kind: MutationKind, why: &'static str) -> Action {
+    Action {
+        id,
+        scope: Scope::Selection,
+        mutates: Some(kind),
+        reach: Reach::NotYet(why),
     }
 }
 
@@ -121,7 +167,15 @@ pub const ACTIONS: &[Action] = &[
         "message.permanently-delete",
         MutationKind::PermanentlyDelete,
     ),
-    mutate("message.move-to-folder", MutationKind::MoveTo),
+    // **The parameter has nowhere to come from, for either shell.** A tag is a string a
+    // person types; a folder is one of a set, and no folder crosses this boundary — sync
+    // discovers them into the store and nothing lists them back. So this is the layer's gap
+    // rather than a missing picker, and it is absent until the folder list exists.
+    mutate_not_yet(
+        "message.move-to-folder",
+        MutationKind::MoveTo,
+        "no folder crosses this boundary yet, so there is no destination to move to",
+    ),
     mutate("message.flag", MutationKind::Flag),
     mutate("message.mark-read", MutationKind::MarkRead),
     mutate("message.mark-unread", MutationKind::MarkUnread),
@@ -136,20 +190,53 @@ pub const ACTIONS: &[Action] = &[
     act("read.previous-message", Scope::Window),
     act("read.next-unread", Scope::Window),
     act("read.previous-unread", Scope::Window),
-    act("read.expand-thread", Scope::Selection),
-    act("read.collapse-thread", Scope::Selection),
-    act("read.show-plain-text", Scope::OpenMessage),
-    act("read.show-raw-source", Scope::OpenMessage),
+    not_yet(
+        "read.expand-thread",
+        Scope::Selection,
+        "the list presents no threads to expand — D-54's native rows are not built yet",
+    ),
+    not_yet(
+        "read.collapse-thread",
+        Scope::Selection,
+        "the list presents no threads to collapse — D-54's native rows are not built yet",
+    ),
+    not_yet(
+        "read.show-plain-text",
+        Scope::OpenMessage,
+        "the pipeline offers one rendering across this boundary, and it is the sanitized one",
+    ),
+    not_yet(
+        "read.show-raw-source",
+        Scope::OpenMessage,
+        "a raw payload never crosses this boundary; FR-33's debug view is what shows the stages",
+    ),
     act("read.toggle-dark-transform", Scope::OpenMessage),
-    act("read.allow-remote-content-for-sender", Scope::OpenMessage),
-    act("read.find-in-message", Scope::OpenMessage),
+    not_yet(
+        "read.allow-remote-content-for-sender",
+        Scope::OpenMessage,
+        "the sender's origin is not attested, so there is no sender to record the choice against",
+    ),
+    not_yet(
+        "read.find-in-message",
+        Scope::OpenMessage,
+        "finding inside a body needs a search surface the reader does not have, and the body \
+         view runs no script that could provide one",
+    ),
     // FR-41. These hand off to the platform's mail handler and construct nothing.
     act("read.reply", Scope::OpenMessage),
     act("read.reply-all", Scope::OpenMessage),
     act("read.forward", Scope::OpenMessage),
     // Navigation.
-    act("navigate.next-folder", Scope::Window),
-    act("navigate.previous-folder", Scope::Window),
+    not_yet(
+        "navigate.next-folder",
+        Scope::Window,
+        "no folder crosses this boundary yet — sync discovers them and nothing lists them",
+    ),
+    not_yet(
+        "navigate.previous-folder",
+        Scope::Window,
+        "no folder crosses this boundary yet — sync discovers them and nothing lists them",
+    ),
     act("navigate.next-account", Scope::Window),
     act("navigate.previous-account", Scope::Window),
     act("navigate.unified-inbox", Scope::Window),
@@ -161,7 +248,11 @@ pub const ACTIONS: &[Action] = &[
     act("search.begin", Scope::Window),
     act("search.clear", Scope::Window),
     act("search.narrow-to-account", Scope::Window),
-    act("search.narrow-to-folder", Scope::Window),
+    not_yet(
+        "search.narrow-to-folder",
+        Scope::Window,
+        "no folder crosses this boundary yet, so there is nothing to narrow to",
+    ),
     // Application.
     act("app.new-window", Scope::Application),
     act("app.close-window", Scope::Window),
@@ -197,6 +288,13 @@ impl Action {
     /// **Not enabled means absent from the palette**, not shown disabled.
     #[must_use]
     pub fn is_available(&self, ctx: &Context<'_>) -> bool {
+        // **First, because it is the reason that does not depend on state.** An action nothing
+        // can perform is absent in every account and every selection, and reporting it as a
+        // scope or a capability problem would tell a user their provider cannot do something
+        // that no provider can do here.
+        if matches!(self.reach, Reach::NotYet(_)) {
+            return false;
+        }
         let scope_ok = match self.scope {
             Scope::Application => true,
             Scope::Window => ctx.has_window,
@@ -389,11 +487,51 @@ mod tests {
         };
         assert!(!by_id("message.archive").unwrap().is_available(&unknown));
         assert!(
-            by_id("read.show-raw-source")
+            by_id("read.toggle-dark-transform")
                 .unwrap()
                 .is_available(&unknown),
             "reading is not gated"
         );
+    }
+
+    #[test]
+    fn an_action_nothing_can_perform_is_absent_whatever_the_account_declares() {
+        // D-98's rule is that an unavailable action is absent rather than greyed, and until
+        // `Reach` existed the mechanism could only express scope and capability — so an action
+        // no shell could carry out was offered everywhere and did nothing when pressed.
+        let everything = Context {
+            selection_len: 1,
+            has_open_message: true,
+            has_window: true,
+            capabilities: None,
+        };
+        for id in [
+            "read.show-raw-source",
+            "read.find-in-message",
+            "navigate.next-folder",
+            "search.narrow-to-folder",
+        ] {
+            let action = by_id(id).expect("in the register");
+            assert!(
+                matches!(action.reach, Reach::NotYet(_)),
+                "`{id}` should carry the reason it cannot be performed"
+            );
+            assert!(
+                !action.is_available(&everything),
+                "`{id}` is offered in a context that satisfies its scope"
+            );
+        }
+        // And the reason is a sentence rather than an empty marker: it is what a person
+        // adding the missing piece reads first.
+        for action in ACTIONS {
+            if let Reach::NotYet(why) = action.reach {
+                assert!(
+                    why.len() > 20,
+                    "`{}` says nothing about why it cannot be performed",
+                    action.id
+                );
+            }
+        }
     }
 
     #[test]

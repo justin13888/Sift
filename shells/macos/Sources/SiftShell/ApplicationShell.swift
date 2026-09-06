@@ -109,6 +109,11 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         } else {
             beginAddAccount()
         }
+        // The badge says what is true of the accounts the container already held. Asked once,
+        // here, rather than waited for: the push exists for what changes afterwards, and a
+        // shell that only had the push would draw nothing until something did.
+        refreshAnnunciator()
+        refreshTrayState()
     }
 
     /// D-36's callback, arriving through the registered URI scheme.
@@ -287,6 +292,37 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             debugWindow = window
             window.present(row)
             return
+        case "app.pause-sync", "app.resume-sync":
+            // **D-95 puts the pause on the account, and this menu item is over all of them.**
+            // The register has one application-scoped action rather than one per account, so
+            // the shell is what fans it out; the layer holds the flag, one per account, and
+            // D-49 turns it into a condition the annunciator draws.
+            setPaused(id == "app.pause-sync")
+            return
+        case "undo.last-gesture":
+            // **Its own entry point, not the register's.** `undo.last-gesture` is in D-98's
+            // set and has no intent behind it, so invoking it across the boundary returned
+            // success and reversed nothing — which is what the undo toast was wired to. The
+            // reversal acts over D-85's undo group rather than over a message, so a bulk
+            // operation reverses as the one gesture FR-17 promises.
+            guard let app else { return }
+            var reversal = SiftGesture()
+            if sift_undo_last(UnsafeMutablePointer(app), &reversal) != Ok {
+                // Nothing to reverse, or nothing about it was reversible. D-98's rule for an
+                // action that is not available is silence, not an alert announcing a
+                // capability the user does not have.
+                NSSound.beep()
+                return
+            }
+            for window in windows { window.refreshChrome() }
+            return
+        case "app.add-account":
+            // **The one gesture that was bound to nothing.** It reached the register, crossed
+            // the boundary, found an action with no intent behind it and came back `Ok` — so
+            // nothing happened and nothing said so. Adding an account is the shell's own work:
+            // there is no intent for it, and the layer has no window to open.
+            beginAddAccount()
+            return
         case "app.open-settings":
             guard let app else { return }
             let window = settingsWindow ?? SettingsWindow(app: app)
@@ -307,6 +343,65 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             let panel = runtimePanel ?? RuntimePanel(app: app)
             runtimePanel = panel
             panel.present()
+            return
+        case "read.next-message":
+            windows.first?.moveSelection(by: 1, unreadOnly: false)
+            return
+        case "read.previous-message":
+            windows.first?.moveSelection(by: -1, unreadOnly: false)
+            return
+        case "read.next-unread":
+            windows.first?.moveSelection(by: 1, unreadOnly: true)
+            return
+        case "read.previous-unread":
+            windows.first?.moveSelection(by: -1, unreadOnly: true)
+            return
+        case "navigate.focus-sidebar":
+            windows.first?.focus(.sidebar)
+            return
+        case "navigate.focus-list":
+            windows.first?.focus(.list)
+            return
+        case "navigate.focus-reader":
+            windows.first?.focus(.reader)
+            return
+        case "navigate.unified-inbox":
+            windows.first?.showUnifiedInbox()
+            return
+        case "navigate.next-account":
+            windows.first?.stepAccount(by: 1)
+            return
+        case "navigate.previous-account":
+            windows.first?.stepAccount(by: -1)
+            return
+        case "read.toggle-dark-transform":
+            windows.first?.toggleDarkTransform()
+            return
+        case "search.narrow-to-account":
+            windows.first?.narrowSearchToAccount()
+            return
+        case "read.reply", "read.reply-all", "read.forward":
+            // FR-41. **Sift constructs nothing and sends nothing** — there is no compose
+            // window and no outgoing server anywhere in this binary, and these hand the
+            // message to whatever the platform has registered for mail. A handoff that
+            // silently did nothing would be the worst of both: the product's largest adoption
+            // objection, answered with a shrug.
+            handOff(id)
+            return
+        case "message.add-tag", "message.remove-tag":
+            // **The parameter comes from the gesture, not the register.** These two carry a
+            // tag, the boundary takes one, and this shell had nothing to put in it — so both
+            // items were offered and both failed when pressed. A tag is a string a person
+            // types, which is what makes this a sheet rather than a picker: unlike a folder,
+            // there is no set to choose from across this boundary.
+            promptForTag(id)
+            return
+        case "message.permanently-delete":
+            // FR-14's single exception, and the only intent with no compensation. **Confirmed
+            // before it is issued** rather than undone afterwards, because there is nothing to
+            // undo once it has happened — so the layer refuses an unconfirmed one, and this
+            // shell was passing `confirmed: 0` and beeping.
+            confirmPermanentDelete()
             return
         case "search.begin", "navigate.focus-search":
             windows.first?.focusSearch()
@@ -341,6 +436,111 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         // rather than being applied here. The chrome is not an observation, so it is asked
         // once, here, where something is known to have happened.
         for window in windows { window.refreshChrome() }
+    }
+
+    /// FR-41's handoff: the message, in the user's own mail application.
+    ///
+    /// A `mailto:` address and nothing more. Sift has no draft to hand over — it has never
+    /// parsed one, it has no place to put one, and building one here would be the first line
+    /// of the send path scope forbids outright.
+    private func handOff(_ id: String) {
+        guard let row = windows.first?.selectedRow else {
+            NSSound.beep()
+            return
+        }
+        var components = URLComponents()
+        components.scheme = "mailto"
+        // Reply goes to the sender; forward goes to nobody, because the user picks. Reply-all
+        // needs every recipient, and the envelope this shell is given carries one address —
+        // so it is the same address, and the difference is the subject rather than a promise
+        // about recipients Sift cannot keep.
+        components.path = id == "read.forward" ? "" : address(in: row.sender)
+        let prefix = id == "read.forward" ? "Fwd: " : "Re: "
+        let subject = row.subject.hasPrefix(prefix) ? row.subject : prefix + row.subject
+        components.queryItems = [URLQueryItem(name: "subject", value: subject)]
+        guard let url = components.url, NSWorkspace.shared.open(url) else {
+            let alert = NSAlert()
+            alert.messageText = "Sift could not hand this message to a mail app."
+            alert.informativeText =
+                "Sift does not send mail — Reply and Forward pass the message to whichever "
+                + "app handles mail on this Mac, and this Mac has none set up."
+            alert.runModal()
+            return
+        }
+    }
+
+    /// The address out of a `Name <address>` envelope, or the whole string when there is none.
+    ///
+    /// NFR-54 requires the address be shown beside the display name rather than instead of it,
+    /// so the row carries both and this takes the half a mail handler can use.
+    private func address(in sender: String) -> String {
+        guard let open = sender.lastIndex(of: "<"), let close = sender.lastIndex(of: ">"),
+            open < close
+        else { return sender.trimmingCharacters(in: .whitespaces) }
+        return String(sender[sender.index(after: open)..<close])
+    }
+
+    /// Ask for the tag `message.add-tag` and `message.remove-tag` carry.
+    private func promptForTag(_ id: String) {
+        guard let app, let host = windows.first?.hostWindow else {
+            NSSound.beep()
+            return
+        }
+        let adding = id == "message.add-tag"
+        let alert = NSAlert()
+        alert.messageText = adding ? "Add a tag" : "Remove a tag"
+        alert.informativeText = adding
+            ? "The tag is applied to every message in the selection."
+            : "The tag is removed from every message in the selection that has it."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.placeholderString = "Tag"
+        alert.accessoryView = field
+        alert.addButton(withTitle: adding ? "Add" : "Remove")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: host) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            let tag = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            // An empty tag is not a tag. Refused here rather than sent, because the layer
+            // would refuse it and the refusal would arrive as a beep with no cause.
+            guard !tag.isEmpty else { return }
+            var gesture = SiftGesture()
+            let status = SiftText.withBytes(id) { idPtr, idLen in
+                SiftText.withBytes(tag) { tagPtr, tagLen in
+                    sift_invoke_action(
+                        UnsafeMutablePointer(app), idPtr, idLen, tagPtr, tagLen, 0, &gesture)
+                }
+            }
+            if status != Ok { NSSound.beep() }
+            for window in self.windows { window.refreshChrome() }
+        }
+        // The sheet is up; the field is where the person is going next.
+        DispatchQueue.main.async { host.makeFirstResponder(field) }
+    }
+
+    /// FR-14's one confirmation, as a sheet on the window that asked.
+    private func confirmPermanentDelete() {
+        guard let app, let host = windows.first?.hostWindow else {
+            NSSound.beep()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Delete permanently?"
+        alert.informativeText =
+            "This cannot be undone, and it is the one change Sift does not apply before the "
+            + "server has accepted it. Every other change can be reversed."
+        alert.addButton(withTitle: "Delete Permanently")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .critical
+        alert.beginSheetModal(for: host) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            var gesture = SiftGesture()
+            let id = "message.permanently-delete"
+            let status = SiftText.withBytes(id) { ptr, len in
+                sift_invoke_action(UnsafeMutablePointer(app), ptr, len, nil, 0, 1, &gesture)
+            }
+            if status != Ok { NSSound.beep() }
+            for window in self.windows { window.refreshChrome() }
+        }
     }
 
     @objc func openMainWindow() {
@@ -401,9 +601,93 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(windows.isEmpty ? .accessory : .regular)
     }
 
-    @objc private func pauseSync() { invoke("app.pause-sync") }
+    /// The tray's one pause control, which is a toggle rather than a second verb.
+    @objc private func pauseSync() {
+        invoke(everyAccountPaused() ? "app.resume-sync" : "app.pause-sync")
+    }
+
+    /// Whether every account is paused. **Vacuously false with no accounts**: there is nothing
+    /// paused, and offering to resume nothing is worse than offering to pause nothing.
+    private func everyAccountPaused() -> Bool {
+        guard let app else { return false }
+        let accounts = Account.all(app: app)
+        return !accounts.isEmpty && accounts.allSatisfy { $0.condition == Annunciator.pausedByUser }
+    }
+
+    /// Pause or resume every account.
+    ///
+    /// **It was invoked across the boundary and did nothing.** `app.pause-sync` is in D-98's
+    /// register with no intent behind it, so the tray item and the menu entry both reported
+    /// success and changed nothing — and there was no account-scoped storage for the flag to
+    /// live in either.
+    private func setPaused(_ paused: Bool) {
+        guard let app else { return }
+        let value = paused ? "true" : "false"
+        let key = "sync.paused"
+        for account in Account.all(app: app) {
+            _ = SiftText.withBytes(account.name) { namePtr, nameLen in
+                SiftText.withBytes(key) { keyPtr, keyLen in
+                    SiftText.withBytes(value) { valuePtr, valueLen in
+                        sift_set_account_setting(
+                            UnsafeMutablePointer(app), namePtr, nameLen, keyPtr, keyLen,
+                            valuePtr, valueLen)
+                    }
+                }
+            }
+        }
+        // The badge is what says it took. D-49 draws the worst condition across every account,
+        // and a pause the user asked for is one of the eight.
+        for window in windows { window.refreshAccounts() }
+        refreshTrayState()
+    }
+
+    /// The menu-bar item, saying what is true of the accounts behind it.
+    ///
+    /// **The always-on surface has to be able to say something.** FR-22 makes this the surface
+    /// that is there when no window is, and D-49 requires the worst condition reach the user —
+    /// so an envelope that looks identical whether five accounts are healthy or one needs
+    /// signing in is a badge that has already failed.
+    fileprivate func refreshStatusItem() {
+        guard let app, let button = statusItem?.button else { return }
+        var out = SiftAnnunciator()
+        guard sift_annunciator(UnsafeMutablePointer(app), &out) == Ok else { return }
+        let state = Annunciator.State(
+            condition: out.condition,
+            accounts: out.accounts,
+            asksSomething: out.asks_something_of_the_user != 0,
+            reachesTheUserWithoutAWindow: out.reaches_the_user_without_a_window != 0)
+        // `healthy` has no appearance, because it draws nothing — which here means the
+        // envelope Sift has always had.
+        guard let look = Annunciator.appearance(state) else {
+            button.image = NSImage(systemSymbolName: "envelope", accessibilityDescription: "Sift")
+            button.contentTintColor = nil
+            button.toolTip = "Sift"
+            return
+        }
+        let words = Annunciator.words(state)
+        button.image = NSImage(
+            systemSymbolName: look.symbol, accessibilityDescription: words.title)
+        // Colour is the second signal rather than the only one: the symbol changes too, so
+        // the badge still says something to a person who cannot tell two tints apart.
+        button.contentTintColor = look.colour
+        button.toolTip = words.title
+    }
+
+    /// The tray offers the verb that is not currently true.
+    ///
+    /// A menu that always says "Pause syncing" beside a paused account is a menu that lies
+    /// about the state it is offering to change.
+    private func refreshTrayState() {
+        let paused = everyAccountPaused()
+        let item = statusItem?.menu?.items.first { $0.action == #selector(pauseSync) }
+        item?.title = paused ? "Resume syncing" : "Pause syncing"
+        refreshStatusItem()
+    }
     @objc private func quit() { invoke("app.quit"); NSApp.terminate(nil) }
 
+    /// Whether the re-authentication alert is on screen. Five accounts whose grants expired
+    /// together are five announcements and must not be five stacked alerts.
+    fileprivate var presentingReauthentication = false
     private var addAccount: AddAccountWindow?
     private var runtimePanel: RuntimePanel?
     private var settingsWindow: SettingsWindow?
@@ -412,14 +696,42 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
 
     /// **The account-less state is the add-account flow**, not an empty inbox with a hint in
     /// it. So first run is a screen, and this is where it opens.
+    ///
+    /// It is also where `Add Account…` arrives, which is the whole difference between a flow a
+    /// user can reach once and one they can reach whenever they want another mailbox. D-97
+    /// gives the two cases different frames and the same screen: a window of its own when
+    /// there is nothing to attach to, a sheet on the window that asked otherwise.
     private func beginAddAccount() {
         guard let app else { return }
-        let window = AddAccountWindow(app: app) { [weak self] in
-            self?.openMainWindow()
+        if let existing = addAccount {
+            existing.raise()
+            return
         }
+        let window = AddAccountWindow(
+            app: app,
+            onAdded: { [weak self] in
+                self?.openMainWindow()
+                // The sidebar is where the account has to appear, and it is asked rather
+                // than told: the list it draws is the layer's.
+                self?.windows.forEach { $0.refreshAccounts() }
+            },
+            onDismissed: { [weak self] in
+                self?.addAccount = nil
+                // First run with nothing added leaves no window, and an accessory with no
+                // window is one the dock does not show. Put the policy back where the window
+                // count says it should be rather than leaving Sift stranded as regular.
+                self?.syncActivationPolicy()
+            })
         addAccount = window
-        window.showWindow(nil)
+        // **A main window, or none.** D-97 puts this on the window that started it, and the
+        // window that started it is a main window or the tray — `keyWindow` may be Settings or
+        // the runtime panel, which are their own window kinds and are not what a new account
+        // belongs to. Nil is the first-run frame, and it is also the honest answer when the
+        // gesture came from the menu bar with every window closed.
+        let host = windows.first(where: { $0.hostWindow === NSApp.keyWindow })?.hostWindow
+            ?? windows.last?.hostWindow
         NSApp.setActivationPolicy(.regular)
+        window.present(over: host)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -573,7 +885,73 @@ private func hostCallbacks() -> SiftHostCallbacks {
 }
 
 extension ApplicationShell {
-    func raiseReauthenticationPrompt() {}
-    func raiseRestartPrompt() {}
-    func refreshAnnunciator() {}
+    /// FR-2 — **the one condition that must reach the user with no window open.**
+    ///
+    /// So it raises Sift to a regular application and activates before it says anything, the
+    /// same way a startup failure does: an accessory has no dock icon and no switcher entry,
+    /// and a modal it runs can sit behind whatever is frontmost with no ordinary way to reach
+    /// it. A prompt the user cannot find is the failure this is answering, not a smaller
+    /// version of it.
+    ///
+    /// One at a time. The layer announces a change per account, and five accounts whose grants
+    /// expired together would otherwise be five stacked alerts — which is NFR-34's cascade
+    /// wearing a different coat.
+    func raiseReauthenticationPrompt() {
+        guard !presentingReauthentication else { return }
+        presentingReauthentication = true
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        // D-56: the layer returns identified states and this shell supplies every word.
+        alert.messageText = "Sign in again"
+        alert.informativeText =
+            "Sift can no longer reach one of your accounts. It keeps everything it has already "
+            + "downloaded, and nothing has been changed or lost — signing in again is what lets "
+            + "it start syncing that account once more."
+        alert.addButton(withTitle: "Sign In…")
+        alert.addButton(withTitle: "Later")
+        let response = alert.runModal()
+        presentingReauthentication = false
+        // Adding the account again is the sign-in: D-89 makes re-adding a new account rather
+        // than a repair, and the alternative — a flow that re-attaches a grant to an existing
+        // identity — is a second authorization path with its own failure modes.
+        if response == .alertFirstButtonReturn { beginAddAccount() }
+        syncActivationPolicy()
+    }
+
+    /// FR-26 — the bundle was replaced underneath the running process.
+    ///
+    /// Sift implements no self-update; a platform channel replaced it, and continuing against
+    /// resources that no longer match the executable is what this prevents.
+    ///
+    /// **Nothing raises it yet**, and that is stated rather than implied: detecting the
+    /// replacement needs something watching the bundle path, the core is not given one, and a
+    /// handler with no trigger is a handler whose absence would otherwise look like a working
+    /// feature.
+    func raiseRestartPrompt() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Sift was updated and needs to restart"
+        alert.informativeText =
+            "The application was replaced while it was running. Quitting now loses nothing: "
+            + "every change you have made is recorded on disk and is applied when Sift starts "
+            + "again."
+        alert.addButton(withTitle: "Quit Sift")
+        alert.addButton(withTitle: "Later")
+        if alert.runModal() == .alertFirstButtonReturn { quit() }
+        syncActivationPolicy()
+    }
+
+    /// D-49's badge, redrawn where it is drawn.
+    ///
+    /// Every window has one, and the menu-bar item is the surface that is still there when
+    /// none of them is — which is the whole reason the condition arrives as a callback rather
+    /// than as something a window polls.
+    func refreshAnnunciator() {
+        for window in windows { window.refreshChrome() }
+        refreshStatusItem()
+    }
 }
+

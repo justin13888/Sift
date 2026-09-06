@@ -174,6 +174,17 @@ pub struct OpenAccount {
     /// It is persisted in the container registry, because the alternative is a restored
     /// account that opens, shows the mail the last run left, and can never fetch another.
     pub kind: String,
+    /// FR-2's re-authentication, latched.
+    ///
+    /// **Set only on a well-formed provider denial** — D-88's rule, and the whole of NFR-34's
+    /// cascade defence: a captive portal answering a refresh with a login page produces an
+    /// unparseable response, and treating that as authoritative would put every account into
+    /// this state at once and tell a person Sift had lost their credentials when they were on
+    /// a hotel network.
+    ///
+    /// Latched rather than recomputed, because the failure happens inside a refresh nothing
+    /// else observes, and the condition has to outlive the call that discovered it.
+    pub needs_authentication: bool,
     pub capabilities: Capabilities,
     pub store: Account,
     pub queue: Queue,
@@ -339,8 +350,17 @@ impl App {
             let capabilities = stored_capabilities(&account).unwrap_or_else(|| {
                 shape_named("rich").unwrap_or_else(|_| unreachable!("`rich` is a shape"))
             });
+            // **Made unique rather than allowed to collide.** A container written before the
+            // refusal above could hold two rows with one display name, and inserting both
+            // under it would drop the first — the same silent loss, arriving at every launch
+            // instead of once. The ordinal is what already distinguishes them and never
+            // repeats, so it is what the label borrows.
+            let mut label = row.display_name.clone();
+            if self.accounts.contains_key(&label) {
+                label = format!("{} ({})", row.display_name, row.ordinal.get());
+            }
             self.accounts.insert(
-                row.display_name.clone(),
+                label,
                 OpenAccount {
                     id: row.id,
                     kind: row.kind.clone(),
@@ -349,6 +369,10 @@ impl App {
                     queue,
                     ids: LocalIdGenerator::new(row.ordinal),
                     adapter: None,
+                    // Not latched across a restart: the grant may have been repaired in the
+                    // provider's own console since, and a stale prompt asking a person to sign
+                    // in to an account that works is a prompt they learn to dismiss.
+                    needs_authentication: false,
                     writes_enabled: row.writes_enabled,
                     subjects: BTreeMap::new(),
                 },
@@ -389,6 +413,15 @@ impl App {
         adapter: Live,
         kind: &str,
     ) -> Result<AccountId, String> {
+        // **The label is the handle, so two accounts cannot share one.** Every account-taking
+        // call names an account by it, and the map is keyed on it — so a second account under
+        // an existing label used to replace the first in memory while leaving its row in the
+        // registry, dropping a sealed store handle and a queue rebuilt from a journal, with
+        // nothing said and nothing to say it to. D-89 warns rather than refuses about the same
+        // *mailbox* being added twice; this is about the name, which is a different thing.
+        if self.accounts.contains_key(name) {
+            return Err(format!("an account named `{name}` already exists"));
+        }
         let capabilities = adapter.capabilities().clone();
         let id = self.create_account(name, capabilities, kind)?;
         self.accounts
@@ -532,6 +565,7 @@ impl App {
                 queue: Queue::new(),
                 ids: LocalIdGenerator::new(ordinal),
                 adapter: None,
+                needs_authentication: false,
                 // Read-only until somebody says otherwise. The safe state is the default,
                 // and it is the default at construction rather than at a call site that
                 // could be forgotten.
@@ -823,10 +857,24 @@ impl App {
                 authorize::registration(authorize::default_kind(), &self.oauth_client_id.clone())?;
             let mut transport = sift_http::Https::to(&registration.profile.token.host)
                 .map_err(|why| format!("the trust store could not be consulted: {why}"))?;
-            let pair = self
-                .broker
-                .refresh(&mut transport, &registration, id)
-                .map_err(|e| e.to_string())?;
+            let pair = match self.broker.refresh(&mut transport, &registration, id) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    // **Only a well-formed denial latches.** D-88 makes every other outcome
+                    // transient, and NFR-34's cascade is what that rule defends: a captive
+                    // portal answering with a login page is unparseable, not a denial, and
+                    // treating it as one would ask a person to sign in to every account at
+                    // once because they joined a hotel network.
+                    if matches!(&error, sift_credentials::oauth::AuthError::Failed(kind)
+                        if kind.is_non_transient())
+                    {
+                        self.account(name)?.needs_authentication = true;
+                    }
+                    return Err(error.to_string());
+                }
+            };
+            // It worked, so whatever it was is over.
+            self.account(name)?.needs_authentication = false;
             descriptor
                 .connect(&pair.access)
                 .map_err(|e| e.to_string())?
@@ -845,6 +893,13 @@ impl App {
     /// The account has no provider behind it, or the walk failed. The adapter is returned to
     /// the account either way — a failed sync must not leave an account unreachable.
     pub fn sync(&mut self, name: &str, pages: usize) -> Result<SyncReport, String> {
+        // D-95's pause, honoured where the work is rather than only where the badge is. It was
+        // a flag that produced a condition and nothing else read it, so "Pause Syncing"
+        // painted the annunciator and the next gesture that reached this function synced
+        // anyway.
+        if self.is_paused(name) {
+            return Ok(SyncReport::default());
+        }
         // An account the last run left behind opens with no adapter: the store is sealed on
         // disk and its queue is rebuilt from the journal, but nothing reaches the provider.
         // Reconnecting here rather than at `open_container` is deliberate — it is a network
@@ -953,6 +1008,50 @@ impl App {
         container.set_setting(key, value)
     }
 
+    /// What an account setting currently holds — the recorded value, or D-101's default.
+    ///
+    /// # Errors
+    /// There is no such account, or the key is not one this build has.
+    pub fn account_setting(&self, name: &str, key: &str) -> Result<settings::Value, String> {
+        let setting = settings::by_key(key)
+            .ok_or_else(|| format!("`{key}` is not a setting this build has"))?;
+        let id = self
+            .accounts
+            .get(name)
+            .ok_or_else(|| format!("no account named `{name}`"))?
+            .id;
+        let recorded = self
+            .container
+            .as_ref()
+            .and_then(|c| c.account_setting(id, key).ok().flatten());
+        Ok(recorded
+            .and_then(|text| setting.default.parse_like(&text))
+            .unwrap_or_else(|| setting.default.clone()))
+    }
+
+    /// Record an account setting.
+    ///
+    /// # Errors
+    /// There is no such account, the key is unknown or is not account-scoped, the value is not
+    /// one it can hold, it is security state, or there is no container to record it in.
+    pub fn set_account_setting(
+        &mut self,
+        name: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        let id = self
+            .accounts
+            .get(name)
+            .ok_or_else(|| format!("no account named `{name}`"))?
+            .id;
+        let container = self
+            .container
+            .as_mut()
+            .ok_or("this session has no container, so a setting would not survive it")?;
+        container.set_account_setting(id, key, value)
+    }
+
     /// FR-4 — erase an account: its files, its registry row, and every credential item.
     ///
     /// Provable by enumeration, which is what the registry is for: what it does not list does
@@ -975,6 +1074,107 @@ impl App {
         Ok(())
     }
 
+    /// Send what is queued for one account, once.
+    ///
+    /// **The read-only posture is checked before anything is issued**, and before the adapter
+    /// is even taken. Everything up to here has already happened: the intents were built,
+    /// checked against declared capabilities, written durably and applied optimistically. This
+    /// is the one step that cannot be taken back, and it is the one step an account that is
+    /// only being watched does not take.
+    ///
+    /// It lives here rather than in a shell because both shells need it and D-17 makes a
+    /// capability that exists in one of them a defect. The harness keeps two branches of its
+    /// own on top of this — an account with no provider behind it, and stopping after the
+    /// issue so the crash path can be driven — and both are test affordances rather than
+    /// things a person does.
+    ///
+    /// # Errors
+    /// There is no such account, it has no provider behind it, or the journal refused the
+    /// durable marker D-85 requires before a request goes out.
+    pub fn flush(&mut self, name: &str) -> Result<Flushed, String> {
+        // A paused account holds its queue for the same reason a watched one does: the user
+        // asked it to stop. D-58 makes pause a policy tier everything resolves to, and the
+        // tier that still flushes is the network's rather than the user's.
+        if self.is_paused(name) {
+            return Ok(Flushed {
+                authorized: false,
+                held: self.account(name)?.queue.len(),
+                report: sift_mutations::flush::FlushReport::default(),
+                queued: self.account(name)?.queue.len(),
+                error: None,
+            });
+        }
+        if !self.may_issue(name) {
+            return Ok(Flushed {
+                authorized: false,
+                held: self.held(name),
+                report: sift_mutations::flush::FlushReport::default(),
+                queued: self.account(name)?.queue.len(),
+                error: None,
+            });
+        }
+        // Reconnect for the same reason `sync` does: an account the last run left behind
+        // opens with no adapter, and someone who triaged before the first sync of a session
+        // would be told Sift cannot reach an account it can reach. This is already the one
+        // call that goes to the provider, so the round trip costs nothing that was not
+        // already being paid.
+        if self.account(name)?.adapter.is_none() {
+            self.reconnect(name)?;
+        }
+        let account = self.account(name)?;
+        let adapter = account
+            .adapter
+            .take()
+            .ok_or("this account has no provider behind it")?;
+
+        // The durable half of D-85's marker. It is a callback because the journal is the
+        // store's and the queue cannot reach it — the two sit side by side in this layer and
+        // D-59 gives neither an edge to the other.
+        let journal = &account.store.journal;
+        let mut mark_issued = |ids: &[u128]| -> Result<(), String> {
+            let transaction = journal.unchecked_transaction().map_err(|e| e.to_string())?;
+            for id in ids {
+                transaction
+                    .execute(
+                        "UPDATE intent SET state = 'Issued' WHERE id = ?1",
+                        rusqlite::params![id.to_be_bytes().to_vec()],
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            transaction.commit().map_err(|e| e.to_string())
+        };
+
+        let resolve = Remote(&account.store.store);
+        let outcome = sift_mutations::flush::flush_once(
+            adapter.as_ref(),
+            &mut account.queue,
+            &resolve,
+            &mut mark_issued,
+        );
+        // Returned either way — a failed flush must not leave an account unreachable, for the
+        // same reason a failed sync must not.
+        account.adapter = Some(adapter);
+
+        let (report, error) = match outcome {
+            Ok(report) => (report, None),
+            Err(failure) => (failure.report.clone(), Some(failure.error.to_string())),
+        };
+        Ok(Flushed {
+            authorized: true,
+            held: 0,
+            report,
+            queued: account.queue.len(),
+            error,
+        })
+    }
+
+    /// Whether the user has paused this account — D-95, per account.
+    #[must_use]
+    pub fn is_paused(&self, name: &str) -> bool {
+        self.account_setting(name, "sync.paused")
+            .is_ok_and(|v| v == settings::Value::Flag(true))
+    }
+
     /// How many intents are being held because writes are not authorized.
     ///
     /// Surfaced rather than silent: a queue that grows while nothing leaves is a state the
@@ -986,6 +1186,24 @@ impl App {
             .filter(|a| !a.writes_enabled)
             .map_or(0, |a| a.queue.len())
     }
+}
+
+/// What one turn of the flush did, including the turn an unauthorized account does not take.
+///
+/// **`authorized` is not an error case.** An account that is only being watched has a queue
+/// that grows and sends nothing, and that is the state the user chose — so it is reported as a
+/// result with a count in it rather than as a failure, which is what lets a surface say
+/// "nothing has been sent, and nothing will be until you say so" instead of showing a fault.
+#[derive(Debug, Clone)]
+pub struct Flushed {
+    pub authorized: bool,
+    /// Intents held because writes are not authorized. Zero once they are.
+    pub held: usize,
+    pub report: sift_mutations::flush::FlushReport,
+    /// What is still queued afterwards.
+    pub queued: usize,
+    /// The provider or the journal refused, in the layer's own words.
+    pub error: Option<String>,
 }
 
 /// What one turn of the sync loop did.
@@ -1028,6 +1246,22 @@ impl App {
                 .is_err()
         {
             applicable.push(AccountCondition::StorageUnavailable);
+        }
+
+        // D-95 puts the pause on the account rather than on the installation, and D-49 makes
+        // it a condition of its own rather than a flag — the three pauses are three
+        // conditions, because "you stopped this" and "the data cap stopped this" are answered
+        // by the user differently.
+        let paused = self.is_paused(name);
+        let account = self.account(name)?;
+        if paused {
+            applicable.push(AccountCondition::PausedByUser);
+        }
+        // FR-2's one condition that must reach the user with no window open, and the highest
+        // in D-49's precedence — an account Sift cannot reach is not usefully described by
+        // anything else that is also true of it.
+        if account.needs_authentication {
+            applicable.push(AccountCondition::NeedsAuthentication);
         }
 
         let quarantined = account

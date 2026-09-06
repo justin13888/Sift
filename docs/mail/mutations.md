@@ -427,6 +427,52 @@ capability the account no longer declares and never discarded.** The mechanism a
 only to be pointed at this case; executing it anyway would be a write to the user's mail on the strength
 of a declaration that has been withdrawn.
 
+## D-110 — An account is watched before it is written to, and authorising writes is a deliberate act
+
+**Chosen:** a newly added account is **read-only**. Every intent is built, checked against declared
+capabilities, written durably to the journal and applied optimistically exactly as it would be — and the
+one step that cannot be taken back, issuing it to the provider, does not happen. Writes are authorised
+per account by an explicit act, the authorisation is durable, and withdrawing it takes effect immediately
+for anything not yet issued.
+**Rejected:** an account that writes from the moment it is added; a global read-only mode; a confirmation
+on each first mutation; keeping the flag in the account's own store.
+
+**Why it exists.** The first sync against a real mailbox is the moment a person has the most to lose and
+the least reason to trust a new client. FR-14 makes triage optimistic, so archiving something *looks*
+identical whether or not it was sent — and "nothing was sent" is a claim the user would otherwise have to
+take on faith about the one operation they cannot reverse from inside Sift. Under this decision it is
+instead something they can check: the intents are visible in [FR-34](../runtime/observability.md)'s
+runtime surface, every one of them reads `Pending`, and the count is a number rather than a reassurance.
+
+**Why per account rather than per installation.** A person adding a second mailbox to a client they
+already trust should not have to re-decide, and a person adding a work account to a client they use for
+personal mail may want exactly the opposite. The unit of trust is the mailbox.
+
+**Why the authorisation is durable, and where it lives.** [D-108](../storage/data-model.md) puts it in
+the installation registry rather than in the account's own store: the store is discardable, and a
+security flag whose safe state can be restored by deleting a file is not a flag. Durable, because an
+authorisation that a restart withdrew would leave a user who turned it on, closed the window and came
+back to find their triage silently held again, with nothing saying why.
+
+**What withdrawing does not do.** Intents already issued are not recalled. A request that has left cannot
+be unsent, and a design that claimed otherwise would be the one lie a mutation queue must not tell — so
+they settle or move to `Reconciling` like any other.
+
+**Where the control is.** Beside the queue it releases, in FR-34's runtime surface, rather than in the
+settings window: the act is meaningful only after a person has looked at what is waiting. It is
+deliberately **not** in [D-98](../architecture/ui-surface.md)'s action set, which does not grow an entry
+for it — this is a posture rather than a gesture, and an action would make it bindable to a key that
+silently changes what Sift may do to a mailbox.
+
+**What it costs:** a user who does not find the control has a client that appears to accept triage and
+never performs it — which is the failure this decision creates in exchange for the one it prevents. The
+mitigation is that the queue's own surface says so in a sentence and D-49 raises *attention* on an
+account holding intents it cannot issue, so the state announces itself rather than waiting to be found.
+
+**Contestable because:** it puts a step between a user and a working mail client, and most users will
+authorise writes immediately and remember only the friction. The argument for keeping it is that the cost
+is paid once per account and the failure it prevents is unrecoverable and silent.
+
 ## FR-16 — Conflict resolution
 
 When server state has diverged — the message was already moved or deleted elsewhere — Sift MUST resolve

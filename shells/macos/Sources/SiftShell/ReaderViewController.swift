@@ -129,15 +129,35 @@ final class ReaderViewController: NSViewController {
         links = []
     }
 
+    /// FR-31's transform, per message. **Off by default and per message**, because a transform
+    /// applied over a message a sender already styled is how a readable message becomes
+    /// unreadable — which is why D-101 ships the installation default off and why this is a
+    /// gesture rather than a mode.
+    private var dark = false
+    /// What is on screen, so the transform can be applied without asking the list again.
+    private var showing: MessageRow?
+
+    /// Re-render the open message with the transform flipped.
+    func toggleDarkTransform(app: OpaquePointer?) {
+        dark.toggle()
+        show(showing, app: app)
+    }
+
     func show(_ row: MessageRow?, app: OpaquePointer?) {
         // Force the load *first*, so it cannot happen part-way through this method and undo
         // it on the way out. `loadViewIfNeeded()` says this more clearly and is macOS 14; the
         // deployment target is 13 under D-46, and reading `view` is the same gesture.
         _ = view
         guard let row else {
+            showing = nil
+            dark = false
             showNothing()
             return
         }
+        // A different message starts from the shipped default: the transform is a decision
+        // about one message, and carrying it into the next one silently would make it a mode.
+        if showing?.id.same(as: row.id) != true { dark = false }
+        showing = row
         empty.isHidden = true
         subject.isHidden = false
         sender.isHidden = false
@@ -159,7 +179,8 @@ final class ReaderViewController: NSViewController {
             return
         }
         var document = SiftDocument()
-        let status = sift_open_document(UnsafeMutablePointer(app), row.id, 0, &document)
+        let status = sift_open_document(
+            UnsafeMutablePointer(app), row.id, dark ? 1 : 0, &document)
         guard status == Ok else {
             // FR-9: a body that cannot be rendered degrades to a stated absence rather than
             // to a blank pane, because a blank pane is indistinguishable from a bug.

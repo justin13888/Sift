@@ -59,6 +59,19 @@ pub struct Delivery {
     pub observation: ObservationId,
     pub generation: Generation,
     pub batch: Batch<MessageRow>,
+    /// The window as it now stands — every row, not only the ones entering it.
+    ///
+    /// **Beside the batch rather than instead of it.** D-18's change vocabulary is what a list
+    /// should apply: a move drawn as a move keeps a row's identity, and the indices are in the
+    /// post-batch space so a shell never recomputes them. That is what `batch` carries, and
+    /// nothing across the ABI carries it yet.
+    ///
+    /// What a shell had instead was `batch.incoming` and no way to act on the rest, so it
+    /// appended — and a sync that removes a message left the row on screen, pointing at a
+    /// message the store no longer holds. Selecting it failed. This is what makes the shell's
+    /// list *correct* while the vocabulary is still unwired: it costs an animation, and the
+    /// alternative cost a lie.
+    pub window: Vec<MessageRow>,
 }
 
 struct Registration {
@@ -206,6 +219,7 @@ impl Session {
                 observation: ObservationId(id),
                 generation: registration.generation,
                 batch,
+                window: registration.window.clone(),
             });
         }
         Ok(out)

@@ -18,6 +18,17 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     /// three ways to reach an action must not be three implementations of it.
     var onInvoke: ((String) -> Void)?
     private let annunciator = AnnunciatorView(frame: .zero)
+    /// What the list is anchored on. D-4's zero identity is every account merged, and it is
+    /// where a window starts.
+    private var account: SiftId = .zero
+    /// Accounts this process has already fetched for.
+    ///
+    /// **One round trip per account per run, and no more.** Nothing across this boundary runs
+    /// periodically yet — the scheduler is not wired to it — so an account that is never synced
+    /// from a gesture is never synced at all, and a person who signed in yesterday opens Sift
+    /// to the mail they had yesterday. Until the scheduler is behind this, the gestures that
+    /// mean *show me this mailbox* are what fetch it.
+    private var synced: Set<String> = []
     private let searchField = NSSearchField()
     private let searchReport = NSTextField(labelWithString: "")
     private let undoBar = UndoBar(frame: .zero)
@@ -100,7 +111,10 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             guard let self else { return }
             self.searchReport.isHidden = true
             self.searchField.stringValue = ""
-            self.list.observe(app: self.app, account: .zero)
+            // Back to what the sidebar is showing, not to the unified inbox — clearing a
+            // search inside one account and landing in every account is a retarget the user
+            // did not ask for.
+            self.list.observe(app: self.app, account: self.account)
         }
 
         // The annunciator and the undo toast are window chrome, not panes: they sit over the
@@ -167,12 +181,24 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 
         // D-4's unified inbox is the zero anchor: every account, merged on one comparator.
         list.observe(app: app, account: .zero)
+        sidebar.onSelect = { [weak self] account in
+            guard let self, !account.same(as: self.account) else { return }
+            self.account = account
+            self.list.clearSearch()
+            self.list.observe(app: self.app, account: account)
+            self.fetchOnce(matching: account)
+        }
         sidebar.reload(app: app)
         annunciator.show(app: app)
         undoBar.onUndo = { [weak self] in self?.onInvoke?("undo.last-gesture") }
 
         window.makeKeyAndOrderFront(nil)
         self.window = window
+        // **After the window is on screen, not before it.** A fetch blocks this thread, and a
+        // launch that waits on the network before drawing anything is the opposite of what a
+        // resident mail client should do. Ordering the window in first means a person sees
+        // Sift and then sees it fill, rather than seeing nothing and wondering.
+        DispatchQueue.main.async { [weak self] in self?.fetchOnce(matching: .zero) }
         // Every `Window`-scoped action in the register turns on this, so a layer that was
         // never told a window exists offers a menu to nobody.
         _ = sift_set_window_present(UnsafeMutablePointer(app), 1)
@@ -183,12 +209,19 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         window?.makeKeyAndOrderFront(nil)
     }
 
+    /// What a sheet attaches to. D-97 puts the add-account flow on *the window that started
+    /// it*, and `NSApp.keyWindow` is nil when the gesture came from the tray.
+    var hostWindow: NSWindow? { window }
+
+    /// Whether the next search is scoped to this window's account — `search.narrow-to-account`.
+    private var narrowed = false
+
     @objc private func runSearch() {
         let query = searchField.stringValue
         if query.trimmingCharacters(in: .whitespaces).isEmpty {
             list.clearSearch()
         } else {
-            list.search(query, app: app)
+            list.search(query, app: app, account: narrowed ? account : .zero)
         }
     }
 
@@ -199,7 +232,60 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 
     /// `search.clear`: back to the list the observation maintains.
     func clearSearch() {
+        narrowed = false
         list.clearSearch()
+    }
+
+    // MARK: - The gestures this window owns
+    //
+    // Every one of these is in D-98's register with no intent behind it, so invoking them
+    // across the boundary returned success and did nothing. Where the caret is, which pane has
+    // the keyboard, and which account a window is looking at are facts about this window; the
+    // layer cannot answer them and should not be asked to.
+
+    /// `read.next-message`, `read.previous-message`, and the two that skip to unread.
+    func moveSelection(by step: Int, unreadOnly: Bool) {
+        list.move(by: step, unreadOnly: unreadOnly)
+    }
+
+    /// `navigate.focus-sidebar`, `navigate.focus-list`, `navigate.focus-reader`.
+    func focus(_ pane: Pane) {
+        switch pane {
+        case .sidebar: window?.makeFirstResponder(sidebar.focusTarget)
+        case .list: window?.makeFirstResponder(list.focusTarget)
+        case .reader: window?.makeFirstResponder(reader.view)
+        }
+    }
+
+    enum Pane { case sidebar, list, reader }
+
+    /// `navigate.next-account` and `navigate.previous-account`.
+    func stepAccount(by delta: Int) {
+        sidebar.step(by: delta)
+    }
+
+    /// `navigate.unified-inbox` — D-4's merged stream, which is the zero anchor.
+    func showUnifiedInbox() {
+        sidebar.selectUnified()
+    }
+
+    /// `read.toggle-dark-transform` — FR-31, per message.
+    func toggleDarkTransform() {
+        reader.toggleDarkTransform(app: app)
+    }
+
+    /// `search.narrow-to-account`: search the account this window is looking at.
+    ///
+    /// **A scope, not a query term.** The boundary takes the same anchor the list observation
+    /// does, so narrowing is a fact the window already holds rather than a word to spell,
+    /// parse, translate and explain in FR-21's interpretation.
+    func narrowSearchToAccount() {
+        narrowed = true
+        if searchField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty {
+            window?.makeFirstResponder(searchField)
+            return
+        }
+        runSearch()
     }
 
     /// Redraw what a gesture may have changed.
@@ -213,6 +299,34 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     func refreshChrome() {
         annunciator.show(app: app)
         undoBar.refresh(app: app)
+    }
+
+    /// The account list changed — one was added, or its condition did.
+    ///
+    /// Called rather than polled: a resident process that watches its own state is the idle
+    /// wakeup NFR-11 counts, and neither of those changes without something happening.
+    /// Fetch the accounts this anchor covers, once each per run.
+    ///
+    /// **This blocks the main thread for the length of a walk**, which is stated rather than
+    /// hidden behind a spinner: the work belongs on a worker under D-19, and moving it there
+    /// changes nothing a shell can see because every delivery already arrives through D-48's
+    /// hop rather than out of this call.
+    private func fetchOnce(matching anchor: SiftId) {
+        let unified = anchor.same(as: .zero)
+        for account in Account.all(app: app) {
+            guard unified || account.id.same(as: anchor) else { continue }
+            guard synced.insert(account.name).inserted else { continue }
+            _ = SiftText.withBytes(account.name) { ptr, len in
+                sift_sync_account(UnsafeMutablePointer(app), ptr, len)
+            }
+        }
+        sidebar.reload(app: app)
+        refreshChrome()
+    }
+
+    func refreshAccounts() {
+        sidebar.reload(app: app)
+        refreshChrome()
     }
 
     func windowWillClose(_ notification: Notification) {

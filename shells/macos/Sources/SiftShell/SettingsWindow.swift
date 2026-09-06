@@ -22,6 +22,10 @@ import CSift
 final class SettingsWindow: NSWindowController {
     private let app: OpaquePointer
     private let stack = NSStackView()
+    /// What each control edits. An account row needs two facts to write — which account and
+    /// which key — and an identifier is one string; encoding both into it would make the
+    /// separator part of the format.
+    private var edits: [ObjectIdentifier: (account: String?, key: String)] = [:]
 
     init(app: OpaquePointer) {
         self.app = app
@@ -40,16 +44,37 @@ final class SettingsWindow: NSWindowController {
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let scroll = NSScrollView()
-        let document = NSView()
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+
+        // **A scroll view does not lay out what it scrolls.** A document view left translating
+        // its autoresizing mask keeps the zero frame it was created with, so a stack pinned to
+        // its four edges is pinned to nothing, and every row's own width constraint then
+        // contradicts a container that is zero wide. That is what the empty settings window
+        // was: nineteen rows, all present, laid out into 0x0 and reported by nobody.
+        //
+        // Every other scroll view in this shell holds a table or a text view, which size
+        // themselves. This one holds a plain view, so it is sized here — pinned to the clip
+        // view's width, with its height coming from the stack.
+        //
+        // **Flipped**, because a scroll view's origin is the bottom-left of an ordinary view.
+        // With the default geometry the first row lands at the bottom of the document and the
+        // window opens showing the end of the list — which reads as a different bug from the
+        // one above and has the same fix nowhere near it.
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(stack)
+        scroll.documentView = document
         NSLayoutConstraint.activate([
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
             stack.topAnchor.constraint(equalTo: document.topAnchor),
             stack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
         ])
-        scroll.documentView = document
-        scroll.hasVerticalScroller = true
         window.contentView = scroll
         window.center()
     }
@@ -72,25 +97,44 @@ final class SettingsWindow: NSWindowController {
             return
         }
 
-        var wroteInstallationHeading = false
-        var wroteAccountHeading = false
-        for index in 0..<rows.len {
-            let row = ptr[index]
-            let accountScoped = row.account_scoped != 0
-            if !accountScoped && !wroteInstallationHeading {
-                stack.addArrangedSubview(heading("This installation"))
-                stack.addArrangedSubview(
-                    note("These stay when you remove an account."))
-                wroteInstallationHeading = true
-            }
-            if accountScoped && !wroteAccountHeading {
-                stack.addArrangedSubview(heading("Each account"))
-                stack.addArrangedSubview(
-                    note("These go with the account when you remove it."))
-                wroteAccountHeading = true
-            }
-            stack.addArrangedSubview(view(for: row))
+        edits.removeAll()
+        let all = (0..<rows.len).map { ptr[$0] }
+
+        stack.addArrangedSubview(heading("This installation"))
+        stack.addArrangedSubview(note("These stay when you remove an account."))
+        for row in all where row.account_scoped == 0 {
+            add(view(for: row, account: nil))
         }
+
+        // **One group per account, rather than one group for the idea of an account.** These
+        // go with the account when it is removed, so a single "Each account" list would be
+        // showing one account's values under a heading that claims to speak for all of them —
+        // and there is nothing it could write them to.
+        let accountRows = all.filter { $0.account_scoped != 0 }
+        guard !accountRows.isEmpty else { return }
+        for account in Account.all(app: app) {
+            stack.addArrangedSubview(heading(account.name))
+            stack.addArrangedSubview(
+                note("These go with this account when you remove it."))
+            for row in accountRows {
+                add(view(for: row, account: account.name))
+            }
+        }
+    }
+
+    /// Add a row and give it the stack's width.
+    ///
+    /// **The width is constrained here rather than where the row is built**, because an anchor
+    /// pair needs a common ancestor and a row that has not been added yet has none — activating
+    /// it early raises, AppKit swallows the exception at the top of the event loop, and what is
+    /// left on screen is however much of the list had been added before it. Which looks exactly
+    /// like a settings window that has no settings in it.
+    private func add(_ row: NSView) {
+        stack.addArrangedSubview(row)
+        row.widthAnchor.constraint(
+            equalTo: stack.widthAnchor,
+            constant: -(stack.edgeInsets.left + stack.edgeInsets.right)
+        ).isActive = true
     }
 
     private func heading(_ text: String) -> NSView {
@@ -106,10 +150,12 @@ final class SettingsWindow: NSWindowController {
         return label
     }
 
-    private func view(for row: SiftSetting) -> NSView {
+    private func view(for row: SiftSetting, account: String?) -> NSView {
         let key = SiftText.string(row.key)
         let owner = SiftText.string(row.owner)
-        let value = SiftText.string(row.value)
+        // `sift_settings` reports the installation table. An account row's value is that
+        // account's, so it is read per account rather than repeated from one of them.
+        let value = account.map { held(key, of: $0) } ?? SiftText.string(row.value)
 
         let title = NSTextField(labelWithString: SettingsWindow.words(key))
         title.font = .preferredFont(forTextStyle: .body)
@@ -130,17 +176,14 @@ final class SettingsWindow: NSWindowController {
             let toggle = NSButton(
                 checkboxWithTitle: "", target: self, action: #selector(toggled(_:)))
             toggle.state = (value == "true") ? .on : .off
-            toggle.identifier = NSUserInterfaceItemIdentifier(key)
+            edits[ObjectIdentifier(toggle)] = (account, key)
             control = toggle
         } else {
             let field = NSTextField(string: value)
             field.target = self
             field.action = #selector(edited(_:))
-            field.identifier = NSUserInterfaceItemIdentifier(key)
             field.widthAnchor.constraint(equalToConstant: 180).isActive = true
-            // An account setting has no store yet, and a control that accepted a value it
-            // then dropped would be worse than one that says so.
-            field.isEnabled = row.account_scoped == 0
+            edits[ObjectIdentifier(field)] = (account, key)
             control = field
         }
 
@@ -153,7 +196,6 @@ final class SettingsWindow: NSWindowController {
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 14
-        row.widthAnchor.constraint(equalToConstant: 620).isActive = true
         return row
     }
 
@@ -184,24 +226,55 @@ final class SettingsWindow: NSWindowController {
     }
 
     @objc private func toggled(_ sender: NSButton) {
-        guard let key = sender.identifier?.rawValue else { return }
-        write(key, sender.state == .on ? "true" : "false")
+        guard let edit = edits[ObjectIdentifier(sender)] else { return }
+        write(edit, sender.state == .on ? "true" : "false")
     }
 
     @objc private func edited(_ sender: NSTextField) {
-        guard let key = sender.identifier?.rawValue else { return }
-        write(key, sender.stringValue)
+        guard let edit = edits[ObjectIdentifier(sender)] else { return }
+        write(edit, sender.stringValue)
     }
 
-    private func write(_ key: String, _ value: String) {
-        let ok = SiftText.withBytes(key) { keyPtr, keyLen in
+    /// What one account holds for a key, or the shipped default.
+    private func held(_ key: String, of account: String) -> String {
+        var out = SiftStr()
+        let ok = SiftText.withBytes(account) { namePtr, nameLen in
+            SiftText.withBytes(key) { keyPtr, keyLen in
+                sift_account_setting(
+                    UnsafeMutablePointer(app), namePtr, nameLen, keyPtr, keyLen, &out) == Ok
+            }
+        }
+        return ok ? SiftText.string(out) : ""
+    }
+
+    /// **Two entry points, because the scope split is the storage split.** An account setting
+    /// goes with the account when it is removed and an installation setting does not, so which
+    /// one a key belongs to is a fact the row carries rather than one the layer infers.
+    private func write(_ edit: (account: String?, key: String), _ value: String) {
+        let ok = SiftText.withBytes(edit.key) { keyPtr, keyLen in
             SiftText.withBytes(value) { valuePtr, valueLen in
-                sift_set_setting(UnsafeMutablePointer(app), keyPtr, keyLen, valuePtr, valueLen)
-                    == Ok
+                guard let account = edit.account else {
+                    return sift_set_setting(
+                        UnsafeMutablePointer(app), keyPtr, keyLen, valuePtr, valueLen) == Ok
+                }
+                return SiftText.withBytes(account) { namePtr, nameLen in
+                    sift_set_account_setting(
+                        UnsafeMutablePointer(app), namePtr, nameLen, keyPtr, keyLen,
+                        valuePtr, valueLen) == Ok
+                }
             }
         }
         // A refusal is redrawn rather than reported: the layer refuses a value the setting
         // cannot hold, and putting the old one back says so more clearly than an alert.
         if !ok { reload() }
     }
+}
+
+/// A view whose origin is its top-left.
+///
+/// AppKit's is the bottom-left, which is the right answer for a canvas and the wrong one for a
+/// list inside a scroll view: the content is laid out upwards from the bottom and the scroll
+/// opens at the end of it.
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }
