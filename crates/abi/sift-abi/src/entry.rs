@@ -188,6 +188,8 @@ pub unsafe extern "C" fn sift_initialize(
                 host: callbacks,
                 schedule: init.schedule,
                 schedule_context: init.schedule_context as usize,
+                arm_timer: init.arm_timer,
+                timer_pending: std::sync::atomic::AtomicBool::new(false),
                 sinks: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 documents: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 attachments: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -205,7 +207,25 @@ pub unsafe extern "C" fn sift_initialize(
                 conditions: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 search: std::sync::Mutex::new(crate::layer::SearchResult::default()),
             });
-            Ok(Box::into_raw(layer).cast::<SiftApp>())
+            let layer = Box::into_raw(layer);
+
+            // **Arm the wheel before handing the layer back.** Everything periodic in the
+            // specification — the aligned poll, the queue flush — was armed by nobody, so
+            // mail arrived only when a person did something. The first timer is posted here
+            // because this is the first moment there is both a wheel to read and a shell to
+            // ask; any later point is a policy about when residency begins, and residency
+            // begins at initialization.
+            //
+            // SAFETY: `layer` was just created here and nothing else holds it yet. Already
+            // inside this entry point's own `unsafe` block, so no second one.
+            let armed = &*layer;
+            {
+                if let Ok(mut session) = armed.session.lock() {
+                    session.app_mut().arm_periodic();
+                }
+            }
+            crate::layer::ensure_timer(armed);
+            Ok(layer.cast::<SiftApp>())
         })
     }
 }
@@ -774,25 +794,37 @@ pub unsafe extern "C" fn sift_complete_authorization(
                 flows.client_id.clone()
             };
 
-            let mut session = layer.session.lock().map_err(|_| ())?;
-            let app_ref = session.app_mut();
-            let identity = app_ref.reserve_identity();
-            let adapter = sift_app::authorize::complete(
-                &mut app_ref.broker,
-                &client_id,
-                identity,
-                callback,
-                now_millis(),
-            )
-            .map_err(|_| ())?;
-            let id = app_ref
-                .add_provider_account(display_name, adapter)
+            // **Scoped, because `rearm_accounts` takes this same lock.** `std::sync::Mutex`
+            // is not reentrant, so holding the guard across that call is a hard hang on the
+            // shell's main thread at the moment a user finishes signing in — no error, no
+            // status, just a beachball on the one path that most needs to work.
+            let id = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                let app_ref = session.app_mut();
+                let identity = app_ref.reserve_identity();
+                let adapter = sift_app::authorize::complete(
+                    &mut app_ref.broker,
+                    &client_id,
+                    identity,
+                    callback,
+                    now_millis(),
+                )
                 .map_err(|_| ())?;
+                app_ref
+                    .add_provider_account(display_name, adapter)
+                    .map_err(|_| ())?
+            };
             // The flow is spent. A verifier that outlived its exchange would be one a second
             // callback could be replayed against.
-            let mut flows = layer.flows.lock().map_err(|_| ())?;
-            flows.client_id.clear();
-            flows.url.clear();
+            {
+                let mut flows = layer.flows.lock().map_err(|_| ())?;
+                flows.client_id.clear();
+                flows.url.clear();
+            }
+            // A real account is the one that most needs polling, and it is added here rather
+            // than through the replayed path — so without this the first account a person
+            // ever connects would be the one the wheel never learned about.
+            rearm_accounts(layer);
             Ok(SiftId::from_u128(id.as_u128()))
         })
     }
@@ -1550,8 +1582,78 @@ pub extern "C" fn sift_run_scheduled(ticket: u64) {
                 deliver(layer);
                 Ok(())
             }
+            crate::layer::Task::Tick { layer } => {
+                if layer == 0 {
+                    return Ok(());
+                }
+                // SAFETY: as above — a ticket that resolves names a layer shutdown has not
+                // yet freed, because shutdown abandons every outstanding ticket first.
+                let layer = unsafe { &*(layer as *const Layer) };
+                run_tick(layer);
+                Ok(())
+            }
         }
     });
+}
+
+/// Re-arm the wheel after the set of accounts changed, and make sure a timer exists.
+///
+/// **Every path that adds or removes an account calls this.** The wheel arms one deadline per
+/// account, so a set that changed without re-arming leaves an account nothing polls — which
+/// is invisible, because the other accounts keep firing and the wheel looks alive.
+fn rearm_accounts(layer: &Layer) {
+    if let Ok(mut session) = layer.session.lock() {
+        session.app_mut().arm_periodic();
+    }
+    crate::layer::ensure_timer(layer);
+}
+
+/// One wheel fire: do the work that came due, tell the shell, and arm the next timer.
+///
+/// **The re-arm is unconditional and last.** A fire that did its work and did not re-arm is a
+/// process that syncs once and then never again — and because nothing else arms the timer,
+/// there would be no second signal to recover from. It re-arms even where the work failed,
+/// for the same reason: an account that could not be reached this minute is exactly the one
+/// that must be tried next minute.
+fn run_tick(layer: &Layer) {
+    // Cleared first: the fire this belongs to has happened, so the next one is not yet armed
+    // and `ensure_timer` below must be free to arm it.
+    layer
+        .timer_pending
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // **Re-armed on every exit, including the ones that did no work.** Nothing else arms the
+    // timer once the process is running, so an early return that skipped the re-arm would end
+    // periodic work for the life of the layer.
+    //
+    // Be precise about which exits that covers, because the obvious one is not the interesting
+    // one. A poisoned session lock is *not* recoverable here — `ensure_timer` reads the same
+    // lock and bails on the same condition — and it is not a case worth special-handling
+    // either: every other entry point already fails on a poisoned session, so that layer is
+    // dead rather than quietly un-scheduled. What this guard genuinely covers is a panic below
+    // the session lock, chiefly in `deliver`'s callback loop, which runs with the lock
+    // released: there the layer is healthy afterwards, and a plain early return would have
+    // left it healthy and never scheduled again.
+    struct Rearm<'a>(&'a Layer);
+    impl Drop for Rearm<'_> {
+        fn drop(&mut self) {
+            crate::layer::ensure_timer(self.0);
+        }
+    }
+    let _rearm = Rearm(layer);
+
+    {
+        let Ok(mut session) = layer.session.lock() else {
+            return;
+        };
+        // The report is dropped here rather than returned: FR-34's panel reads the queue and
+        // the conditions directly, and a fire that reported into nothing would be a second
+        // source of truth for what the first one already says.
+        let _ = session.app_mut().tick();
+    }
+    // Outside the session lock, because it calls into the shell and a shell is permitted to
+    // call back — that is the same self-deadlock the sink lock had.
+    deliver(layer);
 }
 
 /// Tell the shell about a condition that has changed since it was last told.
@@ -1724,6 +1826,7 @@ pub unsafe extern "C" fn sift_add_replayed_account(
                     .add_replayed_account(name)
                     .map_err(|_| ())?
             };
+            rearm_accounts(layer);
             crate::layer::post(
                 layer,
                 Task::Deliver {
@@ -2458,6 +2561,31 @@ mod tests {
         run(ticket);
     }
 
+    /// A timer arming that never fires, which is what the tests want: the wheel is driven
+    /// deterministically by `sift-app`'s own tests, and a real deadline here would make every
+    /// ABI test wait a minute or race one.
+    extern "C" fn never_fires(_: *mut c_void, _: crate::layer::SiftRun, _: u64, _: u64, _: u64) {}
+
+    /// Counts arm requests, so a test can assert the layer asked for a timer at all.
+    static TIMERS_ARMED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// The delay of the last arm request, in milliseconds.
+    static LAST_DELAY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// The leeway of the last arm request, in milliseconds.
+    static LAST_LEEWAY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    extern "C" fn record_arm(
+        _: *mut c_void,
+        _: crate::layer::SiftRun,
+        _: u64,
+        delay: u64,
+        leeway: u64,
+    ) {
+        use std::sync::atomic::Ordering;
+        TIMERS_ARMED.fetch_add(1, Ordering::SeqCst);
+        LAST_DELAY.store(delay, Ordering::SeqCst);
+        LAST_LEEWAY.store(leeway, Ordering::SeqCst);
+    }
+
     /// A schedule that drops the ticket on the floor, as a shell whose window closed does.
     extern "C" fn drop_it(_: *mut c_void, _: crate::layer::SiftRun, _: u64) {}
 
@@ -2499,6 +2627,7 @@ mod tests {
             container_root: SiftStr::new(root),
             schedule,
             schedule_context: core::ptr::null_mut(),
+            arm_timer: never_fires,
             oauth_client_id: SiftStr::new(""),
             registered_schemes: SiftStr::new(""),
         };
@@ -2538,6 +2667,7 @@ mod tests {
             container_root: SiftStr::new(scratch_str()),
             schedule: drop_it,
             schedule_context: core::ptr::null_mut(),
+            arm_timer: never_fires,
             oauth_client_id: SiftStr::new(client),
             registered_schemes: SiftStr::new(schemes),
         };
@@ -2657,6 +2787,7 @@ mod tests {
             container_root: SiftStr::new(""),
             schedule: drop_it,
             schedule_context: core::ptr::null_mut(),
+            arm_timer: never_fires,
             oauth_client_id: SiftStr::new(""),
             registered_schemes: SiftStr::new(""),
         };
@@ -3741,6 +3872,7 @@ mod tests {
             container_root: SiftStr::new(scratch_str()),
             schedule: run_inline,
             schedule_context: core::ptr::null_mut(),
+            arm_timer: never_fires,
             oauth_client_id: SiftStr::new(""),
             registered_schemes: SiftStr::new(""),
         };
@@ -3797,5 +3929,65 @@ mod tests {
             unsafe { sift_shutdown(core::ptr::null_mut()) },
             SiftStatus::Ok
         );
+    }
+
+    /// D-25, on the boundary. The wheel was a crate nothing reached: no timer was armed at
+    /// initialization, so the aligned poll never happened and mail arrived only when
+    /// somebody clicked. This asserts the layer asks a shell for a timer at all, and that it
+    /// hands over the leeway that makes coalescing possible.
+    #[test]
+    fn initialization_arms_a_coalescing_timer() {
+        use std::sync::atomic::Ordering;
+        ephemeral();
+        TIMERS_ARMED.store(0, Ordering::SeqCst);
+
+        let mut app: *mut SiftApp = core::ptr::null_mut();
+        let init = SiftInit {
+            container_root: SiftStr::new(scratch_str()),
+            schedule: drop_it,
+            schedule_context: core::ptr::null_mut(),
+            arm_timer: record_arm,
+            oauth_client_id: SiftStr::new(""),
+            registered_schemes: SiftStr::new(""),
+        };
+        assert_eq!(
+            unsafe { sift_initialize(callbacks(), init, &raw mut app) },
+            SiftStatus::Ok
+        );
+
+        // An installation with no accounts has nothing to poll, so nothing is armed — a
+        // resident process with no work must take no wakeups. Adding one arms the wheel.
+        let name = "mail";
+        let mut account = SiftId::from_u128(0);
+        assert_eq!(
+            unsafe { sift_add_replayed_account(app, name.as_ptr(), name.len(), &raw mut account) },
+            SiftStatus::Ok
+        );
+
+        assert!(
+            TIMERS_ARMED.load(Ordering::SeqCst) > 0,
+            "no timer was ever armed, so nothing periodic can happen"
+        );
+        assert_eq!(
+            LAST_LEEWAY.load(Ordering::SeqCst),
+            u64::try_from(sift_foundation::limits::L31_WHEEL_SLACK.as_millis()).unwrap(),
+            "the leeway is the coalescing hint; without it D-25 buys nothing"
+        );
+        // The aligned instant is at most L-30 away, and the wheel fires at the *end* of the
+        // bucket containing it — so the bound is the interval plus the slack. Asserting the
+        // interval alone fails whenever the wall clock sits just past a minute boundary,
+        // which is a phantom CI failure roughly one run in twenty-five.
+        let delay = LAST_DELAY.load(Ordering::SeqCst);
+        let bound = u64::try_from(
+            (sift_foundation::limits::L30_SYNC_POLL + sift_foundation::limits::L31_WHEEL_SLACK)
+                .as_millis(),
+        )
+        .unwrap();
+        assert!(
+            delay <= bound,
+            "the first fire is {delay}ms away, past the aligned interval plus its slack"
+        );
+
+        let _ = unsafe { sift_shutdown(app) };
     }
 }
