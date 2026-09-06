@@ -88,12 +88,16 @@ run = "cargo fmt --all"
 
 [tasks.fmt-check]
 description = "Check formatting (CI mode)"
+# `toolchain` first, because this command's failure mode when rustfmt is absent is
+# "'cargo-fmt' is not installed for the toolchain", which reads as a broken pin.
+depends = ["toolchain"]
 run = "cargo fmt --all --check"
 
 [tasks.clippy]
 description = "Run clippy lints"
 # CI sets CARGO_BUILD_TARGET per matrix leg; cargo honours it natively, so this one command
 # serves all three targets without the task knowing about any of them.
+depends = ["toolchain"]
 run = "cargo clippy --workspace --all-targets -- -D warnings"
 
 [tasks.clippy-fix]

@@ -21,6 +21,11 @@
 //! a search. [`CredentialStore::erase`] answers it, and the test beside it checks the
 //! enumeration rather than trusting the deletion.
 
+// Gated, because its only consumers are. `mod macos` below is the sole user and is itself
+// `cfg(target_os = "macos")`, so on every other platform this import has nothing to serve and
+// `-D warnings` rejects the crate — which is what failed `linux` and the floor build while
+// passing on the machine the change was written on.
+#[cfg(target_os = "macos")]
 use sift_foundation::identifiers::KEYCHAIN_SERVICE;
 use sift_foundation::identity::AccountId;
 
