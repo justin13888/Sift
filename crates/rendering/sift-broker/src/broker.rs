@@ -190,7 +190,12 @@ impl Broker {
         if !origin.can_carry_a_durable_allowance() {
             return false;
         }
-        self.allowed_origins.push(domain.to_ascii_lowercase());
+        let domain = domain.to_ascii_lowercase();
+        // Deduplicated: the control can be pressed twice, and a list that grows per click is
+        // a linear scan on every resource request that never shrinks.
+        if !self.allowed_origins.contains(&domain) {
+            self.allowed_origins.push(domain);
+        }
         true
     }
 
@@ -257,12 +262,17 @@ impl Broker {
         }
 
         // 4. Has the user allowed this sender? Remote content is blocked **by default**.
+        // **A durable allowance is matched only for an origin that could have earned one.**
+        // Without the second condition a `From:` header alone matches a domain the user
+        // granted on an attested message, so a spoof inherits the real sender's allowances —
+        // which is the property `Origin` exists to hold and states in its own header.
         let allowed = document.allowed_once
-            || document.origin.domain().is_some_and(|d| {
-                self.allowed_origins
-                    .iter()
-                    .any(|a| a == &d.to_ascii_lowercase())
-            });
+            || (document.origin.can_carry_a_durable_allowance()
+                && document.origin.domain().is_some_and(|d| {
+                    self.allowed_origins
+                        .iter()
+                        .any(|a| a == &d.to_ascii_lowercase())
+                }));
         let first_party = infrastructure.is_first_party(&document.origin, host_of(&position.url));
         if !allowed && !first_party {
             return Answer::Blocked(Reason::NotAllowedBySender);
@@ -458,6 +468,131 @@ mod tests {
             &Infrastructure::default(),
         );
         assert_eq!(a, Answer::Blocked(Reason::NotAllowedBySender));
+    }
+
+    /// FR-8's *load once*, at the layer that decides it.
+    ///
+    /// Asserted here rather than through the document's `blocked` count, because that count
+    /// comes from the filter engine's verdicts and never consults the allowance state — a
+    /// test written against it passes whether `once` means once, forever, or nothing.
+    #[test]
+    fn loading_once_permits_this_document_and_no_other() {
+        let origin = attested("sender.test");
+        let (mut b, first) = broker_with(
+            origin.clone(),
+            vec![position("https://cdn.other.test/x.png")],
+        );
+        assert!(b.allow_once(first.as_str()));
+
+        let ask = |b: &mut Broker, token: &Token| {
+            b.answer(
+                &Request {
+                    url: Address {
+                        token: token.clone(),
+                        position: 0,
+                    }
+                    .to_url(),
+                    transferred_length: None,
+                },
+                &authority(),
+                &Infrastructure::default(),
+            )
+        };
+
+        assert_ne!(
+            ask(&mut b, &first),
+            Answer::Blocked(Reason::NotAllowedBySender),
+            "the document the user allowed is still refused for that reason"
+        );
+
+        // A second render of the same sender is a second decision. This is the case the
+        // re-render produces, and the one an allowance keyed on the token could not express.
+        let second = b.open_document(origin, vec![position("https://cdn.other.test/x.png")]);
+        assert_eq!(
+            ask(&mut b, &second),
+            Answer::Blocked(Reason::NotAllowedBySender),
+            "`once` leaked into a document the user was never asked about"
+        );
+    }
+
+    /// A durable allowance is the sender's, so it applies to the next document too — which is
+    /// exactly what distinguishes it from the one above.
+    #[test]
+    fn a_durable_allowance_applies_to_the_next_document_from_that_sender() {
+        let origin = attested("sender.test");
+        let (mut b, _) = broker_with(
+            origin.clone(),
+            vec![position("https://cdn.other.test/x.png")],
+        );
+        assert!(b.allow_origin(&origin));
+
+        let next = b.open_document(origin, vec![position("https://cdn.other.test/x.png")]);
+        let answer = b.answer(
+            &Request {
+                url: Address {
+                    token: next,
+                    position: 0,
+                }
+                .to_url(),
+                transferred_length: None,
+            },
+            &authority(),
+            &Infrastructure::default(),
+        );
+        assert_ne!(answer, Answer::Blocked(Reason::NotAllowedBySender));
+    }
+
+    /// **A spoof does not inherit the real sender's allowance.**
+    ///
+    /// The allowance is stored as a domain, and an unauthenticated origin carries the same
+    /// domain string taken from a header the sender wrote. Matching on the string alone would
+    /// hand every `From: bank.test` message whatever the real `bank.test` was granted, which
+    /// is the property `Origin` exists to hold.
+    #[test]
+    fn an_unauthenticated_origin_does_not_match_a_durable_allowance() {
+        let attested_origin = attested("bank.test");
+        let mut b = Broker::new();
+        assert!(b.allow_origin(&attested_origin));
+
+        // A `From:` header and nothing behind it — no signature, no envelope check. Same
+        // domain string, no authentication.
+        let spoof = Origin::derive(&Authentication {
+            from_domain: Some("bank.test".to_owned()),
+            ..Authentication::default()
+        });
+        assert!(
+            !spoof.can_carry_a_durable_allowance(),
+            "the fixture did not produce an unauthenticated origin"
+        );
+
+        let token = b.open_document(spoof, vec![position("https://cdn.other.test/x.png")]);
+        let answer = b.answer(
+            &Request {
+                url: Address { token, position: 0 }.to_url(),
+                transferred_length: None,
+            },
+            &authority(),
+            &Infrastructure::default(),
+        );
+        assert_eq!(
+            answer,
+            Answer::Blocked(Reason::NotAllowedBySender),
+            "a spoofed sender inherited the real sender's allowance"
+        );
+    }
+
+    #[test]
+    fn a_durable_allowance_is_recorded_once_however_often_it_is_granted() {
+        let origin = attested("sender.test");
+        let mut b = Broker::new();
+        for _ in 0..5 {
+            assert!(b.allow_origin(&origin));
+        }
+        assert_eq!(
+            b.allowed_origins.len(),
+            1,
+            "each click added an entry, so every resource request scans a list that only grows"
+        );
     }
 
     #[test]

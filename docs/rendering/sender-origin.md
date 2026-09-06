@@ -81,7 +81,10 @@ domain-scoped rule evaluation, and by the per-sender allowlist that governs remo
 [the pipeline](pipeline.md). A per-sender allowlist keyed on an *unauthenticated* From domain would be
 trivially forgeable, so the allowlist MUST key on the synthetic origin, not on the displayed sender.
 
-That rule has a consequence at priority 4 which is easier to meet in the interface than to discover in the
-code: **where the origin is null there is nothing to key a durable allowance on**, so a persistent "always
-show images from this sender" cannot exist for that message. [The pipeline](pipeline.md) states what is
+That rule has a consequence at priorities 3 and 4 which is easier to meet in the interface than to discover
+in the code: **a durable allowance can be keyed only on an attested origin**, so a persistent "always
+show images from this sender" cannot exist for a message whose sender was not authenticated — neither for
+a null origin, which has nothing to key on at all, nor for an unauthenticated `From` domain, which has
+something to key on and it is forgeable. The code read this as "not null" and therefore admitted priority 3,
+which is the forgeable case this very paragraph rules out. [The pipeline](pipeline.md) states what is
 offered instead, and why offering a one-time allowance is what keeps this from reading as a refusal.

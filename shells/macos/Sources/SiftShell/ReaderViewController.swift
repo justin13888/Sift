@@ -176,6 +176,7 @@ final class ReaderViewController: NSViewController {
         guard let row else {
             showing = nil
             dark = false
+            openToken = nil
             showNothing()
             return
         }
@@ -201,6 +202,7 @@ final class ReaderViewController: NSViewController {
             blockedBar.isHidden = true
             attachments.isHidden = true
             body.clear()
+            openToken = nil
             return
         }
         var document = SiftDocument()
@@ -215,6 +217,10 @@ final class ReaderViewController: NSViewController {
             attachments.isHidden = true
             body.clear()
             links = []
+            // Cleared with the document it named. Nothing can reach the consent buttons while
+            // the bar is hidden, so this is not the only guard — but a field that outlives its
+            // token is one an added code path could use without noticing.
+            openToken = nil
             return
         }
         failure.isHidden = true

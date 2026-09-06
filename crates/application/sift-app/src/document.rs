@@ -196,6 +196,15 @@ impl App {
             .map(|target| Link::of(&sift_block::link::unwrap(target, &[])))
             .collect();
 
+        // **The allowance is carried across the re-render.** Accepting withheld content
+        // re-opens the message, which mints a new token and revokes the old one — so an
+        // allowance held against the token died with the click that granted it, and the
+        // button was a no-op with a passing test beside it. The decision is about the
+        // message, so it is applied here, to whatever token this render just minted.
+        if self.allowed_once_messages.contains(&id) {
+            self.resources.allow_once(rendered.token.as_str());
+        }
+
         Ok(Document {
             html: rendered.html,
             token: rendered.token.as_str().to_owned(),

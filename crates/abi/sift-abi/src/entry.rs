@@ -1973,6 +1973,7 @@ pub unsafe extern "C" fn sift_open_document(
             let mut open = layer.documents.lock().map_err(|_| ())?;
             let entry = open.entry(token.clone()).or_insert_with(|| {
                 let mut held = OpenDocument {
+                    message: id,
                     document,
                     withheld: Vec::new(),
                     links: Vec::new(),
@@ -2060,19 +2061,29 @@ pub unsafe extern "C" fn sift_allow_remote_content(
         guard(|| {
             let layer = layer(app).ok_or(())?;
             let name = borrowed(token, token_len)?;
+            // Which message the token names, resolved before the session is locked, because
+            // the consent is a decision about the message and not about this render of it.
+            let message = {
+                let open = layer.documents.lock().map_err(|_| ())?;
+                open.get(name).ok_or(())?.message
+            };
             let mut session = layer.session.lock().map_err(|_| ())?;
-            let broker = &mut session.app_mut().resources;
+            let app = session.app_mut();
             if durable == 0 {
-                return broker.allow_once(name).then_some(()).ok_or(());
+                // Both: the record that survives the re-render, and the live document, so
+                // that a shell which does not re-render still sees the effect.
+                app.allow_remote_content_once(message);
+                return app.resources.allow_once(name).then_some(()).ok_or(());
             }
+            let broker = &mut app.resources;
             let origin = broker.origin_of(name).ok_or(())?;
-            // The durable allowance and the transient one, because the message in front of
-            // the user must load now as well as the next one from this sender. Ordering them
-            // the other way would leave the open document blocked by the very click that
-            // allowed its sender.
-            let allowed = broker.allow_origin(&origin);
-            broker.allow_once(name);
-            allowed.then_some(()).ok_or(())
+            // **Refusing is refusing.** `allow_once` used to run either way, so a call the
+            // boundary answered `Failed` still left the open document fetch-permitted — a
+            // refusal that granted the thing it refused.
+            if !broker.allow_origin(&origin) {
+                return Err(());
+            }
+            Ok(())
         })
     }
 }
@@ -3187,11 +3198,18 @@ mod tests {
     /// FR-8's *load once*, on the boundary.
     ///
     /// The bar's two buttons were assigned to nothing in the macOS shell — `onLoadOnce` and
-    /// `onAlwaysAllow` were declared and never set — so a user could read that content was
-    /// withheld and had no way to accept it. There was also no entry point to assign them
-    /// to: the broker could allow an origin and nothing across the boundary could ask it to.
+    /// `onAlwaysAllow` were declared and never set — and there was no entry point to assign
+    /// them to: the broker could allow an origin and nothing across the boundary could ask it
+    /// to.
+    ///
+    /// **What this asserts is the crossing, not the semantics.** A document's `blocked` count
+    /// comes from the filter engine's verdicts and never consults the allowance state, so a
+    /// test written against it would pass whether `once` meant once, forever, or nothing —
+    /// which is exactly what an earlier version of this test did. That `once` is scoped to one
+    /// document, that a durable allowance carries to the next one, and that a spoof inherits
+    /// neither, are asserted in `sift-broker`, at the layer that decides them.
     #[test]
-    fn loading_once_is_scoped_to_the_open_document() {
+    fn the_consent_call_crosses_for_a_live_document() {
         let app = start(run_inline, scratch_str());
         let message = hostile_message(app);
         let document = open(app, message);
@@ -3202,16 +3220,10 @@ mod tests {
             SiftStatus::Ok,
             "the open document could not be allowed to load"
         );
-
-        // The same message, opened again, is a new token and a new decision. A load-once that
-        // outlived its document would be a durable allowance the user never asked for and
-        // cannot find to revoke.
-        let again = open(app, message);
-        let fresh = text(again.token);
-        assert_ne!(fresh, token, "re-opening reused the token");
-        assert!(
-            again.blocked > 0,
-            "content stayed allowed across a re-open, so `once` did not mean once"
+        // Idempotent: the button can be pressed twice, and the second press must not fail.
+        assert_eq!(
+            unsafe { sift_allow_remote_content(app, token.as_ptr(), token.len(), 0) },
+            SiftStatus::Ok
         );
 
         let _ = unsafe { sift_shutdown(app) };
