@@ -154,7 +154,20 @@ impl Broker {
     /// Everything in flight under it is **cancelled and answered `Revoked`**, not left to
     /// race: an unanswered request is one the engine waits on forever.
     pub fn revoke(&mut self, token: &Token) -> bool {
-        self.documents.remove(token.as_str()).is_some()
+        self.revoke_named(token.as_str())
+    }
+
+    /// Revoke by the token's own text.
+    ///
+    /// A shell holds a document's token as a string — it is in every address in the document
+    /// it was handed — and revoking is what it does with it when the view navigates away.
+    /// Taking the text rather than a [`Token`] avoids giving anything a way to *construct*
+    /// one, which is the part that has to stay unforgeable.
+    ///
+    /// Forging a value here gains nothing in any case: the only thing it can do is revoke,
+    /// and a caller that can name a live token already holds the document it belongs to.
+    pub fn revoke_named(&mut self, token: &str) -> bool {
+        self.documents.remove(token).is_some()
     }
 
     /// Allow a sender's remote content durably — FR-8.
@@ -273,6 +286,17 @@ impl Broker {
     #[must_use]
     pub const fn may_prefetch(&self) -> bool {
         self.tier_permits_fetch
+    }
+
+    #[must_use]
+    /// The tokens of every live document.
+    ///
+    /// FR-34's runtime panel needs this — "what is the body view holding" is one of the
+    /// things that panel exists to answer, and a count alone cannot be checked against
+    /// anything. It hands out addresses that are already in the document they belong to, so
+    /// it discloses nothing the holder of that document does not have.
+    pub fn live_tokens(&self) -> Vec<&str> {
+        self.documents.keys().map(String::as_str).collect()
     }
 
     #[must_use]

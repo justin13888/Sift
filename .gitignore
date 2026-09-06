@@ -35,3 +35,13 @@ DerivedData/
 # Per-contributor mise overrides. mise.toml itself is committed and is the definition of
 # every command; this is the local escape hatch and must not be.
 mise.local.toml
+
+# The OAuth client this checkout is configured with. Not a secret — a public client
+# identifier appears in every authorization URL — but it is per-installation configuration,
+# and a committed one would make every checkout share one client, one quota and one consent
+# screen. See `mise-tasks/macos`.
+shells/macos/oauth-client.txt
+
+# Written from that client on every macOS build, and read by the generated project so the
+# values reach the bundle deterministically rather than by leaking out of the build shell.
+shells/macos/OAuthClient.xcconfig

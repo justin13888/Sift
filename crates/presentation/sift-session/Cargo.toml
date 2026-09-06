@@ -1,0 +1,22 @@
+[package]
+name = "sift-session"
+description = "D-18's observation registry: what a shell watches, and the batches it is sent."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sift-foundation.workspace = true
+sift-provider.workspace = true
+sift-presentation.workspace = true
+sift-app.workspace = true
+# The intents a gesture builds, and the journal it writes them to. The gesture lives here
+# because the action register does — see `gesture.rs`.
+sift-mutations.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"] }

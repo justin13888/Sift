@@ -2,16 +2,17 @@
 //! the action register by identifier — which is what makes this a shell rather than a
 //! script that happens to call the same crates.
 
-use crate::app::App;
+use sift_app::App;
 use sift_credentials::store::CredentialStore as _;
 use sift_foundation::identity::LocalId;
 use sift_mutations::intent::{Intent, State};
-use sift_presentation::action::{self, Context, MutationKind};
+use sift_presentation::action;
+use sift_session::{Session, Watching};
 use sift_subsystem::Subsystem;
 
 type Output = Result<Vec<String>, String>;
 
-pub fn run(app: &mut App, line: &str) -> Output {
+pub fn run(session: &mut Session, line: &str) -> Output {
     let mut parts = line.split_whitespace();
     let Some(verb) = parts.next() else {
         return Ok(vec![]);
@@ -21,29 +22,42 @@ pub fn run(app: &mut App, line: &str) -> Output {
     // D-24: the tag is task-scoped and re-established at each boundary, not set once. A
     // command is this shell's equivalent of a stage boundary.
     let subsystem = match verb {
-        "ingest" | "list" | "folders" | "watch" => Subsystem::Store,
+        "ingest" | "list" | "row" | "folders" | "watch" => Subsystem::Store,
+        "observe" | "poll" => Subsystem::Presentation,
         "do" | "queue" | "flush" | "restart" => Subsystem::Mutations,
         "actions" | "select" | "open" => Subsystem::Presentation,
         "sync" => Subsystem::Sync,
-        "body" => Subsystem::Sanitize,
+        "body" | "resource" | "close" | "blocked" | "links" => Subsystem::Sanitize,
         "net" => Subsystem::Network,
         _ => Subsystem::Shell,
     };
-    sift_alloc::tagged(subsystem, || dispatch(app, verb, &rest))
+    sift_alloc::tagged(subsystem, || dispatch(session, verb, &rest))
 }
 
-fn dispatch(app: &mut App, verb: &str, rest: &[&str]) -> Output {
+fn dispatch(session: &mut Session, verb: &str, rest: &[&str]) -> Output {
     let rest = rest.to_vec();
+    // The two verbs that are the session's rather than the application's: D-18's registry
+    // sits above the application and is what a shell actually binds to.
+    match verb {
+        "observe" => return observe(session, &rest),
+        "poll" => return poll(session),
+        // D-98's register is presentation-layer, so invoking one is the session's rather than
+        // the application's — and a shell binds to the session anyway.
+        "do" => return invoke(session, &rest),
+        "undo" => return undo(session),
+        "actions" => return actions(session),
+        _ => {}
+    }
+    let app = session.app_mut();
     match verb {
         "help" => Ok(help()),
         "account" => account(app, &rest),
         "ingest" => ingest(app, &rest),
         "list" => list(app, &rest),
+        "row" => row(app, &rest),
         "select" => select(app, &rest),
         "open" => open(app, &rest),
         "window" => window(app, &rest),
-        "actions" => actions(app),
-        "do" => invoke(app, &rest),
         "queue" => queue(app, &rest),
         "flush" => flush(app, &rest),
         "restart" => restart(app, &rest),
@@ -52,6 +66,13 @@ fn dispatch(app: &mut App, verb: &str, rest: &[&str]) -> Output {
         "watch" => watch(app, &rest),
         "sync" => sync(app, &rest),
         "body" => body(app, &rest),
+        "blocked" => blocked(app, &rest),
+        "links" => links(app, &rest),
+        "attachments" => attachments(app, &rest),
+        "search" => search(app, &rest),
+        "save" => save(app, &rest),
+        "resource" => resource(app, &rest),
+        "close" => close(app, &rest),
         "net" => net(app, &rest),
         other => Err(format!("unknown command `{other}` — try `help`")),
     }
@@ -61,6 +82,7 @@ fn help() -> Vec<String> {
     [
         "account add <name> <rich|minimal|unstable-ids>   add an account of a capability shape",
         "account add-replayed <name>                      an account backed by D-65's fixture corpus",
+        "account writes <name> <on|off>                   authorize writes to a mailbox, or withdraw it",
         "account authorize <name> <client-id>             begin a real authorization; prints the address",
         "account callback <name> <url>                    finish one, from what the scheme handed back",
         "account forget <name>                            FR-4: erase every credential, by enumeration",
@@ -69,13 +91,24 @@ fn help() -> Vec<String> {
         "watch <account> <remote-id> <on|off>             FR-43's watched set",
         "sync <account> [max-pages]                       cursor, delta, envelopes, one transaction",
         "body <id|#n>                                     fetch and render through the seven stages",
+        "blocked <id|#n>                                  FR-29: what was withheld, and the rule",
+        "links <id|#n>                                    FR-30/FR-42: where each link really goes",
+        "attachments <id|#n>                              FR-10: what is carried, fetching none of it",
+        "search [--in <account>] <query>                  FR-20: operators, and how they were read",
+        "save <id|#n> <part> <dir> [write]                NFR-53: the final path, shown before the write",
+        "resource <url|#n>                                answer one load, as the scheme handler does",
+        "close <token|#>                                  revoke a document — D-90's navigation",
         "net [account]                                    bytes on the wire (FR-36)",
         "ingest <account> <subject>...                    ingest a message (delivered)",
         "list [account]                                   the message list, read THROUGH the overlay",
+        "observe <account|*> [limit]                      register a D-18 observation; prints its handle",
+        "poll                                             deliver what changed since the last poll",
+        "row <account>                                    FR-6's fields, as a shell receives them",
         "select <id>...                                   set the selection (D-99, keyed on identity)",
         "open <id|#n>                                     open a message in the reader",
         "window <open|close>                              a window exists, or does not",
         "actions                                          the palette: a filtered view of the register",
+        "undo                                             FR-15: reverse the last gesture, by compensation",
         "do <action-id> [arg]                             invoke an action by identifier (D-98)",
         "queue [account]                                  the durable queue, by state",
         "flush <account> [--leave-in-flight]              issue one batch; optionally stop there",
@@ -98,8 +131,12 @@ fn account(app: &mut App, args: &[&str]) -> Output {
             // a batch answered out of order cannot be arranged against a real account on
             // demand, and a shell drivable only against one would leave every one of them
             // untested end to end.
-            let adapter = crate::account::replayed();
-            let id = app.add_provider_account(name, adapter)?;
+            // Recorded as replayed rather than as a provider, because that is what a later
+            // run reconnects it by. Adding it through `add_provider_account` put it in the
+            // container under the kind that means "reach this over the network with a
+            // credential", and a restored corpus account has neither and needs neither.
+            let adapter = sift_app::authorize::replayed();
+            let id = app.add_account_of_kind(name, adapter, sift_app::REPLAYED_KIND)?;
             Ok(vec![format!("added `{name}` (replayed)  id={id}")])
         }
         ["authorize", name, client_id] => {
@@ -107,15 +144,19 @@ fn account(app: &mut App, args: &[&str]) -> Output {
             // registered the scheme with the system — a bundle does that, and a bundle is
             // what this binary is not — so it says so rather than opening a browser the user
             // would return from to nothing.
-            let registered = std::env::var("SIFT_CALLBACK_SCHEME_REGISTERED").is_ok();
-            let url = crate::account::begin(&mut app.broker, client_id, registered, now_millis())
-                .map_err(|e| e.to_string())?;
+            // D-71's fact, which the shell owns. This binary is not a bundle, so it is false
+            // unless a test forces it to exercise the URL's shape.
+            app.scheme_is_registered = std::env::var("SIFT_CALLBACK_SCHEME_REGISTERED").is_ok();
+            let registered = app.scheme_is_registered;
+            let url =
+                sift_app::authorize::begin(&mut app.broker, client_id, registered, now_millis())
+                    .map_err(|e| e.to_string())?;
             app.pending_authorization
                 .insert((*name).to_owned(), (*client_id).to_owned());
             Ok(vec![
                 format!(
                     "the callback returns through the registered scheme{}",
-                    if crate::account::callback_arrives_on_a_socket() {
+                    if sift_app::authorize::callback_arrives_on_a_socket() {
                         " and a socket"
                     } else {
                         ", never a socket — NFR-24 admits none for any purpose"
@@ -134,12 +175,33 @@ fn account(app: &mut App, args: &[&str]) -> Output {
                 .cloned()
                 .ok_or_else(|| format!("no authorization is in progress for `{name}`"))?;
             let id = app.reserve_identity();
-            let adapter =
-                crate::account::complete(&mut app.broker, &client_id, id, callback, now_millis())
-                    .map_err(|e| e.to_string())?;
+            let adapter = sift_app::authorize::complete(
+                &mut app.broker,
+                &client_id,
+                id,
+                callback,
+                now_millis(),
+            )
+            .map_err(|e| e.to_string())?;
             app.pending_authorization.remove(*name);
             let id = app.add_provider_account(name, adapter)?;
             Ok(vec![format!("added `{name}`  id={id}")])
+        }
+        ["writes", name, state] => {
+            let enabled = match *state {
+                "on" => true,
+                "off" => false,
+                _ => return Err("account writes <name> <on|off>".to_owned()),
+            };
+            app.set_writes_enabled(name, enabled)?;
+            Ok(vec![if enabled {
+                format!(
+                    "`{name}` may now be changed: archive, move, flag, label, mark read, \
+                     report junk, and move to the provider's own Trash."
+                )
+            } else {
+                format!("`{name}` is watched only. Triage is recorded here and held.")
+            }])
         }
         ["forget", name] => {
             let id = app.account(name)?.id;
@@ -187,7 +249,7 @@ fn ingest(app: &mut App, args: &[&str]) -> Output {
     // Normalized once, here, before anything renders or indexes it — NFR-54.
     let display = sift_foundation::normalize::for_display(&subject);
     let stored = display.as_str().to_owned();
-    crate::app::insert_message(a, id, &stored, id.millis())?;
+    sift_app::insert_message(a, id, &stored, id.millis())?;
     a.subjects.insert(id, stored);
     Ok(vec![format!("{id}  delivered")])
 }
@@ -201,25 +263,17 @@ fn list(app: &mut App, args: &[&str]) -> Output {
     let mut out = Vec::new();
     for name in names {
         let a = app.account(&name)?;
-        // D-51: everything the user sees reads **through** the overlay. A read path that
-        // forgets shows the server's opinion instead of the user's.
-        let overlay = a.queue.overlay();
-        // Read back out of the store, in D-55's order, rather than out of a map the
-        // harness kept — otherwise the ordering this prints would prove nothing.
-        let rows = crate::app::list_messages(a)?;
-        for (id, subject) in &rows {
-            let pending = overlay.for_message(*id);
-            if pending.iter().any(|i| i.removes_from_view()) {
-                // Optimistically gone. The row left the list before any round trip — NFR-7.
-                continue;
-            }
-            let marks: Vec<&str> = pending.iter().map(Intent::name).collect();
-            let suffix = if marks.is_empty() {
+        // D-51 and D-55 both live in the projection now, rather than being reimplemented
+        // here: a shell that reads through the overlay itself is a shell that can disagree
+        // with the other one about what a person sees.
+        let rows = sift_app::rows::message_rows(a, L_LIST)?;
+        for row in &rows {
+            let suffix = if row.pending.is_empty() {
                 String::new()
             } else {
-                format!("   [pending: {}]", marks.join(", "))
+                format!("   [pending: {}]", row.pending.join(", "))
             };
-            out.push(format!("{name}  {id}  {subject}{suffix}"));
+            out.push(format!("{name}  {}  {}{suffix}", row.id, row.subject));
         }
     }
     if out.is_empty() {
@@ -227,6 +281,88 @@ fn list(app: &mut App, args: &[&str]) -> Output {
     }
     Ok(out)
 }
+
+/// Register a D-18 observation, the way a shell does when a list appears on screen.
+fn observe(session: &mut Session, args: &[&str]) -> Output {
+    let (target, limit) = match args {
+        [target] => (*target, L_LIST),
+        [target, limit] => (
+            *target,
+            limit.parse().map_err(|_| "limit must be a number")?,
+        ),
+        _ => return Err("observe <account|*> [limit]".to_owned()),
+    };
+    // `*` is D-4's unified inbox: every account, merged, on one comparator.
+    let account = if target == "*" {
+        None
+    } else {
+        Some(session.app_mut().account(target)?.id)
+    };
+    let id = session.observe(Watching::Messages { account, limit });
+    Ok(vec![format!("observing {} as #{}", target, id.0)])
+}
+
+/// Deliver what changed, the way the boundary does on the next turn of the shell's loop.
+///
+/// A poll that changed nothing prints nothing but the count, which is the property D-18
+/// exists for: the common case is a signal that touched no window anybody is watching.
+fn poll(session: &mut Session) -> Output {
+    let deliveries = session.poll()?;
+    let mut out = Vec::new();
+    for d in &deliveries {
+        out.push(format!(
+            "#{} generation={} {} change(s), {} incoming",
+            d.observation.0,
+            d.generation.0,
+            d.batch.changes.len(),
+            d.batch.incoming.len()
+        ));
+        for change in &d.batch.changes {
+            out.push(format!("   {change:?}"));
+        }
+    }
+    out.push(format!("-- {} delivery(ies)", deliveries.len()));
+    Ok(out)
+}
+
+/// FR-6's row, field by field, as it crosses the boundary.
+///
+/// `list` prints what a person recognises; this prints what a shell is actually handed, so a
+/// test can assert the fields rather than the sentence they were formatted into.
+fn row(app: &mut App, args: &[&str]) -> Output {
+    let [name] = args else {
+        return Err("row <account>".to_owned());
+    };
+    let account = app.account(name)?;
+    let rows = sift_app::rows::message_rows(account, L_LIST)?;
+    let mut out = Vec::new();
+    for r in &rows {
+        out.push(format!(
+            "{}  received={} origination={} unread={} flagged={} attachments={} thread={} \
+             sender={} subject={} snippet={}",
+            r.id,
+            r.received_millis,
+            r.origination_millis,
+            r.unread,
+            r.flagged,
+            r.has_attachments,
+            r.thread_count,
+            r.sender,
+            r.subject,
+            r.snippet,
+        ));
+    }
+    if out.is_empty() {
+        out.push("(empty)".to_owned());
+    }
+    Ok(out)
+}
+
+/// How many rows a harness listing asks for.
+///
+/// A window rather than everything, because the projection is windowed and a harness that
+/// asked for an unbounded set would be exercising a path no shell uses.
+const L_LIST: u32 = 500;
 
 fn parse_id(s: &str) -> Result<LocalId, String> {
     u128::from_str_radix(s, 16)
@@ -278,7 +414,7 @@ fn visible_rows(app: &mut App) -> Result<Vec<(String, LocalId)>, String> {
     for name in names {
         let a = app.account(&name)?;
         let overlay = a.queue.overlay();
-        for (id, _) in crate::app::list_messages(a)? {
+        for (id, _) in sift_app::list_messages(a)? {
             if overlay
                 .for_message(id)
                 .iter()
@@ -323,158 +459,88 @@ fn window(app: &mut App, args: &[&str]) -> Output {
     }
 }
 
-fn context<'a>(
-    app: &App,
-    caps: &'a Option<sift_provider::capability::Capabilities>,
-) -> Context<'a> {
-    Context {
-        selection_len: app.selection.len(),
-        has_open_message: app.open_message.is_some(),
-        has_window: app.has_window,
-        capabilities: caps.as_ref(),
-    }
-}
-
-fn actions(app: &mut App) -> Output {
-    let caps = app.selection_capabilities();
-    let ctx = context(app, &caps);
-    let mut out: Vec<String> = action::palette(&ctx)
-        .iter()
-        .map(|a| a.id.to_owned())
-        .collect();
-    out.push(format!(
-        "-- {} of {} available",
-        out.len(),
-        action::ACTIONS.len()
-    ));
+/// FR-15 — what could be taken back, and taking it back.
+///
+/// Two verbs in one because they answer the same question: a countdown a shell cannot read is
+/// a countdown a shell cannot draw.
+fn undo(session: &mut Session) -> Output {
+    let now = now_millis();
+    let Some(record) = session.undoable() else {
+        return Err("there is nothing to undo".to_owned());
+    };
+    let mut out = vec![if record.timed {
+        format!(
+            "undo `{}` over {} message(s) — {} ms left on FR-15's window",
+            record.intent,
+            record.messages,
+            record.remaining_millis(now)
+        )
+    } else {
+        format!(
+            "undo `{}` over {} message(s) — no countdown; it stays reversible either way",
+            record.intent, record.messages
+        )
+    }];
+    let gesture = session.undo_last(now)?;
+    out.extend(
+        gesture
+            .enqueued
+            .iter()
+            .map(|m| format!("{m}: {} enqueued", gesture.intent.unwrap_or_default())),
+    );
+    out.extend(gesture.skipped.iter().map(|(m, why)| format!("{m}: {why}")));
+    // Never a queue retraction. The original may already have reached the server, and a
+    // design that tries to cancel in flight has two outcomes to reason about.
+    out.push("-- reversed by compensation, not by retraction".to_owned());
     Ok(out)
 }
 
-fn invoke(app: &mut App, args: &[&str]) -> Output {
+fn actions(session: &mut Session) -> Output {
+    let mut out = vec![format!(
+        "-- {} of {} available",
+        session.palette().len(),
+        action::ACTIONS.len()
+    )];
+    out.extend(session.palette().iter().map(|a| format!("  {}", a.id)));
+    Ok(out)
+}
+
+fn invoke(session: &mut Session, args: &[&str]) -> Output {
     let [id, extra @ ..] = args else {
         return Err("do <action-id> [arg]".to_owned());
     };
-    let Some(action) = action::by_id(id) else {
-        return Err(format!("no action `{id}` in the register"));
-    };
+    let parameter = extra.iter().find(|a| !a.starts_with("--")).copied();
+    let confirmed = extra.contains(&"--confirmed");
 
-    let caps = app.selection_capabilities();
-    let ctx = context(app, &caps);
-    if !action.is_available(&ctx) {
-        // Not "disabled": absent. D-98 makes an unavailable action absent from the palette,
-        // and a shell would show nothing at all. A harness that also said nothing would be
-        // useless, so it says which of the two gates closed — which is exactly the
-        // information D-98 concedes a user does not get ("one keystroke does nothing in one
-        // account with no visible reason").
-        let reason = if caps.is_none() && action.mutates.is_some() {
-            "nothing in the selection belongs to an account, so no capabilities are known"
-        } else if action.mutates.is_some() && caps.is_some() {
-            "the account's declared capabilities do not permit it"
-        } else {
-            "its scope is not satisfied — check the selection, the open message, or the window"
-        };
-        return Err(format!("`{id}` is not available: {reason}"));
+    // D-98 makes an unavailable action **absent**, and a shell shows nothing at all. A harness
+    // that also said nothing would be useless, so it reports which of the two gates closed —
+    // which is exactly the information D-98 concedes a user does not get.
+    if let Some(why) = session.why_unavailable(id) {
+        return Err(format!("`{id}` is not available: {}", why.explain()));
     }
+    let gesture = session.invoke(id, parameter, confirmed, now_millis())?;
 
-    let Some(kind) = action.mutates else {
+    if !gesture.mutates {
         return Ok(vec![format!(
-            "{id}: no mutation (a navigation or a surface)"
+            "{}: no mutation (a navigation or a surface)",
+            gesture.action
         )]);
-    };
-
-    let intent = build_intent(kind, extra)?;
-    if intent.requires_confirmation() {
-        // FR-14's single exception. Confirmed before it is issued rather than undone after,
-        // and never applied optimistically ahead of the server.
-        let confirmed = extra.contains(&"--confirmed");
-        if !confirmed {
-            return Err(format!(
-                "`{id}` requires confirmation before it is issued — repeat with --confirmed"
-            ));
-        }
     }
-
-    let now = now_millis();
-    let mut out = Vec::new();
-    let selection = app.selection.clone();
-    // D-85's undo group is assigned **at the gesture**, which is what makes FR-17's bulk
-    // operation one undoable unit rather than a hundred.
-    let undo_group = app.next_intent_id();
-    for message in selection {
-        let Some(owner) = app
-            .owner_of(message)
-            .cloned()
-            .or_else(|| app.owner_of_stored(message))
-        else {
-            out.push(format!("{message}: no account holds this message"));
-            continue;
-        };
-        let intent_id = app.next_intent_id();
-        let a = app.account(&owner)?;
-        let sequence = a.queue.enqueue(intent_id, message, intent.clone(), now);
-
-        // **Journal first, store second** — D-74's ordering, and the reverse would lose a
-        // mutation the user watched succeed. The failure this order can leave is an intent
-        // enqueued whose optimistic effect was never applied, which is invisible and
-        // self-correcting because the overlay is derived from the queue.
-        let durable =
-            a.store.journal.execute(
-                "INSERT INTO intent (id, undo_group, message_id, operation, intent_version,
-                                 state, created_millis, per_message_seq, expires_millis)
-             VALUES (?1, ?2, ?3, ?4, 1, 'Pending', ?5, ?6, ?7)",
-                rusqlite::params![
-                    intent_id.to_be_bytes().to_vec(),
-                    undo_group.to_be_bytes().to_vec(),
-                    message.to_bytes().to_vec(),
-                    intent.name(),
-                    i64::try_from(now).unwrap_or(i64::MAX),
-                    i64::try_from(sequence).unwrap_or(i64::MAX),
-                    i64::try_from(now.saturating_add(
-                        sift_foundation::limits::L17_INTENT_EXPIRY.as_millis() as u64
-                    ))
-                    .unwrap_or(i64::MAX),
-                ],
-            );
-        if let Err(e) = durable {
-            return Err(format!("the journal refused the intent: {e}"));
-        }
-        out.push(format!("{message}: {} enqueued", intent.name()));
-    }
+    let mut out: Vec<String> = gesture
+        .enqueued
+        .iter()
+        .map(|m| format!("{m}: {} enqueued", gesture.intent.unwrap_or_default()))
+        .collect();
+    out.extend(gesture.skipped.iter().map(|(m, why)| format!("{m}: {why}")));
     out.push(format!(
         "-- optimistic: {}",
-        if intent.applies_optimistically() {
+        if gesture.optimistic {
             "yes, before any round trip"
         } else {
             "no"
         }
     ));
     Ok(out)
-}
-
-fn build_intent(kind: MutationKind, extra: &[&str]) -> Result<Intent, String> {
-    let arg = extra.iter().find(|a| !a.starts_with("--"));
-    Ok(match kind {
-        MutationKind::Archive => Intent::Archive,
-        MutationKind::DeleteToTrash => Intent::DeleteToTrash,
-        MutationKind::PermanentlyDelete => Intent::PermanentlyDelete,
-        MutationKind::MoveTo => Intent::MoveTo {
-            folder: arg
-                .ok_or("move-to needs a folder")?
-                .parse()
-                .map_err(|_| "folder must be a number")?,
-        },
-        MutationKind::Flag => Intent::Flag,
-        MutationKind::MarkRead => Intent::MarkRead,
-        MutationKind::MarkUnread => Intent::MarkUnread,
-        MutationKind::AddTag => Intent::AddTag {
-            name: (*arg.ok_or("add-tag needs a name")?).to_owned(),
-        },
-        MutationKind::RemoveTag => Intent::RemoveTag {
-            name: (*arg.ok_or("remove-tag needs a name")?).to_owned(),
-        },
-        MutationKind::ReportJunk => Intent::ReportJunk,
-        MutationKind::ReportNotJunk => Intent::ReportNotJunk,
-    })
 }
 
 fn queue(app: &mut App, args: &[&str]) -> Output {
@@ -511,6 +577,21 @@ fn flush(app: &mut App, args: &[&str]) -> Output {
         [name, "--leave-in-flight"] => ((*name).to_owned(), true),
         _ => return Err("flush <account> [--leave-in-flight]".to_owned()),
     };
+    // The read-only posture, checked **before** anything is issued and before the adapter is
+    // even taken. Everything up to here already happened: the intents were built, checked
+    // against declared capabilities, written durably and applied optimistically. This is the
+    // one step that cannot be taken back, and it is the one step an unauthorized account
+    // does not take.
+    if !app.may_issue(&name) {
+        let held = app.held(&name);
+        return Ok(vec![
+            format!("0 issued — writes are not authorized for `{name}`"),
+            format!(
+                "{held} intent(s) held. Nothing has been sent to the provider, and nothing \
+                 will be until `account writes {name} on`."
+            ),
+        ]);
+    }
     let account = app.account(&name)?;
 
     // An account with no provider behind it: the queue's own state machine, driven without a
@@ -574,7 +655,7 @@ fn flush(app: &mut App, args: &[&str]) -> Output {
         transaction.commit().map_err(|e| e.to_string())
     };
 
-    let resolve = crate::app::Remote(&account.store.store);
+    let resolve = sift_app::Remote(&account.store.store);
     let outcome = sift_mutations::flush::flush_once(
         adapter.as_ref(),
         &mut account.queue,
@@ -759,8 +840,8 @@ fn sync(app: &mut App, args: &[&str]) -> Output {
     // Folders first: a delta needs somewhere to put what it finds, and D-83 assigns local
     // identity on discovery rather than on first use.
     fn turn(
-        adapter: &crate::account::Live,
-        account: &mut crate::app::OpenAccount,
+        adapter: &sift_app::authorize::Live,
+        account: &mut sift_app::OpenAccount,
         pages: usize,
     ) -> Result<sift_sync::ingest::PageReport, sift_sync::run::RunError> {
         sift_sync::run::discover_folders(adapter.as_ref(), &account.store).and_then(|_| {
@@ -840,7 +921,8 @@ fn refresh_credential(
         .cloned()
         .or_else(|| std::env::var("SIFT_OAUTH_CLIENT_ID").ok())
         .ok_or("no client identifier is known for this account, so it cannot be refreshed")?;
-    let registration = crate::account::registration(&client_id);
+    let registration =
+        sift_app::authorize::registration(sift_app::authorize::default_kind(), &client_id)?;
     let mut transport = sift_http::Https::to(&registration.profile.token.host)
         .map_err(|why| format!("the trust store could not be consulted: {why}"))?;
     app.broker
@@ -850,103 +932,283 @@ fn refresh_credential(
 }
 
 /// Fetch a message's body and run it through the seven stages.
+/// Render a message, and print everything the reader's chrome is drawn from.
+///
+/// **This calls the same [`App::open_document`] the macOS shell calls**, rather than repeating
+/// the seven stages beside it. D-65's claim is that the harness drives the application through
+/// the entry points a shell uses; a second render here would make that claim false in the one
+/// place it is most worth being true.
 fn body(app: &mut App, args: &[&str]) -> Output {
     let [reference] = args else {
         return Err("body <id|#n>".to_owned());
     };
     let id = resolve(app, reference)?;
-    let owner = app
-        .owner_of_stored(id)
-        .ok_or("no account holds this message")?;
-    let account = app.account(&owner)?;
-    let remote: String = account
-        .store
-        .store
-        .query_row(
-            "SELECT remote_id FROM message WHERE id = ?1",
-            rusqlite::params![id.to_bytes().to_vec()],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
-        .ok_or("this message has no remote identifier yet — sync first")?;
-    let adapter = account
-        .adapter
-        .as_ref()
-        .ok_or("this account has no provider behind it")?;
-
-    // **Structure first, and then one part.** The structure costs a few kilobytes; the
-    // attachment beside it costs nothing until somebody asks for it, which is a claim about
-    // *requests* rather than about intentions.
-    let remote_id = sift_provider::adapter::RemoteMessageId(remote);
-    let parts = adapter.structure(&remote_id).map_err(|e| e.to_string())?;
-    // Stage 2, and the same rule a parsed tree goes through: HTML preferred, plain text as
-    // the fallback, and plain text where the HTML exceeds L-1 — which rejects rather than
-    // truncating, and here the rejection has somewhere honest to land.
-    let chosen =
-        sift_mime::select::choose(&parts).ok_or("this message carries no renderable part")?;
-    let bytes = adapter
-        .fetch_part(&remote_id, &chosen.part)
-        .map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    let selected = sift_pipeline::Selected {
-        html: chosen.is_html.then(|| text.clone()),
-        text: (!chosen.is_html).then_some(text),
-        reason: Some(format!("{:?}", chosen.reason)),
-    };
-
-    let mut broker = sift_broker::broker::Broker::new();
-    let mut context = sift_pipeline::Context {
-        // Nothing has authenticated this message yet, so the origin is null and every
-        // resource is third-party under the strictest rules. That is the correct answer
-        // rather than a placeholder: D-11's fourth priority is exactly this case.
-        origin: sift_block::origin::Origin::Null,
-        blocker: None,
-        dark: false,
-        broker: &mut broker,
-    };
-    let rendered = sift_pipeline::render(&selected, &mut context).map_err(|e| e.to_string())?;
+    let document = app.open_document(id, false)?;
 
     let mut out = vec![
+        format!("stages: {}", document.stages.join(" -> ")),
+        format!("token: {}", document.token),
         format!(
-            "part {} ({}) — {}",
-            chosen.part,
-            if chosen.is_html {
-                "text/html"
-            } else {
-                "text/plain"
-            },
-            selected.reason.clone().unwrap_or_default()
-        ),
-        format!("{} part(s) described, {} fetched", parts.len(), 1),
-        format!("stages: {}", rendered.stages.join(" -> ")),
-        format!("token: {}", rendered.token.as_str()),
-        format!(
-            "{} fetching position(s), {} link(s), {} removal(s)",
-            rendered.positions.len(),
-            rendered.links.len(),
-            rendered.removals.len()
+            "{} fetching position(s), {} withheld, {} link(s)",
+            document.fetching_positions,
+            document.blocked,
+            document.links.len()
         ),
     ];
-    for (position, verdict) in rendered.positions.iter().zip(rendered.verdicts.iter()) {
-        out.push(format!(
-            "  [{}] {}@{}  {}  -> {}",
-            position.index,
-            position.element,
-            position.attribute,
-            position.original,
-            if verdict.permits_fetch() {
-                "allowed"
-            } else {
-                "blocked"
-            }
-        ));
-    }
-    for removal in &rendered.removals {
-        out.push(format!("  removed {} — {}", removal.what, removal.rule));
-    }
-    out.push(rendered.html);
+    out.extend(withheld_lines(&document));
+    out.extend(link_lines(&document));
+    out.push(document.html);
     Ok(out)
+}
+
+/// FR-29's chrome as text: the count, then each refusal and the rule behind it.
+///
+/// The count leads because that is what the reader leads with, and the list follows because a
+/// count with nothing behind it tells a user something happened without telling them what.
+fn blocked(app: &mut App, args: &[&str]) -> Output {
+    let [reference] = args else {
+        return Err("blocked <id|#n>".to_owned());
+    };
+    let id = resolve(app, reference)?;
+    let document = app.open_document(id, false)?;
+    let mut out = vec![match document.blocked {
+        0 => "nothing was withheld".to_owned(),
+        1 => "1 remote resource not loaded".to_owned(),
+        n => format!("{n} remote resources not loaded"),
+    }];
+    out.extend(withheld_lines(&document));
+    out.push(if document.may_always_allow {
+        "`always load from this sender` is offered".to_owned()
+    } else {
+        "`always load from this sender` is absent — nothing authenticated this message, so \
+         there is no origin to key a durable allowance on"
+            .to_owned()
+    });
+    Ok(out)
+}
+
+/// FR-30 and FR-42 — where each link goes, and where the unsubscribe destination does.
+fn links(app: &mut App, args: &[&str]) -> Output {
+    let [reference] = args else {
+        return Err("links <id|#n>".to_owned());
+    };
+    let id = resolve(app, reference)?;
+    let document = app.open_document(id, false)?;
+    let mut out = vec![format!("{} link(s)", document.links.len())];
+    out.extend(link_lines(&document));
+    out.push(match &document.unsubscribe {
+        None => "no unsubscribe destination is declared".to_owned(),
+        Some(link) if link.needs_a_mail_handler => format!(
+            "unsubscribe: {} — requires a mail handler; Sift will not send it",
+            link.displayed
+        ),
+        Some(link) => format!(
+            "unsubscribe: {} — opens in the browser on confirmation; Sift never requests it",
+            link.displayed
+        ),
+    });
+    Ok(out)
+}
+
+fn withheld_lines(document: &sift_app::document::Document) -> Vec<String> {
+    document
+        .withheld
+        .iter()
+        .map(|w| {
+            format!(
+                "  withheld {}@{}  {}  — {}",
+                w.element, w.attribute, w.displayed, w.rule
+            )
+        })
+        .collect()
+}
+
+fn link_lines(document: &sift_app::document::Document) -> Vec<String> {
+    document
+        .links
+        .iter()
+        .map(|l| {
+            let mut line = format!("  link {}", l.displayed);
+            if l.displayed != l.target {
+                line.push_str(&format!("  -> {}", l.target));
+            }
+            if let Some(wrapper) = &l.wrapper {
+                line.push_str(&format!("  (wrapped by {wrapper})"));
+            }
+            if l.needs_a_mail_handler {
+                line.push_str("  [needs a mail handler]");
+            }
+            line
+        })
+        .collect()
+}
+
+/// FR-19, FR-20 and FR-21 — search, and what the query was understood to mean.
+///
+/// The interpretation is printed **before** the results, because that is the order in which it
+/// is useful: a query that found nothing and one that was misread look identical from the
+/// results alone, and `form:alice` is a plausible typo for `from:alice`.
+fn search(app: &mut App, args: &[&str]) -> Output {
+    let (account, terms) = match args {
+        ["--in", account, rest @ ..] => (Some(*account), rest),
+        rest => (None, rest),
+    };
+    if terms.is_empty() {
+        return Err("search [--in <account>] <query>".to_owned());
+    }
+    let report = app.search(&terms.join(" "), account, 50)?;
+
+    let mut out = vec![format!("read as: {}", report.interpretation.join("; "))];
+    out.extend(report.caveats.iter().map(|c| format!("-- {c}")));
+    out.push(format!(
+        "{} result(s){}",
+        report.hits.len(),
+        if report.delegable_accounts == 0 {
+            ", all from this machine — nothing was asked of a provider"
+        } else {
+            ""
+        }
+    ));
+    out.extend(report.hits.iter().map(|h| {
+        format!(
+            "  [{}] {}  {}  {}",
+            match h.source {
+                sift_app::search::Source::Local => "local",
+                sift_app::search::Source::Server => "server",
+            },
+            h.row.id,
+            h.row.sender,
+            h.row.subject
+        )
+    }));
+    Ok(out)
+}
+
+/// FR-10 — what a message carries, without fetching any of it.
+fn attachments(app: &mut App, args: &[&str]) -> Output {
+    let [reference] = args else {
+        return Err("attachments <id|#n>".to_owned());
+    };
+    let id = resolve(app, reference)?;
+    let listed = app.attachments(id)?;
+    if listed.is_empty() {
+        return Ok(vec!["no attachments".to_owned()]);
+    }
+    let mut out = vec![format!("{} attachment(s), none fetched", listed.len())];
+    for a in &listed {
+        out.push(format!(
+            "  {}  {}  {} B  as `{}`",
+            a.part, a.media_type, a.declared_size, a.file_name
+        ));
+        if a.warning.required() {
+            let mut why = Vec::new();
+            if a.warning.declared {
+                why.push("the declared type is executable");
+            }
+            if a.warning.extension {
+                why.push("the name ends in an executable extension");
+            }
+            if a.warning.disagrees {
+                why.push("the declared type and the name disagree");
+            }
+            out.push(format!("    warn before opening: {}", why.join("; ")));
+        }
+    }
+    Ok(out)
+}
+
+/// NFR-53 — resolve the exact final path, show it, and only then write.
+///
+/// Two verbs rather than one, because the requirement is that the path be shown **before** the
+/// write. A single call that saved and then reported would satisfy every test and none of the
+/// requirement.
+fn save(app: &mut App, args: &[&str]) -> Output {
+    let (reference, part, directory, commit) = match args {
+        [reference, part, directory] => (reference, part, directory, false),
+        [reference, part, directory, "write"] => (reference, part, directory, true),
+        _ => return Err("save <id|#n> <part> <directory> [write]".to_owned()),
+    };
+    let id = resolve(app, reference)?;
+    let plan = app.plan_attachment_save(id, part, std::path::Path::new(directory))?;
+
+    let mut out = vec![format!("would write: {}", plan.final_path.display())];
+    if plan.renamed {
+        out.push("  the name was derived — a sender-supplied name never becomes a path".to_owned());
+    }
+    if !commit {
+        out.push("nothing written — repeat with `write` to confirm".to_owned());
+        return Ok(out);
+    }
+    let (written, warning) = app.write_attachment(&plan)?;
+    out.push(format!(
+        "wrote {written} B to {}",
+        plan.final_path.display()
+    ));
+    if warning.required() {
+        out.push("  opening this needs a warning first (FR-10)".to_owned());
+    }
+    Ok(out)
+}
+
+/// Resolve one address under the internal scheme, as the body view's scheme handler does.
+///
+/// This is the channel N-1 leaves open, and the only one. It exists as a command so that the
+/// property can be asserted rather than observed: a fabricated address resolves to nothing, a
+/// revoked one stops resolving, and with no filter engine loaded every remote fetch is
+/// refused because D-10 makes an absent authority **deny** rather than fall through.
+fn resource(app: &mut App, args: &[&str]) -> Output {
+    let [url] = args else {
+        return Err("resource <url|#n>".to_owned());
+    };
+    // `#n` addresses position n of the live document. Tokens are minted per document and are
+    // unguessable by design, so a scripted session cannot name one in advance — which is the
+    // same problem `#n` solves for message identities, and the same answer.
+    let owned;
+    let url = if let Some(index) = url.strip_prefix('#') {
+        let token = app
+            .resources
+            .live_tokens()
+            .first()
+            .map(|t| (*t).to_owned())
+            .ok_or("no document is open — render one with `body` first")?;
+        owned = format!(
+            "{}://{token}/{index}",
+            sift_foundation::identifiers::INTERNAL_SCHEME
+        );
+        owned.as_str()
+    } else {
+        *url
+    };
+    let answer = app.resolve_resource(url, None);
+    Ok(vec![match answer {
+        sift_broker::broker::Answer::Bytes { length } => format!("bytes: {length}"),
+        sift_broker::broker::Answer::Blocked(reason) => format!("blocked: {reason:?}"),
+        sift_broker::broker::Answer::Unavailable(why) => format!("unavailable: {why:?}"),
+    }])
+}
+
+/// Revoke a document's token — D-90's navigation, without a view to navigate.
+fn close(app: &mut App, args: &[&str]) -> Output {
+    let [token] = args else {
+        return Err("close <token|#>".to_owned());
+    };
+    let owned;
+    let token: &str = if *token == "#" {
+        owned = app
+            .resources
+            .live_tokens()
+            .first()
+            .map(|t| (*t).to_owned())
+            .ok_or("no document is open")?;
+        owned.as_str()
+    } else {
+        token
+    };
+    Ok(vec![if app.close_document(token) {
+        format!("revoked {token}")
+    } else {
+        format!("{token} was not open")
+    }])
 }
 
 /// FR-36 counts bytes on the wire.

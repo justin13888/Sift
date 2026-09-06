@@ -130,6 +130,108 @@ pub fn grapheme_len(s: &str) -> usize {
     s.graphemes(true).count()
 }
 
+/// NFR-53 — the name an attachment is written under, derived from the one a sender chose.
+///
+/// # Why this is a different rule from [`for_display`]
+///
+/// [`for_display`] *isolates* bidirectional controls rather than stripping them, because a
+/// display name is prose and a right-to-left run in it is real mail. A filename is not prose.
+/// It is a structured identifier whose last component decides what the platform does when the
+/// file is opened, and a right-to-left override inside one produces a name that renders as a
+/// document and executes as a program. So the rule here is [`crate::normalize`]'s other one —
+/// the one `display_form` applies to a URL: **remove them**, because there is no legitimate
+/// use for reordering the visible components of a path.
+///
+/// # What is removed, and why each one
+///
+/// Path separators and the platform's alternate separator, because a name containing one is a
+/// name proposing a directory. Traversal segments, because `..` is a name proposing a
+/// *different* directory. A leading dot, because a file that does not appear in the chooser
+/// the user just used is a file written somewhere the user did not watch. Colons, which are
+/// the separator on the one platform whose path syntax nobody remembers. The reserved device
+/// names, which are cheap to exclude and expensive to discover. And a trailing dot or space,
+/// which some filesystems silently drop — turning a shown path into a different written one,
+/// which is the exact property NFR-53 exists to hold.
+///
+/// # This derives a name; it does not resolve a path
+///
+/// The result is a single path *component*, and it is still not a path. Joining it to a
+/// directory, refusing to overwrite what is already there, and showing the final result are
+/// the caller's, because only the caller knows the directory the user chose.
+#[must_use]
+pub fn for_file_name(raw: &str) -> String {
+    let normalized: String = normalized(raw)
+        .chars()
+        .filter(|c| !is_bidi_control(*c))
+        .map(|c| if is_separator(c) { '_' } else { c })
+        .collect();
+
+    // Traversal is handled at the *ends* rather than as a substring anywhere. Stripping every
+    // `..` would rewrite `report..final.pdf` into `report.final.pdf`, which is a silent change
+    // to a name the user is about to be shown — and once separators are gone there is only one
+    // segment left, so `..` can only be the whole of it.
+    let candidate = normalized
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' ']);
+
+    let candidate = truncate_to_bytes_at_grapheme(candidate, L53_FILE_NAME_BYTES);
+    if candidate.is_empty() || is_reserved_device_name(candidate) {
+        return FALLBACK_FILE_NAME.to_owned();
+    }
+    candidate.to_owned()
+}
+
+/// The bound on a derived name, **in bytes**.
+///
+/// Not L-25, and not a grapheme count. L-25 is a *display* bound on prose, and it counts
+/// graphemes because what it bounds is how much a person reads. A filesystem bounds a path
+/// component in **bytes**, and a name of 200 emoji is 800 of them — so counting graphemes here
+/// would produce a name that passes every check and then fails at the write, which is the one
+/// place NFR-53's "the exact final path MUST be shown" cannot be honoured.
+///
+/// 200 leaves the caller room for a disambiguating suffix inside the 255-byte limit the common
+/// filesystems share.
+const L53_FILE_NAME_BYTES: usize = 200;
+
+/// What a name that derived to nothing becomes. A message can carry an attachment named `..`
+/// or named entirely of control characters, and the answer is a name rather than a refusal —
+/// the bytes are still the user's.
+const FALLBACK_FILE_NAME: &str = "attachment";
+
+/// The longest prefix that fits `max` bytes without cutting a grapheme cluster.
+///
+/// Both halves matter. Cutting on a byte boundary can produce invalid UTF-8; cutting on a
+/// `char` boundary can orphan a combining mark onto whatever the renderer puts next, which is
+/// the same reason [`truncate_at_grapheme`] exists. This one differs only in what it counts.
+fn truncate_to_bytes_at_grapheme(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let end = s
+        .grapheme_indices(true)
+        .map(|(i, g)| i + g.len())
+        .take_while(|end| *end <= max)
+        .last()
+        .unwrap_or(0);
+    &s[..end]
+}
+
+const fn is_separator(c: char) -> bool {
+    matches!(c, '/' | '\\' | ':')
+}
+
+/// The device names Windows resolves before it looks at the filesystem, with or without an
+/// extension. Sift does not ship there today, and excluding them costs one comparison against
+/// a name that is about to be shown to a user anyway — whereas discovering the omission means
+/// discovering it on somebody's machine.
+fn is_reserved_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || matches!(stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT")),
+                    Some(d) if d.len() == 1 && d.chars().all(|c| c.is_ascii_digit() && c != '0'))
+}
+
 /// D-81's coupling, as a function rather than as a comment: the display form and the
 /// index form agree about normalization.
 ///
@@ -146,6 +248,137 @@ pub fn agrees(raw: &str) -> bool {
         .and_then(|s| s.strip_suffix(PDI))
         .unwrap_or(displayed.as_str());
     indexed.starts_with(inner)
+}
+
+#[cfg(test)]
+mod file_name_tests {
+    use super::*;
+
+    /// NFR-53's whole point. Each of these is a name a message may legitimately carry and
+    /// none of them may become a path.
+    #[test]
+    fn a_sender_supplied_name_never_proposes_a_directory() {
+        for hostile in [
+            "../../.ssh/authorized_keys",
+            "/etc/passwd",
+            r"..\..\Windows\System32\cmd.exe",
+            "..",
+            "....",
+            "/",
+        ] {
+            let derived = for_file_name(hostile);
+            assert!(
+                !derived.contains('/') && !derived.contains('\\') && !derived.contains(':'),
+                "`{hostile}` derived to `{derived}`, which contains a separator"
+            );
+            assert!(
+                derived != ".." && !derived.starts_with('.'),
+                "`{hostile}` derived to `{derived}`, which is still a traversal or hidden"
+            );
+        }
+    }
+
+    /// The failure the requirement names in its own words: a right-to-left override inside a
+    /// filename produces a name that renders as a document and executes as a program. The
+    /// classic is `exe.txt` written so it displays as `txt.exe` reversed — the extension the
+    /// user reads is not the extension the platform acts on.
+    #[test]
+    fn a_bidi_override_cannot_disguise_an_extension() {
+        let disguised = "annual_report\u{202E}fdp.exe";
+        let derived = for_file_name(disguised);
+        assert!(
+            !derived.chars().any(is_bidi_control),
+            "`{derived}` still reorders itself when rendered"
+        );
+        assert!(
+            derived.ends_with(".exe"),
+            "the real extension survives: {derived}"
+        );
+    }
+
+    /// A display name isolates bidi controls and a filename removes them. The two rules
+    /// disagreeing is deliberate, and this is the assertion that keeps them from being
+    /// quietly unified by somebody tidying up.
+    #[test]
+    fn the_display_rule_and_the_file_rule_deliberately_differ() {
+        let arabic = "\u{202B}\u{645}\u{644}\u{641}.pdf";
+        let displayed = for_display(arabic);
+        assert!(
+            displayed.as_str().chars().any(is_bidi_control),
+            "a display value keeps them — D-100"
+        );
+        assert!(
+            !for_file_name(arabic).chars().any(is_bidi_control),
+            "a file name does not — NFR-53"
+        );
+    }
+
+    /// Removing every `..` as a substring would silently rewrite this, and a shown path that
+    /// differs from the written one is the property NFR-53 is about.
+    #[test]
+    fn a_dot_inside_a_name_is_not_traversal() {
+        assert_eq!(for_file_name("report..final.pdf"), "report..final.pdf");
+        assert_eq!(for_file_name("v1.2.3-notes.txt"), "v1.2.3-notes.txt");
+    }
+
+    /// A name is derived rather than refused: the bytes are still the user's mail, and an
+    /// attachment they cannot save because its name was hostile is an attachment the sender
+    /// took from them.
+    #[test]
+    fn a_name_that_derives_to_nothing_still_gets_one() {
+        for empty in ["", "...", "   ", "\u{202E}\u{202E}", "\u{0}\u{7}"] {
+            assert_eq!(for_file_name(empty), "attachment");
+        }
+    }
+
+    /// A trailing dot or space is dropped by some filesystems *after* the path is shown,
+    /// which turns the shown path and the written one into two different things.
+    #[test]
+    fn a_trailing_dot_or_space_is_removed_here_rather_than_by_the_filesystem() {
+        assert_eq!(for_file_name("invoice.pdf "), "invoice.pdf");
+        assert_eq!(for_file_name("invoice.pdf."), "invoice.pdf");
+        assert_eq!(for_file_name("invoice.pdf . . "), "invoice.pdf");
+    }
+
+    #[test]
+    fn the_reserved_device_names_are_excluded() {
+        for reserved in ["CON", "nul.txt", "COM1", "LPT9.pdf", "aux"] {
+            assert_eq!(
+                for_file_name(reserved),
+                "attachment",
+                "`{reserved}` resolves before the filesystem is consulted"
+            );
+        }
+        // Not reserved, and a real name somebody may well send.
+        assert_eq!(for_file_name("COM10.log"), "COM10.log");
+        assert_eq!(for_file_name("console.log"), "console.log");
+    }
+
+    /// Long enough to leave the caller room for a disambiguating suffix inside the 255-byte
+    /// component limit, even where every grapheme costs four bytes.
+    /// A grapheme count would pass this and then fail at the write, which is the one place
+    /// "the exact final path is shown" cannot be honoured — the shown path was never written.
+    #[test]
+    fn a_name_is_bounded_in_the_unit_a_filesystem_bounds_it_in() {
+        for wide in ["\u{1F600}", "\u{e0}", "e\u{301}", "a"] {
+            let derived = for_file_name(&wide.repeat(500));
+            assert!(
+                derived.len() <= L53_FILE_NAME_BYTES,
+                "`{wide}` repeated derived to {} bytes",
+                derived.len()
+            );
+            assert!(derived.len() + " (99)".len() < 255);
+            // Truncation did not cut a cluster in half.
+            assert_eq!(derived, for_file_name(&derived));
+        }
+    }
+
+    /// Control characters go before anything else looks at the string, so a name cannot
+    /// smuggle a newline into whatever the final path is printed into.
+    #[test]
+    fn control_characters_are_gone() {
+        assert_eq!(for_file_name("in\u{a}voice\u{0}.pdf"), "invoice.pdf");
+    }
 }
 
 #[cfg(test)]

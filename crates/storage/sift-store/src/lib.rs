@@ -11,3 +11,4 @@ pub mod flags;
 #[cfg(any(test, feature = "fault-injection"))]
 pub mod fault;
 pub mod schema;
+pub mod vfs;

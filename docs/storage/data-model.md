@@ -2,7 +2,7 @@
 
 What Sift stores, and how it is partitioned.
 
-**Owns:** D-6, D-21, D-32, D-44, D-74, D-78, D-104, NFR-48.
+**Owns:** D-6, D-21, D-32, D-44, D-74, D-78, D-104, D-108, NFR-48.
 
 ## D-6 — One database per account
 
@@ -25,6 +25,46 @@ in the same file as its discardable one, for reasons D-57 forced and D-73 explai
 **Contestable because:** the unified inbox is a shipped feature (D-4), so the cost is paid in the default
 view rather than an edge case. If the merge proves to be the dominant complexity in the presentation
 layer, this decision is the one to revisit.
+
+## D-108 — The installation container, and the queue rebuilt from the journal
+
+**Chosen:** a sealed registry beside the account files, holding each account's identity, ordinal, provider
+kind, display name and **write authorisation**. Identity is 128 random bits. Ordinals are monotonic and
+never reclaimed. Each account's queue is **rebuilt from its journal** when the container opens.
+**Rejected:** a file of account names; a sequential identity; keeping the write authorisation in the
+account's own store.
+
+**Why the queue rebuild is part of this decision rather than a later one.** [D-74](#d-74--an-account-is-two-files-a-store-that-may-be-discarded-and-a-journal-that-may-not)
+makes the journal the file that may not be discarded, on the grounds that the store can be resynced from
+the provider and a queued gesture cannot be recovered from anywhere. That argument is only true if
+something reads the journal back. Nothing did: the queue started empty at every launch, and the only
+statements in the workspace that selected an intent were inside a test module. The defect was invisible
+for exactly as long as nothing persisted — and would have become **silent loss of every gesture a user
+watched succeed and that had not yet been issued** on the first restart of a durable container. So the
+container and the rebuild land together, and neither is correct alone.
+
+Reading an intent back also required the journal to store what a gesture supplied and the register did
+not — a destination folder for a move, a name for a tag. The first version of the table had no such
+column, so a restored `move-to` would have had nowhere to go.
+
+**Why identity is random.** [D-89](../architecture/state-register.md) makes re-adding an account a *new*
+account, which is what makes [FR-4](../product/scope.md)'s erasure provable. A sequential identity breaks
+that directly: remove the third account and add another, and the new one is the third account again —
+sharing the file names and the credential keys of a predecessor whose erasure may not have finished.
+Ordinals are a separate, smaller thing: they are what local identity is generated from, they are 16 bits,
+and [D-78](#d-78--local-identity) never reuses one. So the watermark is what is recorded, not the highest
+in use.
+
+**Why the write authorisation is in the registry.** An account store is discardable by construction —
+[D-73](encryption.md) says a file that fails to authenticate is discarded and never repaired. A security
+flag whose safe state can be flipped to unsafe by deleting a file is not a flag.
+
+**Contestable because:** the registry is a single point whose loss orphans every account's files at once.
+That is recoverable — the files are unreadable without keys the registry does not hold, so the recovery is
+to delete them and resync — but it is recovery as *deletion* rather than as repair, and a user who loses a
+registry loses their queued gestures with it. The alternative, deriving the account list from the files
+present, was rejected because it cannot carry the write authorisation, which is the one field that must
+not be inferable from what is on disk.
 
 ## D-74 — An account is two files: a store that may be discarded, and a journal that may not
 

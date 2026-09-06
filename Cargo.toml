@@ -36,6 +36,8 @@ members = [
     # Providers — the capability abstraction, the transport, and one crate per adapter.
     "crates/providers/sift-provider",
     "crates/providers/sift-http",
+    # The register: the one crate above the adapters that names them.
+    "crates/providers/sift-registry",
     "crates/providers/sift-jmap",
     "crates/providers/sift-graph",
     "crates/providers/sift-gmail",
@@ -50,9 +52,13 @@ members = [
     "crates/application/sift-mutations",
     "crates/application/sift-governor",
     "crates/application/sift-lifecycle",
+    # The assembled application, below the boundary so both shells get the same one.
+    "crates/application/sift-app",
 
     # Presentation — windowing, selection, formatting, merge and diff.
     "crates/presentation/sift-presentation",
+    # The observation registry, above the application and below the ABI.
+    "crates/presentation/sift-session",
 
     # ABI — the C entry points of D-17, and nothing else. A leaf.
     "crates/abi/sift-abi",
@@ -120,6 +126,7 @@ sift-broker     = { path = "crates/rendering/sift-broker" }
 sift-pipeline   = { path = "crates/rendering/sift-pipeline" }
 sift-provider   = { path = "crates/providers/sift-provider" }
 sift-http       = { path = "crates/providers/sift-http" }
+sift-registry   = { path = "crates/providers/sift-registry" }
 sift-jmap       = { path = "crates/providers/sift-jmap" }
 sift-graph      = { path = "crates/providers/sift-graph" }
 sift-gmail      = { path = "crates/providers/sift-gmail" }
@@ -131,7 +138,9 @@ sift-sync       = { path = "crates/application/sift-sync" }
 sift-mutations  = { path = "crates/application/sift-mutations" }
 sift-governor   = { path = "crates/application/sift-governor" }
 sift-lifecycle  = { path = "crates/application/sift-lifecycle" }
+sift-app        = { path = "crates/application/sift-app" }
 sift-presentation = { path = "crates/presentation/sift-presentation" }
+sift-session    = { path = "crates/presentation/sift-session" }
 sift-abi        = { path = "crates/abi/sift-abi" }
 
 [profile.release]

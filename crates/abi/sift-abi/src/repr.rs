@@ -255,6 +255,44 @@ impl SiftId {
 #[repr(transparent)]
 pub struct Generation(pub u64);
 
+/// Which observation a delivery belongs to.
+///
+/// **Distinct from [`Generation`], and the two cannot be one value.** A generation is a
+/// per-delivery staleness stamp: it advances on cancellation so that a delivery already
+/// posted to the main loop is discarded on arrival. An observation handle is an identity: it
+/// says *which* registration a callback is for, and it must not change while that
+/// registration lives.
+///
+/// Collapsing them was a defect rather than a simplification. With one value, two live
+/// observations over different sets are indistinguishable — a shell watching a folder list
+/// and a message list holds the same handle for both — and cancelling one either cancels
+/// every observation or none of them. The shell has no way to tell which it got.
+///
+/// A handle is never reused within a process, for the same reason a generation is not: a
+/// reused handle would let a delivery for a dead observation be accepted by a live one that
+/// happened to inherit its number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct SiftObservation(pub u64);
+
+impl SiftObservation {
+    /// Not a valid observation. What an out-parameter holds if a registration fails.
+    pub const NONE: Self = Self(0);
+
+    /// The first handle a process issues. Deliberately not zero.
+    pub const FIRST: Self = Self(1);
+
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.0 != Self::NONE.0
+    }
+}
+
 impl Generation {
     pub const FIRST: Self = Self(0);
 
@@ -371,6 +409,35 @@ mod tests {
         assert!(
             !after_cancel.accepts(posted),
             "a delivery posted before cancellation survived"
+        );
+    }
+
+    #[test]
+    fn an_observation_is_not_a_generation() {
+        // The defect this type exists to close. Two observations registered one after the
+        // other must be distinguishable, and neither may collide with the generation space —
+        // a shell that cancelled by generation would cancel every observation or none.
+        let first = SiftObservation::FIRST;
+        let second = first.next();
+        assert_ne!(first, second);
+        assert!(first.is_valid() && second.is_valid());
+        assert!(!SiftObservation::NONE.is_valid());
+    }
+
+    #[test]
+    fn an_observation_handle_is_never_reused() {
+        let mut o = SiftObservation::FIRST;
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..1000 {
+            assert!(
+                seen.insert(o),
+                "a handle repeated, so a dead observation's delivery would be accepted"
+            );
+            o = o.next();
+        }
+        assert!(
+            !seen.contains(&SiftObservation::NONE),
+            "NONE was issued as a handle"
         );
     }
 

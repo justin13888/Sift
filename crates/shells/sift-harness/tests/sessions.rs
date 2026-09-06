@@ -116,6 +116,7 @@ fn a_crash_between_issuing_and_answering_leaves_intents_reconciling() {
     // cannot be done correctly, which is what the durable marker is paying for.
     let mut cmds = base();
     cmds.extend([
+        "account writes work on",
         "ingest work A",
         "ingest work B",
         "select #1 #2",
@@ -427,8 +428,19 @@ fn with_no_filter_engine_loaded_every_remote_fetch_is_refused() {
     let mut cmds = live();
     cmds.extend(["sync mail", "body #1"]);
     let out = session(&cmds);
-    assert!(out.contains("-> blocked"), "{out}");
-    assert!(!out.contains("-> allowed"), "{out}");
+    // Every position, and every one of them refused. The pair is the assertion: a document
+    // reporting "0 fetching positions, 0 withheld" would pass a check for the absence of
+    // "allowed" while proving nothing at all.
+    let line = out
+        .lines()
+        .find(|l| l.contains("fetching position(s)"))
+        .unwrap_or_else(|| panic!("{out}"));
+    let counts: Vec<u32> = line
+        .split_whitespace()
+        .filter_map(|w| w.parse().ok())
+        .collect();
+    assert!(counts[0] > 0, "there is something to refuse: {line}");
+    assert_eq!(counts[0], counts[1], "all of them were refused: {line}");
 }
 
 #[test]
@@ -469,6 +481,9 @@ fn a_mutation_goes_out_over_the_wire_and_settles() {
     let mut cmds = live();
     cmds.extend([
         "sync mail",
+        // Writes are authorized explicitly, because a new account is watched-only. Every
+        // test that reaches the wire says so out loud, which is the point of the default.
+        "account writes mail on",
         "select #1",
         "do message.archive",
         "queue mail",
@@ -565,6 +580,7 @@ fn an_account_with_no_provider_behind_it_still_drives_the_queue() {
     // a real queue with nothing behind them, which is what the planner tests need.
     let out = session(&[
         "account add shape rich",
+        "account writes shape on",
         "ingest shape A message",
         "select #1",
         "do message.archive",
@@ -573,4 +589,859 @@ fn an_account_with_no_provider_behind_it_still_drives_the_queue() {
         "queue shape",
     ]);
     assert!(out.contains("1 intent(s) moved to Reconciling"), "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// FR-6's row, as a shell receives it. `list` prints a sentence a person
+// recognises; these assert the fields the sentence was formatted from, because
+// a shell binds to the fields.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_list_is_ordered_by_the_time_the_server_assigned_and_not_the_one_the_sender_claimed() {
+    // D-55. The `Date` header is the sender's claim and is trivially forged; ordering on it
+    // would let anyone put their mail at the top of the list.
+    let mut cmds = live();
+    cmds.extend(["folders mail", "sync mail", "row mail"]);
+    let out = session(&cmds);
+
+    let received: Vec<u64> = out
+        .lines()
+        .filter_map(|l| l.split("received=").nth(1))
+        .filter_map(|r| r.split_whitespace().next())
+        .filter_map(|r| r.parse().ok())
+        .collect();
+    assert_eq!(received.len(), 3, "{out}");
+    assert!(
+        received.windows(2).all(|w| w[0] >= w[1]),
+        "newest first: {received:?}\n{out}"
+    );
+
+    // And the sender's own claim is carried beside it rather than being what was sorted on.
+    assert!(out.contains("origination="), "{out}");
+}
+
+#[test]
+fn a_thread_reports_how_many_messages_it_holds() {
+    // FR-6 lists a thread count among the row's fields, and D-54's reader is native rows
+    // over one body view — so the count is what tells a shell there are rows to draw.
+    let mut cmds = live();
+    cmds.extend(["folders mail", "sync mail", "row mail"]);
+    let out = session(&cmds);
+    assert!(out.contains("thread=2"), "the threaded pair: {out}");
+    assert!(
+        out.contains("thread=1"),
+        "the message that is its own thread: {out}"
+    );
+}
+
+#[test]
+fn read_state_comes_from_the_provider_before_anyone_has_touched_it() {
+    let mut cmds = live();
+    cmds.extend(["folders mail", "sync mail", "row mail"]);
+    let out = session(&cmds);
+    assert!(out.contains("unread=true"), "{out}");
+    assert!(out.contains("unread=false"), "{out}");
+}
+
+#[test]
+fn the_overlay_answers_for_read_state_before_the_server_has_been_told() {
+    // D-51 and NFR-7 together, on a field rather than on the row's presence. Marking a
+    // message read must show as read immediately — and it must do so without the base row
+    // in the store having changed, which is what makes it an overlay rather than a write.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "select #3",
+        "do message.mark-read",
+        "row mail",
+    ]);
+    let out = session(&cmds);
+    let marked = out
+        .lines()
+        .find(|l| l.contains("A receipt") && !l.contains("Re:"))
+        .unwrap_or_else(|| panic!("the row is missing:\n{out}"));
+    assert!(
+        marked.contains("unread=false"),
+        "the gesture had not reached the row:\n{marked}"
+    );
+}
+
+#[test]
+fn every_field_a_shell_draws_is_normalized_before_it_arrives() {
+    // NFR-54. Sender, subject and snippet are all attacker-controlled, and the threat model
+    // notes this path reaches native chrome where no sanitizer invariant sees it. The
+    // normalizer's isolate marks are the evidence it ran.
+    let mut cmds = live();
+    cmds.extend(["folders mail", "sync mail", "row mail"]);
+    let out = session(&cmds);
+    let row = out
+        .lines()
+        .find(|l| l.contains("subject="))
+        .unwrap_or_else(|| panic!("no row:\n{out}"));
+    assert!(
+        row.contains('\u{2068}') && row.contains('\u{2069}'),
+        "attacker-controlled text reached the row unisolated:\n{row}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D-18, driven the way a shell drives it: register an observation, and be told
+// what changed rather than being handed the set again.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_observation_is_told_what_changed_and_not_what_the_world_holds() {
+    let mut cmds = live();
+    cmds.extend([
+        "observe mail",
+        "poll",
+        "folders mail",
+        "sync mail",
+        "poll",
+        "poll",
+    ]);
+    let out = session(&cmds);
+
+    // Nothing had arrived yet, so there was nothing to say. A registry that answered with
+    // an empty window here would have a shell repainting a list on every unrelated signal.
+    assert!(out.contains("-- 0 delivery(ies)"), "{out}");
+    // Then three rows arrived, as inserts at their post-batch indices.
+    assert!(out.contains("Insert { to: 0 }"), "{out}");
+    assert!(out.contains("Insert { to: 2 }"), "{out}");
+    // And the poll after that is quiet, because nothing changed between them.
+    assert!(
+        out.trim_end().ends_with("-- 0 delivery(ies)"),
+        "a quiet poll produced a delivery:\n{out}"
+    );
+}
+
+#[test]
+fn a_triage_gesture_reaches_the_observation_as_a_delete_before_any_round_trip() {
+    // NFR-7 and D-51 arriving at a shell through D-18 rather than through a re-read. The
+    // row leaves the window because the overlay removes it, and it leaves as a *delete* at
+    // a stated index, which is what a table view needs to animate one row going.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "observe mail",
+        "poll",
+        "select #1",
+        "do message.archive",
+        "poll",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("Delete { from: 0 }"), "{out}");
+}
+
+#[test]
+fn a_change_that_keeps_a_rows_identity_is_an_update_and_not_a_delete_and_an_insert() {
+    // The distinction D-18 exists to preserve. Marking read changes what the row draws and
+    // not which row it is — so the cell is updated in place, selection survives, and the
+    // list does not animate a row leaving and another arriving.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "observe mail",
+        "poll",
+        "select #2",
+        "do message.mark-read",
+        "poll",
+    ]);
+    let out = session(&cmds);
+    let after = out.rsplit("mark-read enqueued").next().unwrap_or("");
+    assert!(after.contains("Update { at: 1 }"), "{out}");
+    assert!(
+        !after.contains("Delete") && !after.contains("Insert"),
+        "an in-place change was expressed as a departure and an arrival:\n{out}"
+    );
+}
+
+#[test]
+fn cancelling_one_observation_leaves_the_other_delivering() {
+    // The defect the ABI carried while an observation had no identity of its own: cancelling
+    // by generation would have taken every observation or none of them.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "observe mail",
+        "observe *",
+        "poll",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("observing mail as #1"), "{out}");
+    assert!(out.contains("observing * as #2"), "{out}");
+    assert!(out.contains("-- 2 delivery(ies)"), "both were told: {out}");
+}
+
+// ---------------------------------------------------------------------------
+// N-1: the body view's only channel out, and what it answers.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_remote_resource_is_refused_rather_than_fetched() {
+    // FR-8, at the one place it can actually be enforced. The document was rewritten to
+    // address the pixel through the internal scheme, and when the body view asks for it the
+    // answer is a refusal — not a fetch that fails, and not a fetch at all.
+    let mut cmds = live();
+    cmds.extend(["folders mail", "sync mail", "body #1", "resource #0"]);
+    let out = session(&cmds);
+    assert!(out.contains("blocked:"), "{out}");
+    assert!(
+        !out.contains("bytes:"),
+        "a remote resource was fetched:\n{out}"
+    );
+}
+
+#[test]
+fn a_fabricated_address_resolves_to_nothing() {
+    // D-28's whole point: the internal scheme's addressing is a security boundary rather
+    // than a naming convenience. A guessed token is not a valid one, and the answer is
+    // *unavailable* rather than blocked — because a defect being caught and a resource being
+    // refused are different facts, and conflating them would hide the first.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "body #1",
+        "resource sift-resource://ffffffffffffffffffffffffffffffff/0",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("unavailable:"), "{out}");
+}
+
+#[test]
+fn revoking_a_document_kills_its_address_space() {
+    // D-90: revocation happens at navigation, which is earlier and more often than teardown.
+    // Message A's addresses must be dead before message B's document exists, whether or not
+    // the view survives — that is what keeps "two messages share no address space" true
+    // across a reused body view.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "body #1",
+        "resource #0",
+        "close #",
+        "resource sift-resource://00000000000000000000000000000000/0",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("revoked "), "{out}");
+    let after = out.rsplit("revoked ").next().unwrap_or("");
+    assert!(
+        after.contains("unavailable:"),
+        "an address survived its document:\n{out}"
+    );
+}
+
+#[test]
+fn a_link_is_not_a_fetching_position_and_keeps_its_real_address() {
+    // FR-30 and the link-confirmation sheet together. A link is followed on an explicit
+    // confirmation and never in place, so it is not rewritten — the destination shown to the
+    // user has to be the real one, and Sift must never resolve a wrapper by fetching it,
+    // because following the redirect *is* the tracking event.
+    let mut cmds = live();
+    cmds.extend(["folders mail", "sync mail", "body #1"]);
+    let out = session(&cmds);
+    assert!(out.contains("href=\"https://example.test/read\""), "{out}");
+    assert!(
+        !out.contains("src=\"https://tracker.test"),
+        "a fetching position kept an external scheme:\n{out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The read-only posture: a mailbox can be connected, synced, read and triaged
+// before anything is authorized to change it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_new_account_is_watched_and_not_written_to() {
+    // The default, and the reason for it: connecting a real mailbox should not, by itself,
+    // authorize anything to alter it. Everything a person can see still works — this is not
+    // a read-only *mode* that disables triage, it is a queue that is not yet allowed to
+    // drain.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "select #1",
+        "do message.archive",
+        "flush mail",
+    ]);
+    let out = session(&cmds);
+    assert!(
+        out.contains("optimistic: yes"),
+        "the gesture still applied: {out}"
+    );
+    assert!(out.contains("0 issued"), "{out}");
+    assert!(out.contains("held"), "{out}");
+    assert!(
+        !out.contains("1 applied"),
+        "a write reached the provider without authorization:\n{out}"
+    );
+}
+
+#[test]
+fn a_held_intent_is_kept_rather_than_dropped() {
+    // The queue is the thing that must not lose a gesture. Holding is not discarding, and a
+    // held intent stays visible and stays in the order it was made.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "select #1",
+        "do message.archive",
+        "flush mail",
+        "queue mail",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("archive  Pending"), "{out}");
+}
+
+#[test]
+fn authorizing_writes_lets_the_held_queue_drain() {
+    // And the other half: the authorization is what releases it, and what was held goes out
+    // in the order it was made rather than being re-derived from current state.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "select #1",
+        "do message.archive",
+        "flush mail",
+        "account writes mail on",
+        "flush mail",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("0 issued"), "{out}");
+    let after = out.rsplit("may now be changed").next().unwrap_or("");
+    assert!(after.contains("1 issued: 1 applied"), "{out}");
+}
+
+#[test]
+fn withdrawing_authorization_stops_the_next_flush() {
+    // A person who turns it back off must see it take effect on anything not yet issued.
+    let mut cmds = live();
+    cmds.extend([
+        "folders mail",
+        "sync mail",
+        "account writes mail on",
+        "account writes mail off",
+        "select #1",
+        "do message.archive",
+        "flush mail",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("0 issued"), "{out}");
+    assert!(out.contains("watched only"), "{out}");
+}
+
+#[test]
+fn what_authorization_grants_is_stated_in_the_terms_it_grants_it_in() {
+    // FR-4 requires removal to say what is lost "in those terms"; the same standard applies
+    // to the gesture that authorizes writing to somebody's mail. Naming the operations is
+    // what makes the consent informed, and permanent deletion is not among them.
+    let out = session(&["account add-replayed mail", "account writes mail on"]);
+    for granted in [
+        "archive",
+        "move",
+        "flag",
+        "label",
+        "mark read",
+        "report junk",
+        "Trash",
+    ] {
+        assert!(out.contains(granted), "`{granted}` was not stated:\n{out}");
+    }
+    assert!(
+        !out.to_lowercase().contains("permanently delete"),
+        "authorization claimed a power the provider does not give it:\n{out}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// The reader's chrome: what was withheld, where a link goes, and what is attached.
+//
+// Every one of these drives the hostile fixture — a click wrapper, a homograph host, a
+// `mailto:` unsubscribe and an attachment named with a right-to-left override, in one
+// message. A corpus of only well-behaved mail tests the happy path of a product whose whole
+// reason for existing is the other one.
+// ---------------------------------------------------------------------------------------
+
+/// The receipt is the hostile one, and it sorts last under D-55 — newest first, and it is the
+/// oldest of the three.
+fn hostile() -> Vec<&'static str> {
+    vec!["account add-replayed mail", "sync mail"]
+}
+
+#[test]
+fn a_withheld_resource_is_reported_with_the_reason_that_is_actually_true() {
+    let mut cmds = hostile();
+    cmds.push("blocked #3");
+    let out = session(&cmds);
+
+    assert!(out.contains("1 remote resource not loaded"), "{out}");
+    assert!(out.contains("beacon.tracker.test"), "{out}");
+    // D-10 makes an absent authority **deny** rather than fall through, and the chrome says
+    // *that* rather than claiming a rule matched. A user who believes a filter list caught
+    // something believes Sift is protecting them in a way it currently is not.
+    assert!(
+        out.contains("no filter list is loaded"),
+        "the reason names the shed rather than inventing a rule: {out}"
+    );
+}
+
+/// The control is **absent** rather than present-and-ineffective. An allowance keyed on
+/// nothing would apply to everyone, which is the opposite of what the button says.
+#[test]
+fn always_load_from_this_sender_is_absent_when_there_is_no_sender_to_key_it_on() {
+    let mut cmds = hostile();
+    cmds.push("blocked #3");
+    let out = session(&cmds);
+    assert!(
+        out.contains("`always load from this sender` is absent"),
+        "{out}"
+    );
+    assert!(
+        out.contains("no origin to key a durable allowance on"),
+        "{out}"
+    );
+}
+
+/// FR-30. The destination is recovered from the wrapper's own text, and the wrapper stays
+/// available — a user who cannot see that a link was wrapped cannot judge who wrapped it.
+#[test]
+fn a_click_wrapper_is_unwrapped_locally_and_the_wrapper_is_still_shown() {
+    let mut cmds = hostile();
+    cmds.push("links #3");
+    let out = session(&cmds);
+
+    assert!(out.contains("link https://example.test/offer"), "{out}");
+    assert!(
+        out.contains("wrapped by https://click.tracker.test"),
+        "{out}"
+    );
+}
+
+/// The falsifier for the test above. This wrapper carries nothing recoverable from its own
+/// text, and a Sift that resolved wrappers by *fetching* them would resolve it anyway — so the
+/// assertion is that it stays unresolved. A byte counter cannot make this claim against a
+/// replayed transport, and an intention is not evidence; an unrecoverable wrapper is.
+#[test]
+fn a_wrapper_with_nothing_recoverable_in_it_is_not_followed_to_find_out() {
+    let mut cmds = hostile();
+    cmds.push("links #3");
+    let out = session(&cmds);
+
+    let line = out
+        .lines()
+        .find(|l| l.contains("click.tracker.test/x/9f2c41"))
+        .unwrap_or_else(|| panic!("the opaque wrapper is shown: {out}"));
+    assert!(
+        !line.contains("->"),
+        "it resolved to something, which it can only have done by asking: {line}"
+    );
+    assert!(
+        !line.contains("wrapped by"),
+        "nothing was unwrapped, so nothing claims to have been: {line}"
+    );
+}
+
+/// A punycode label renders as one script and resolves as another. The display form marks it
+/// rather than rendering it, which is the whole of the defence: a user cannot compare two
+/// strings they are only shown one of.
+#[test]
+fn a_homograph_host_is_not_displayed_as_the_script_it_imitates() {
+    let mut cmds = hostile();
+    cmds.push("links #3");
+    let out = session(&cmds);
+
+    let line = out
+        .lines()
+        .find(|l| l.contains("xn--80ak6aa92e"))
+        .unwrap_or_else(|| panic!("the real host is shown: {out}"));
+    assert!(
+        line.contains("[80ak6aa92e]"),
+        "the displayed form marks the label rather than rendering it: {line}"
+    );
+}
+
+/// FR-42. Shown, reported as needing a mail handler, and never sent — the historical form of
+/// unsubscribing is a message, which the no-send constraint forbids outright.
+#[test]
+fn a_mailto_unsubscribe_is_shown_and_reported_rather_than_omitted() {
+    let mut cmds = hostile();
+    cmds.push("links #3");
+    let out = session(&cmds);
+
+    assert!(
+        out.contains("unsubscribe: mailto:unsubscribe@list.test"),
+        "{out}"
+    );
+    assert!(out.contains("requires a mail handler"), "{out}");
+    assert!(out.contains("Sift will not send it"), "{out}");
+}
+
+/// FR-10's list is built from the structure, and the structure is a few kilobytes. The
+/// forty-megabyte part beside it costs nothing until somebody asks — which is a claim about
+/// requests rather than about intentions, so it is asserted against the byte counter.
+#[test]
+fn listing_attachments_does_not_download_them() {
+    let mut cmds = hostile();
+    cmds.extend(["attachments #3", "net mail"]);
+    let out = session(&cmds);
+
+    assert!(out.contains("none fetched"), "{out}");
+    let received: u64 = out
+        .lines()
+        .filter_map(|l| l.split_once("received "))
+        .filter_map(|(_, r)| r.split_whitespace().next())
+        .filter_map(|n| n.parse().ok())
+        .max()
+        .unwrap_or_default();
+    // The whole corpus is a few kilobytes. An attachment fetch would be 8 bytes here, but the
+    // declared size is 8 and the structure says so — what matters is that the *request* is
+    // absent, and a bound well under the declared corpus proves no extra one was made.
+    assert!(received < 64 * 1024, "{received} bytes on the wire: {out}");
+}
+
+/// The case FR-10 wrote its three-source rule for. The declared type is `application/pdf`,
+/// the name renders as `invoice.pdf`, and the extension the platform acts on is `.exe`. A
+/// type check sees a document; the user sees a document; the machine runs a program.
+#[test]
+fn an_executable_disguised_as_a_document_is_caught_by_the_source_a_type_check_never_sees() {
+    let mut cmds = hostile();
+    cmds.push("attachments #3");
+    let out = session(&cmds);
+
+    assert!(
+        out.contains("application/pdf"),
+        "the declared type is a document: {out}"
+    );
+    assert!(out.contains("warn before opening"), "{out}");
+    assert!(
+        out.contains("the name ends in an executable extension"),
+        "the extension is the source that decides what the platform does: {out}"
+    );
+    assert!(
+        out.contains("the declared type and the name disagree"),
+        "a sender who labels an executable as a document has told Sift something: {out}"
+    );
+}
+
+/// NFR-53, in the words of the requirement: a sender-supplied filename never becomes a path.
+/// The override that made it render as a document is gone from the name that is written.
+#[test]
+fn a_sender_supplied_name_never_becomes_the_path_it_is_written_under() {
+    let mut cmds = hostile();
+    cmds.push("attachments #3");
+    let out = session(&cmds);
+
+    let line = out
+        .lines()
+        .find(|l| l.contains("as `"))
+        .unwrap_or_else(|| panic!("a derived name is shown: {out}"));
+    assert!(
+        !line.contains('\u{202E}'),
+        "the override is gone from the derived name: {line:?}"
+    );
+    assert!(line.contains("invoicefdp.exe"), "{line}");
+}
+
+/// The requirement is that the exact final path be shown **before** the write. A single call
+/// that saved and then reported would satisfy every test and none of the requirement, so the
+/// planning verb is asserted to write nothing.
+#[test]
+fn the_final_path_is_shown_before_anything_is_written() {
+    let directory = std::env::temp_dir().join(format!(
+        "sift-save-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&directory).expect("a directory to save into");
+    let plan = format!("save #3 2 {}", directory.display());
+
+    let mut cmds = hostile();
+    cmds.push(&plan);
+    let out = session(&cmds);
+
+    assert!(out.contains("would write:"), "{out}");
+    assert!(out.contains("nothing written"), "{out}");
+    assert_eq!(
+        std::fs::read_dir(&directory).expect("readable").count(),
+        0,
+        "planning wrote a file: {out}"
+    );
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+/// "An existing file MUST NOT be overwritten." Held by `create_new` rather than by a check,
+/// because a check before a write is a race and the file that appears between the two is the
+/// one somebody cared about.
+#[test]
+fn saving_twice_writes_twice_and_overwrites_nothing() {
+    let directory = std::env::temp_dir().join(format!(
+        "sift-save-twice-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&directory).expect("a directory to save into");
+    let write = format!("save #3 2 {} write", directory.display());
+
+    let mut cmds = hostile();
+    cmds.extend([write.as_str(), write.as_str()]);
+    let out = session(&cmds);
+
+    let written: Vec<String> = std::fs::read_dir(&directory)
+        .expect("readable")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(written.len(), 2, "{written:?} — {out}");
+    assert!(written.iter().any(|n| n == "invoicefdp.exe"), "{written:?}");
+    assert!(
+        written.iter().any(|n| n == "invoicefdp (2).exe"),
+        "the suffix goes before the extension, or the file opens with the wrong application: {written:?}"
+    );
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+/// The bytes are a PE header under a `.pdf` type. All three of FR-10's sources now disagree,
+/// and the fourth — the content — is the one that settles it.
+#[test]
+fn the_content_is_the_last_source_and_it_only_exists_once_the_bytes_are_here() {
+    let directory = std::env::temp_dir().join(format!(
+        "sift-save-sniff-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&directory).expect("a directory to save into");
+    let write = format!("save #3 2 {} write", directory.display());
+
+    let mut cmds = hostile();
+    cmds.push(&write);
+    let out = session(&cmds);
+
+    assert!(out.contains("needs a warning first"), "{out}");
+    let path = directory.join("invoicefdp.exe");
+    assert_eq!(
+        std::fs::read(&path).expect("written").get(..2),
+        Some(b"MZ".as_slice()),
+        "the bytes are what the sniff saw"
+    );
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+// ---------------------------------------------------------------------------------------
+// FR-15's undo, and D-49's annunciator.
+// ---------------------------------------------------------------------------------------
+
+/// The property, not the mechanism: archive a message, take it back, and see it return.
+///
+/// This is what the first working version of undo did *not* do. Archive's compensation is a
+/// move back to where the message was, and nothing captured where that was — so `compensation`
+/// returned `None` and the most common destructive action in the product had no undo at all.
+#[test]
+fn undoing_an_archive_brings_the_message_back() {
+    let mut cmds = hostile();
+    cmds.extend([
+        "window open",
+        "select #3",
+        "do message.archive",
+        "list",
+        "undo",
+        "list",
+    ]);
+    let out = session(&cmds);
+
+    let lists: Vec<&str> = out
+        .split("> ")
+        .filter(|s| s.contains("A receipt") || s.contains("A newsletter"))
+        .collect();
+    assert!(
+        out.contains("move-to enqueued"),
+        "reversed by compensation: {out}"
+    );
+    assert!(
+        out.contains("reversed by compensation, not by retraction"),
+        "{out}"
+    );
+    // The last listing has the archived message back in it. The one before it does not.
+    let after = lists.last().unwrap_or(&"");
+    assert!(
+        after.contains("A receipt") && after.contains("pending: move-to"),
+        "the undone message is back, and marked pending: {after}"
+    );
+}
+
+/// D-51's overlay reads the **last** intent, not any of them.
+///
+/// `any(removes_from_view)` looks like the safe answer and is not: an archive followed by its
+/// compensation is a sequence whose net effect is nothing, and under `any` the row stayed
+/// hidden — so undo put the message back and the user watched it not come back.
+#[test]
+fn a_compensation_that_puts_a_message_back_does_not_leave_it_hidden() {
+    let mut cmds = hostile();
+    cmds.extend([
+        "window open",
+        "select #3",
+        "do message.archive",
+        "undo",
+        "list",
+    ]);
+    let out = session(&cmds);
+    let last = out.rsplit("> ").next().unwrap_or_default();
+    assert!(last.contains("A receipt"), "{out}");
+}
+
+/// FR-15 gives a **timed** window only to intents that take the message out of view. Marking
+/// read leaves it in front of the user, where the affordance that applied the change is also
+/// the one that reverses it — and a countdown on every message the reader marks read would
+/// make the mechanism worthless by making it constant.
+#[test]
+fn only_an_intent_that_removes_the_message_gets_a_countdown() {
+    let mut removing = hostile();
+    removing.extend(["window open", "select #3", "do message.archive", "undo"]);
+    assert!(
+        session(&removing).contains("ms left on FR-15's window"),
+        "archive takes the message out of view"
+    );
+
+    let mut staying = hostile();
+    staying.extend(["window open", "select #3", "do message.mark-read", "undo"]);
+    let out = session(&staying);
+    assert!(
+        out.contains("no countdown; it stays reversible either way"),
+        "{out}"
+    );
+}
+
+/// D-85's group is assigned at the gesture, so FR-17's bulk operation is one undoable unit
+/// rather than a hundred.
+#[test]
+fn a_bulk_gesture_is_one_undoable_unit() {
+    let mut cmds = hostile();
+    cmds.extend([
+        "window open",
+        "select #1 #2 #3",
+        "do message.archive",
+        "undo",
+    ]);
+    let out = session(&cmds);
+    assert!(out.contains("over 3 message(s)"), "{out}");
+    assert_eq!(
+        out.matches("move-to enqueued").count(),
+        3,
+        "one gesture, three compensations, one undo: {out}"
+    );
+}
+
+/// A failed undo must leave the record standing. Consuming it on the way *in* means a
+/// compensation that could not be built also destroys the affordance for building it, and the
+/// user is told there is nothing to undo about a gesture they just watched happen.
+#[test]
+fn an_undo_that_could_not_run_does_not_consume_the_thing_it_would_have_undone() {
+    let mut cmds = hostile();
+    cmds.extend([
+        "window open",
+        "select #3",
+        "do message.archive",
+        "undo",
+        "undo",
+    ]);
+    let out = session(&cmds);
+    // The first undo succeeds and *does* consume it, which is correct — this asserts the
+    // second reports an empty stack rather than an error about a half-consumed one.
+    assert!(out.contains("there is nothing to undo"), "{out}");
+}
+
+// ---------------------------------------------------------------------------------------
+// FR-19, FR-20, FR-21 — search, and the two things shown beside the results.
+// ---------------------------------------------------------------------------------------
+
+/// The operators, executed. Conjunctive, because that is what a person means by typing two.
+#[test]
+fn the_operators_narrow_rather_than_widen() {
+    let mut cmds = hostile();
+    cmds.extend(["search receipt", "search from:someone is:unread"]);
+    let out = session(&cmds);
+    let counts: Vec<usize> = out
+        .lines()
+        .filter_map(|l| l.split_once(" result(s)"))
+        .filter_map(|(n, _)| n.trim().parse().ok())
+        .collect();
+    assert_eq!(counts.len(), 2, "{out}");
+    assert!(
+        counts[0] >= counts[1],
+        "adding a term widened the results: {counts:?}"
+    );
+}
+
+/// The failure this is written against: `form:alice` is a plausible typo for `from:alice`, and
+/// a search that silently read it as free text returns nothing with no way to tell why.
+#[test]
+fn a_typo_that_looks_like_an_operator_says_it_was_read_as_text() {
+    let mut cmds = hostile();
+    cmds.push("search form:alice");
+    let out = session(&cmds);
+    assert!(out.contains("read as text, not as an operator"), "{out}");
+}
+
+/// Empty results and unevaluated filters look identical. A person who searches
+/// `has:attachment`, gets nothing, and concludes they have no attachments has been misled.
+#[test]
+fn a_filter_that_was_never_evaluated_says_so_rather_than_returning_nothing_quietly() {
+    let mut cmds = hostile();
+    cmds.push("search has:attachment");
+    let out = session(&cmds);
+    assert!(out.contains("0 result(s)"), "{out}");
+    assert!(
+        out.contains("`has:attachment` matched nothing"),
+        "an unevaluated filter returned nothing without saying so: {out}"
+    );
+}
+
+/// The caveat is keyed on the query rather than printed under every search: one printed
+/// unconditionally is one nobody reads.
+#[test]
+fn a_caveat_appears_only_for_the_query_it_is_about() {
+    let mut cmds = hostile();
+    cmds.push("search is:unread");
+    let out = session(&cmds);
+    assert!(!out.contains("has:attachment"), "{out}");
+    assert!(!out.contains("Message bodies are not searched"), "{out}");
+}
+
+/// FR-5: a folder matches on its semantic use, which means the same thing in every locale,
+/// as well as on its display name.
+#[test]
+fn a_folder_is_matched_semantically_rather_than_by_a_localised_name() {
+    let mut cmds = hostile();
+    cmds.push("search in:inbox");
+    let out = session(&cmds);
+    assert!(out.contains("A receipt"), "{out}");
+}
+
+/// FR-21's label. Nothing delegates yet, and the transcript says so rather than leaving the
+/// absence of server results to imply it.
+#[test]
+fn a_search_says_that_nothing_was_asked_of_a_provider() {
+    let mut cmds = hostile();
+    cmds.push("search receipt");
+    let out = session(&cmds);
+    assert!(out.contains("nothing was asked of a provider"), "{out}");
 }

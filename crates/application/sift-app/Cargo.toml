@@ -1,0 +1,45 @@
+[package]
+name = "sift-app"
+description = "The assembled application: accounts, their stores, their queues, and the adapters behind them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sift-foundation.workspace = true
+sift-provider.workspace = true
+# The register, so that this layer resolves an opaque kind rather than naming a provider.
+# D-12 bans the name here and `cargo xtask invariants` enforces it.
+sift-registry.workspace = true
+# The transport an authorization's token exchange runs over. One host, one request.
+sift-http.workspace = true
+sift-store.workspace = true
+# FR-20's operator grammar. The parser is the index's; executing it is the application's.
+sift-index.workspace = true
+sift-sync.workspace = true
+sift-mutations.workspace = true
+sift-credentials.workspace = true
+# The container's registry is sealed like any other database, under a key derived from the
+# installation secret by D-106's role separation.
+sift-crypto.workspace = true
+# 128 random bits for an account identity, and 32 for a key. Already vendored for the OAuth
+# state and verifier, so this adds nothing to `deps/approved.txt`.
+getrandom = "0.4"
+# The hostile-input path. A body reaches a shell only after all seven stages, and the broker
+# outlives the render because the body view resolves resources against its token afterwards.
+sift-mime.workspace = true
+sift-pipeline.workspace = true
+sift-broker.workspace = true
+sift-block.workspace = true
+# D-21's engine, reached the same way the store reaches it. The application writes through
+# the store's own transactions rather than around them.
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[dev-dependencies]
+sift-mutations.workspace = true

@@ -2,7 +2,7 @@
 
 What is encrypted, what is not, and where the keys live.
 
-**Owns:** D-22, D-42, D-43, D-75, D-76.
+**Owns:** D-22, D-42, D-43, D-75, D-76, D-106, D-107.
 
 ## Message data
 
@@ -281,6 +281,50 @@ the kind of thing that is subtly wrong for a long time. A construction with a no
 chosen randomly without a birthday concern would remove it, at the cost of per-page overhead — and that
 trade is a real one that should be re-examined once the page overhead is measured rather than assumed.
 
+## D-107 — The page layer attaches as a VFS, and four settings are load-bearing
+
+**Chosen:** the page layer is a SQLite VFS. It translates every logical byte range the engine asks for
+onto sealed blocks of a fixed logical size, seals the file's own length as its own page under a page
+number no data block can reach, and reserves write counters ahead of use. Four settings are **asserted
+against a live connection** rather than assumed: `locking_mode=EXCLUSIVE`, `mmap_size=0`,
+`temp_store=MEMORY`, and a page size equal to the logical block.
+**Rejected:** adopting SQLCipher; encrypting columns above the engine; trusting that the settings were
+applied.
+
+**Why a VFS at all.** SQLite removed the in-tree encryption hook in 3.32, so the attachment point
+page-level encryption used to have no longer exists. SQLCipher is a *fork*, and adopting it would defeat
+[D-21](../architecture/overview.md)'s reason for bundling the engine. A VFS is what remains, and it is
+sufficient: every byte the engine reads or writes passes through it.
+
+**Why the length is sealed rather than stored.** It has to be stored somewhere. A file whose length is
+rounded up to the block size reports a full block for a 32-byte write-ahead-log header, and recovery then
+reads past what was written. Storing it in the clear would leave one field an attacker could edit to
+truncate a database without failing authentication — so it is sealed like any other page.
+
+**Why the counter is reserved before it is used.** [D-76](#d-76--what-the-page-format-has-to-nail-down)
+derives the nonce from the page number and a durable counter. A run that resumed the counter from the
+last *written* header would reissue every counter used since that header was written, and reissuing a
+counter under one key is nonce reuse. So a run reserves a window, records the top of it, and syncs that
+record before issuing any of them: a crash then leaves the mark ahead of reality, which wastes counters,
+rather than behind it, which reuses them.
+
+**Why the four settings are asserted rather than documented.** Each fails silently, and two of them fail
+in a way that produces no symptom at all.
+
+| Setting | What goes wrong without it |
+|---|---|
+| `locking_mode=EXCLUSIVE` | The write-ahead index becomes a memory-mapped file the layer never sees. The pages of a database are sealed and the index describing them is not |
+| `mmap_size=0` | A memory-mapped read bypasses the layer entirely and hands the pager ciphertext |
+| `temp_store=MEMORY` | A spill file has no key and is written in the clear |
+| page size = logical block | Every engine page straddles two sealed blocks, so every write becomes a read-modify-write of two |
+
+**Contestable because:** this is unsafe foreign-function code on the one path where a mistake loses an
+account rather than failing a parse — the same objection [D-42](#d-42--every-database-is-encrypted-at-the-page-level-beneath-the-database-engine)
+already records, now with a larger surface. The mitigation is that the tests read the **bytes on disk**
+rather than asking the engine whether it is satisfied: a round-trip test passes unchanged against a layer
+that seals nothing, and the first version of this layer did exactly that on macOS, where the temporary
+directory is reached through a symbolic link and the key registry missed on the path the engine resolved.
+
 ## Integrity, not only confidentiality
 
 Encryption on both paths MUST be authenticated. A store that decrypts attacker-influenced bytes without
@@ -326,6 +370,55 @@ credential item and the account's ciphertext is unreadable by construction — a
 by attempting to open the files afterwards. Under derivation the key is recomputable from a secret that
 still exists, so removal would have to be proven by the absence of files rather than by the absence of a
 key, which is a strictly weaker claim about a device that may hold backups.
+
+### D-106 — One key per *file*, derived by role from the key its owner holds
+
+**Chosen:** the credential item stays exactly as above — one account key, held directly — and the key a
+file is actually sealed under is **derived from it by role**, one role per file. The key identifier in
+each header is derived from the same owner by a separate context.
+**Rejected:** sealing an account's two files under the account key itself.
+
+**Why, and this corrects a defect rather than refining a preference.** D-76 derives its nonce as
+`page number ‖ write counter`, and the counter is part of *the file's own state* — it lives in that
+file's header and resumes above the persisted high-water mark. Within one file that is exactly right.
+
+But [D-74](data-model.md) gives every account **two** files, and the paragraphs above put one key over
+both. Each file independently issues counter 0 for its page 0, counter 1 for its page 1, and so on. Same
+key, same nonce, different plaintext — which is the one thing AES-GCM must never be asked to do. It costs
+confidentiality (identical keystream, so the two plaintexts are recoverable from each other) and
+authenticity along with it. The additional authenticated data binds the key identifier, which under one
+key is identical for both files, so it does not save it.
+
+It would also not have been noticed. D-76's own text says of this class of mistake that it *"does not
+fail a test, does not corrupt a file, and nothing observable goes wrong"*, and the test that walks the
+counter space walks a single file's, so it passes either way.
+
+Derivation by role closes it: identical `(page, counter)` pairs across the two files are harmless because
+they are under different keys.
+
+**What it does not change.** FR-4's proof is untouched, which is the property the paragraphs above chose
+this hierarchy for. The account key is still the one credential item, derivation is still one-way, and
+destroying that item still makes both files unreadable *by construction* rather than by a promise to
+overwrite them. Nothing here reintroduces the rejected reading: the owner of a derived key is the account
+key, never D-43's per-installation secret, so a lost secret still costs the blob store and not every
+account database.
+
+The same separation applies to the two installation-scoped files, whose owner **is** the per-installation
+secret — and that also domain-separates a secret D-43 otherwise uses both as a BLAKE3 key and as key
+material, with nothing between the two uses.
+
+**The contexts are permanent.** Changing one makes every file under it unreadable, which is a key
+destruction wearing the clothes of a refactor.
+
+**What it costs:** one more derivation per file open, and a closed role set that every new sealed file
+must be added to — an omission being a collision rather than a compile error, which is why the set is an
+enumeration rather than a free-form string.
+
+**Contestable because:** it adds a layer to a hierarchy whose whole argument above was that the simplest
+of three readings is the right one. The answer is that this is not a fourth reading of "wrapped by the
+credential store" — the credential item is unchanged and so is every property claimed for it — it is the
+separation between *what is stored* and *what a given file is sealed under*, which the original text did
+not distinguish because it was written before there were two files per account.
 
 **Rotation is lazy, and bounded by the identifier.** A rotation installs a new key, and pages are
 re-sealed under it as they are next written; both generations are readable while any page carries the old

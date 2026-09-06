@@ -18,8 +18,16 @@ import CSift
 /// than one that used more memory.
 final class ApplicationShell: NSObject, NSApplicationDelegate {
     private var app: OpaquePointer?
+
+    /// The container path's bytes. The layer copies during `sift_initialize`; this simply
+    /// keeps them alive for the duration of that call.
+    private var containerRoot: [UInt8] = []
+
+    /// The same, for the two facts the layer is given about this bundle's OAuth configuration.
+    private var oauthClientID: [UInt8] = []
+    private var registeredSchemes: [UInt8] = []
     private var statusItem: NSStatusItem?
-    private var windows: [WindowShell] = []
+    private var windows: [MainWindowController] = []
 
     /// The one instance, so the C callbacks below have somewhere to arrive.
     ///
@@ -35,15 +43,53 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         // without it can be neither quit deliberately nor re-authenticated.
         installStatusItem()
 
-        // The application shell owns the application menu as well as the tray item
-        // (`docs/architecture/ui-shell.md`). It is not decoration: this shell raises Sift to a
-        // regular application whenever a window opens, and a regular application with no main
-        // menu is frontmost with an empty menu bar and no way to quit or close from the
-        // keyboard — which FR-24 does not allow.
+        // A minimal bar first, so that a launch which fails before the layer exists is still
+        // quittable from the keyboard — FR-24 does not allow an application that is frontmost
+        // with no way out of it. The register-driven bar replaces this once there is a layer
+        // to ask about availability.
         installApplicationMenu()
 
         var handle: UnsafeMutablePointer<SiftApp>?
-        let status = sift_initialize(hostCallbacks(), &handle)
+        // The container is the shell's to name. The layer never computes one — under the
+        // sandbox this resolves inside the app's own container, and a path derived from
+        // $HOME would be wrong there and wrong again under Flatpak on the other shell.
+        //
+        // Application Support and not Caches: the layout MUST NOT live anywhere the
+        // operating system may purge on its own, because a purge would remove blobs while
+        // leaving the encrypted index referencing them.
+        guard let root = Self.containerRoot() else {
+            present(startupFailure: Failed)
+            return
+        }
+        containerRoot = Array(root.utf8)
+        // D-36, D-71 and D-109: **read out of the bundle, not asserted about it.** This used
+        // to be `scheme_is_registered: 1` beside a comment saying the Info.plist registered
+        // the scheme. A configuration shipped without it, the layer was told otherwise, and
+        // the refusal that exists to happen before a browser opens could not happen at all.
+        //
+        // What a shell can honestly report is what its own bundle claims. Which scheme the
+        // configured client requires, and whether it is among them, is the layer's to decide.
+        oauthClientID = Array(Self.configuredClientID.utf8)
+        registeredSchemes = Array(Self.claimedURLSchemes().joined(separator: "\n").utf8)
+        let status = containerRoot.withUnsafeBufferPointer { bytes -> SiftStatus in
+            oauthClientID.withUnsafeBufferPointer { client in
+                registeredSchemes.withUnsafeBufferPointer { schemes in
+                    let init_ = SiftInit(
+                        container_root: SiftStr(ptr: bytes.baseAddress, len: bytes.count),
+                        // D-48's hop, and the shell's whole obligation for it: post it, do not
+                        // run it. Running it inline would hand a callback back from inside the
+                        // call that caused it, which is the reentrancy D-48 forbids.
+                        schedule: { _, run, ticket in
+                            DispatchQueue.main.async { run?(ticket) }
+                        },
+                        schedule_context: nil,
+                        oauth_client_id: SiftStr(ptr: client.baseAddress, len: client.count),
+                        registered_schemes: SiftStr(ptr: schemes.baseAddress, len: schemes.count)
+                    )
+                    return sift_initialize(hostCallbacks(), init_, &handle)
+                }
+            }
+        }
         guard status == Ok else {
             // A caught panic is its own status, everywhere. Reporting it as an ordinary
             // failure would erase exactly the distinction D-47 insists on.
@@ -51,6 +97,9 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             return
         }
         app = OpaquePointer(handle)
+        installRegisterMenu()
+
+        addFixtureAccountIfAsked()
 
         // Both branches open a window; what differs is what the window is *for*. The
         // account-less state *is* the add-account flow rather than an empty inbox, because an
@@ -59,6 +108,22 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             openMainWindow()
         } else {
             beginAddAccount()
+        }
+    }
+
+    /// D-36's callback, arriving through the registered URI scheme.
+    ///
+    /// **This is the whole of how an authorization returns.** NFR-24 admits no listening socket
+    /// for any purpose, so there is no loopback redirect and nothing here binds a port — the
+    /// platform's own launch machinery hands Sift the address.
+    ///
+    /// It is also one of only two local attack surfaces Sift has: any process running as the
+    /// user can invoke a registered scheme. The layer discards a callback whose state matches
+    /// no flow in progress **without comment**, and this method reports nothing either, because
+    /// a message here would turn Sift into a way to find out whether a guess was received.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            addAccount?.callbackArrived(url.absoluteString)
         }
     }
 
@@ -134,6 +199,150 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         NSApp.windowsMenu = windowMenu
     }
 
+    // MARK: - D-98's register
+
+    private var menuBar: MenuBar?
+    private var palette: CommandPalette?
+
+    /// Replace the bootstrap menu with one built from the register.
+    ///
+    /// The reconciliation is checked rather than assumed. An action the layer offers that this
+    /// shell binds to nothing is a capability the user cannot reach; one bound here that the
+    /// layer does not have is an item that fails when pressed. Neither is tolerable, and
+    /// neither announces itself, so the check runs at every launch and the disagreement is
+    /// reported where a developer will see it rather than swallowed.
+    private func installRegisterMenu() {
+        guard let app else { return }
+        let bar = MenuBar(app: app) { [weak self] id in self?.invoke(id) }
+        let (unbound, unknown) = bar.install()
+        menuBar = bar
+        palette = CommandPalette(app: app) { [weak self] id in self?.invoke(id) }
+
+        #if DEBUG
+        if !unbound.isEmpty || !unknown.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "The menu and the action register disagree."
+            alert.informativeText = """
+                Actions the layer offers with no menu item: \(unbound.joined(separator: ", "))
+                Menu items the layer does not know: \(unknown.joined(separator: ", "))
+                """
+            alert.runModal()
+        }
+        #endif
+    }
+
+    /// Whether a preference-gated surface is on. D-101 has both off by default.
+    private func settingIsOn(_ key: String) -> Bool {
+        guard let app else { return false }
+        var rows = SiftRows_SiftSetting()
+        guard sift_settings(UnsafeMutablePointer(app), &rows) == Ok, let ptr = rows.ptr else {
+            return false
+        }
+        for index in 0..<rows.len where SiftText.string(ptr[index].key) == key {
+            return SiftText.string(ptr[index].value) == "true"
+        }
+        return false
+    }
+
+    /// Invoke an action by identifier — the one path every gesture takes.
+    ///
+    /// D-98 makes the action set an ABI surface; the palette is a filtered view of the same
+    /// register, and `sift-harness` drives the application through this same entry point
+    /// rather than a test-only door. That is what makes FR-24's testability claim real.
+    ///
+    /// Menus, keys and the palette all arrive here, because three ways to reach an action must
+    /// not be three implementations of it. The few actions the shell owns outright — opening
+    /// the palette, quitting — are handled before the boundary, and everything else crosses.
+    func invoke(_ id: String) {
+        switch id {
+        case "app.command-palette":
+            palette?.present(over: NSApp.keyWindow)
+            return
+        case "app.quit":
+            quit()
+            return
+        case "read.open-in-standalone-reader":
+            guard let app, let row = windows.first?.selectedRow else { return }
+            // A window per message rather than one that retargets: D-97 makes this its own
+            // window kind, and a second message opening in the first would be the retarget
+            // this exists instead of.
+            let reader = StandaloneReader(app: app, row: row)
+            standaloneReaders.append(reader)
+            reader.showWindow(nil)
+            return
+        case "app.open-message-debug-view":
+            guard let app, let row = windows.first?.selectedRow else { return }
+            // Gated here rather than in the menu, so a key equivalent cannot reach past the
+            // preference. D-101 has it off by default.
+            guard settingIsOn("debug.message-view") else {
+                let alert = NSAlert()
+                alert.messageText = "Message details are turned off."
+                alert.informativeText =
+                    "Turn them on in Settings. They are off by default because a debug surface "
+                    + "that is on by default is one whose cost nobody measured."
+                alert.runModal()
+                return
+            }
+            let window = debugWindow ?? MessageDebugWindow(app: app)
+            debugWindow = window
+            window.present(row)
+            return
+        case "app.open-settings":
+            guard let app else { return }
+            let window = settingsWindow ?? SettingsWindow(app: app)
+            settingsWindow = window
+            window.present()
+            return
+        case "app.open-runtime-panel":
+            guard let app else { return }
+            guard settingIsOn("debug.runtime-panel") else {
+                let alert = NSAlert()
+                alert.messageText = "The runtime window is turned off."
+                alert.informativeText =
+                    "Turn it on in Settings. It is off by default, and it is where you can see "
+                    + "that an account Sift is only watching has sent nothing."
+                alert.runModal()
+                return
+            }
+            let panel = runtimePanel ?? RuntimePanel(app: app)
+            runtimePanel = panel
+            panel.present()
+            return
+        case "search.begin", "navigate.focus-search":
+            windows.first?.focusSearch()
+            return
+        case "search.clear":
+            windows.first?.clearSearch()
+            return
+        case "app.close-window":
+            NSApp.keyWindow?.performClose(nil)
+            return
+        case "app.new-window", "read.open-message":
+            openMainWindow()
+            return
+        default:
+            break
+        }
+        guard let app else { return }
+        var gesture = SiftGesture()
+        let status = SiftText.withBytes(id) { ptr, len in
+            sift_invoke_action(
+                UnsafeMutablePointer(app), ptr, len, nil, 0, 0, &gesture)
+        }
+        guard status == Ok else {
+            // D-98 hides an unavailable action, so reaching one through a key equivalent that
+            // the platform matched before the menu rebuilt is the case left over. Saying
+            // nothing is the right answer: the action is absent, and an alert would announce
+            // a capability the user does not have.
+            NSSound.beep()
+            return
+        }
+        // The list is an observation, so the optimistic effect arrives through D-48's hop
+        // rather than being applied here. The chrome is not an observation, so it is asked
+        // once, here, where something is known to have happened.
+        for window in windows { window.refreshChrome() }
+    }
+
     @objc func openMainWindow() {
         // "Open Sift" means *show me Sift*, and it is reachable from the tray, from the
         // application menu and from FR-23's notification. Windows are plural by design, but a
@@ -146,7 +355,13 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             return
         }
 
-        let window = WindowShell(app: app) { [weak self] shell in self?.forget(shell) }
+        guard let app else { return }
+        let window = MainWindowController(app: app)
+        window.onInvoke = { [weak self] id in self?.invoke(id) }
+        window.onClose = { [weak self, weak window] in
+            guard let window else { return }
+            self?.forget(window)
+        }
         windows.append(window)
 
         // Raise the policy *before* the window is ordered in. Putting Sift in the dock and the
@@ -169,7 +384,7 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// after its window closed would hold Sift in the dock with nothing on screen — and it
     /// would hold the shell itself alive along with everything L1 and L3 expect a closing
     /// window to release.
-    private func forget(_ shell: WindowShell) {
+    private func forget(_ shell: MainWindowController) {
         windows.removeAll { $0 === shell }
         syncActivationPolicy()
     }
@@ -189,29 +404,99 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     @objc private func pauseSync() { invoke("app.pause-sync") }
     @objc private func quit() { invoke("app.quit"); NSApp.terminate(nil) }
 
+    private var addAccount: AddAccountWindow?
+    private var runtimePanel: RuntimePanel?
+    private var settingsWindow: SettingsWindow?
+    private var standaloneReaders: [StandaloneReader] = []
+    private var debugWindow: MessageDebugWindow?
+
+    /// **The account-less state is the add-account flow**, not an empty inbox with a hint in
+    /// it. So first run is a screen, and this is where it opens.
     private func beginAddAccount() {
-        invoke("app.add-account")
-        // `docs/architecture/ui-shell.md`: **the account-less state is the add-account flow**,
-        // not an empty inbox with a hint in it. So first run is a screen, and this is where it
-        // opens. The surface's *content* is not built — what opens is a window with an empty
-        // view in it, which is honest about the stage rather than invisible about it. A first
-        // run that presents nothing at all is indistinguishable from a launch that failed.
-        openMainWindow()
+        guard let app else { return }
+        let window = AddAccountWindow(app: app) { [weak self] in
+            self?.openMainWindow()
+        }
+        addAccount = window
+        window.showWindow(nil)
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func hasAnyAccount() -> Bool { false }
+    /// **Asked, not remembered.** This was a counter starting at zero on every launch, so an
+    /// account added in a previous run was invisible to the next one: the container had the
+    /// mail and the queue, and the first-run screen was drawn over them anyway. The layer knows
+    /// how many accounts the container holds, because it is what opened it.
+    private func hasAnyAccount() -> Bool {
+        guard let app else { return false }
+        return sift_account_count(UnsafeMutablePointer(app)) > 0
+    }
 
-    /// Every mutation this shell performs goes through the action register by identifier.
+    /// D-65's recorded corpus, as an account.
     ///
-    /// D-98 makes the action set an ABI surface; the palette is a filtered view of the same
-    /// register, and `sift-harness` drives the application through this same entry point
-    /// rather than a test-only door. That is what makes FR-24's testability claim real.
-    func invoke(_ id: String) {
-        guard let app else { return }
-        var bytes = Array(id.utf8)
-        _ = bytes.withUnsafeMutableBufferPointer { buffer in
-            sift_invoke_action(UnsafeMutablePointer(app), buffer.baseAddress, buffer.count)
+    /// **Off unless asked for.** This is how Sift is driven, and looked at, before a real
+    /// mailbox is ever connected: a real adapter over recorded exchanges, with no network, no
+    /// credential and nobody's mail in it. It is gated on the environment rather than on a
+    /// build configuration so that the thing being looked at is the shipping binary.
+    private func addFixtureAccountIfAsked() {
+        guard ProcessInfo.processInfo.environment["SIFT_FIXTURES"] != nil, let app else { return }
+        let label = "fixtures"
+        var id = SiftId.zero
+        let bytes = Array(label.utf8)
+        let added = bytes.withUnsafeBufferPointer { p in
+            sift_add_replayed_account(UnsafeMutablePointer(app), p.baseAddress, p.count, &id)
         }
+        guard added == Ok else { return }
+        // Blocking, and on the main thread, which is a limitation stated where it happens:
+        // the walk belongs on a worker under D-19. Against the recorded corpus it returns
+        // immediately, which is why it is tolerable here and would not be against a socket.
+        _ = bytes.withUnsafeBufferPointer { p in
+            sift_sync_account(UnsafeMutablePointer(app), p.baseAddress, p.count)
+        }
+    }
+
+    /// The OAuth client this bundle was built with, or the empty string where there is none.
+    ///
+    /// A build with none is a legitimate state: it runs against the recorded corpus and says
+    /// so. The key is written by the build from `shells/macos/oauth-client.txt`.
+    static var configuredClientID: String {
+        Bundle.main.object(forInfoDictionaryKey: "SiftOAuthClientID") as? String ?? ""
+    }
+
+    /// Every URI scheme this bundle's `CFBundleURLTypes` claims.
+    ///
+    /// **The fact the layer is given.** Read from the running bundle rather than from what the
+    /// build intended, because the two disagreeing is exactly the failure this replaced — a
+    /// bundle whose Info.plist key expanded to nothing is a bundle with the key *removed*, and
+    /// nothing said so until a browser did.
+    static func claimedURLSchemes() -> [String] {
+        let types = Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes") as? [[String: Any]]
+        return (types ?? [])
+            .compactMap { $0["CFBundleURLSchemes"] as? [String] }
+            .flatMap { $0 }
+            .filter { !$0.isEmpty }
+    }
+
+    /// The container the application's files live under.
+    ///
+    /// Application Support rather than Caches, because the layout MUST NOT live anywhere the
+    /// operating system may purge on its own. Under the sandbox this already resolves inside
+    /// the app's own container; outside it, the bundle identifier keeps it to itself.
+    private static func containerRoot() -> String? {
+        guard
+            let base = FileManager.default.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask
+            ).first
+        else { return nil }
+        let root = base.appendingPathComponent("net.justinchung.sift", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: root, withIntermediateDirectories: true
+            )
+        } catch {
+            return nil
+        }
+        return root.path
     }
 
     private func present(startupFailure status: SiftStatus) {

@@ -1664,8 +1664,13 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "sift-abi"
 version = "0.1.0"
 dependencies = [
+ "sift-alloc",
+ "sift-app",
+ "sift-broker",
  "sift-foundation",
  "sift-presentation",
+ "sift-session",
+ "sift-subsystem",
 ]
 
 [[package]]
@@ -1673,6 +1678,28 @@ name = "sift-alloc"
 version = "0.1.0"
 dependencies = [
  "sift-subsystem",
+]
+
+[[package]]
+name = "sift-app"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "rusqlite",
+ "sift-block",
+ "sift-broker",
+ "sift-credentials",
+ "sift-crypto",
+ "sift-foundation",
+ "sift-http",
+ "sift-index",
+ "sift-mime",
+ "sift-mutations",
+ "sift-pipeline",
+ "sift-provider",
+ "sift-registry",
+ "sift-store",
+ "sift-sync",
 ]
 
 [[package]]
@@ -1780,18 +1807,20 @@ version = "0.1.0"
 dependencies = [
  "rusqlite",
  "sift-alloc",
+ "sift-app",
  "sift-block",
  "sift-broker",
  "sift-credentials",
  "sift-foundation",
- "sift-gmail",
  "sift-http",
  "sift-mime",
  "sift-mutations",
  "sift-pipeline",
  "sift-presentation",
  "sift-provider",
+ "sift-registry",
  "sift-scheduler",
+ "sift-session",
  "sift-store",
  "sift-subsystem",
  "sift-sync",
@@ -1902,6 +1931,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sift-registry"
+version = "0.1.0"
+dependencies = [
+ "sift-foundation",
+ "sift-gmail",
+ "sift-http",
+ "sift-provider",
+]
+
+[[package]]
 name = "sift-runtime"
 version = "0.1.0"
 dependencies = [
@@ -1923,6 +1962,18 @@ name = "sift-scheduler"
 version = "0.1.0"
 dependencies = [
  "sift-foundation",
+]
+
+[[package]]
+name = "sift-session"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "sift-app",
+ "sift-foundation",
+ "sift-mutations",
+ "sift-presentation",
+ "sift-provider",
 ]
 
 [[package]]

@@ -22,6 +22,29 @@ options:
     macOS: "13.0"
   createIntermediateGroups: true
 
+# The OAuth client, and the callback scheme derived from it — `SIFT_OAUTH_CLIENT_ID` and
+# `SIFT_OAUTH_SCHEME`, which `Info.plist` substitutes.
+#
+# **In a file, because they were in the environment and that is what broke.** These two were
+# written here as `${SIFT_OAUTH_CLIENT_ID:-}` and `${SIFT_OAUTH_SCHEME:-net.justinchung.sift}`.
+# XcodeGen implements no such operator and passed the token through verbatim, so the generated
+# project set each setting to its own name; the values only reached a bundle because
+# `xcodebuild` inherits the environment `mise run macos` had exported, and Xcode's recursion
+# guard fell through to it. Every other way of building — a bare `xcodebuild`, an Xcode
+# window, a configuration built when this task was not exporting them — produced a bundle with
+# no client and no derived scheme, and said nothing, because an Info.plist key whose expansion
+# is empty is *removed* rather than emptied. The failure surfaced in a browser, after consent,
+# as a callback with nowhere to go.
+#
+# `mise run macos` writes this file on every build, including the build with no client
+# configured. It is not committed, for the reason `oauth-client.txt` is not: a client
+# identifier is not a secret — it appears in every authorization URL, which is why PKCE
+# exists — but it is per-installation configuration, and one baked into the repository would
+# make every checkout share one client, one quota and one consent screen.
+configFiles:
+  Debug: OAuthClient.xcconfig
+  Release: OAuthClient.xcconfig
+
 settings:
   base:
     # The identifier register in `docs/product/platform-baseline.md` — consumed once, for the
@@ -29,6 +52,7 @@ settings:
     PRODUCT_BUNDLE_IDENTIFIER: net.justinchung.sift
     PRODUCT_NAME: Sift
     INFOPLIST_FILE: Info.plist
+
     GENERATE_INFOPLIST_FILE: NO
 
     # D-62 — one user-facing version identifying a source revision, the same on every channel,

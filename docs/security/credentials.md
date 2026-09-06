@@ -182,9 +182,39 @@ authorization whose callback has nowhere to arrive, because the user then experi
 credential entry followed by silence, and concludes their credentials were rejected. The check is cheap
 and the alternative is the diagnosis problem below, met by every affected user.
 
+**A shell reports what its bundle claims; the core decides what that means.** The rule above was stated
+and then not enforced, because the boundary asked a shell for the conclusion — *is the scheme
+registered?* — and a shell answered it with a constant. The distinction that makes the refusal real is
+that only a bundle can say which schemes it registers, and only the core knows which scheme a given
+client requires. So the shell states the client it was configured with and the schemes it claims, and
+every judgement about them is made once, in the core, for both shells.
+
+**Where the client identifier enters the core.** At initialization, alongside the schemes, and nowhere
+else. It is configuration rather than a secret — a public client's identifier appears in every
+authorization URL it generates, which is why PKCE exists — but it is needed in three places that must
+agree: the scheme derivation, the authorization being begun, and the refresh that reconnects an account a
+previous run left in the container. A shell repeating it at each call is a shell that can disagree with
+the bundle it is running out of.
+
+**The return route is the platform's, and the declared redirect is unchanged.** What D-36 settles is that
+the authorization code comes back through a registered URI scheme and never through a socket, and that
+holds. *How* the running process is handed the callback is not the same question, and asking the
+operating system to route it — a browser following a server redirect into a custom scheme, the launch
+services database resolving it, and the application being alive to receive it — makes three things that
+can each fail after the user has granted consent. The last cannot succeed at all when the process has
+changed, because the PKCE verifier exists only in the process that began the flow.
+
+So where the platform offers an authentication session that opens the system browser and returns the
+callback to the caller directly, that is what a flow started inside Sift uses. It is the same browser
+with the same cookies, and Sift still never sees the password, which is the whole reason an embedded view
+was refused above. The scheme remains registered, because a provider may still return out of band and a
+callback arriving that way should be answered rather than dropped.
+
 **Contestable because:** providers document and test the loopback path most thoroughly, and a scheme
 registration that fails to install is a first-run failure with no obvious diagnosis. If a provider
-refuses scheme redirects for the scopes Sift needs, NFR-24 gets its carve-out after all.
+refuses scheme redirects for the scopes Sift needs, NFR-24 gets its carve-out after all. The
+authentication session is also a platform affordance rather than a portable one, so a platform without an
+equivalent falls back to the operating system's routing and inherits its failure modes.
 
 ## NFR-23 — Storage boundary
 

@@ -23,6 +23,15 @@ dbg_macro = "deny"
 [dependencies]
 sift-foundation.workspace = true
 sift-presentation.workspace = true
+# D-18's registry and the assembled application beneath it. The ABI is still a leaf: the
+# edges point down, and nothing in the core depends on this crate.
+sift-session.workspace = true
+sift-app.workspace = true
+# The broker's answer vocabulary, which the resource entry point translates.
+sift-broker.workspace = true
+# FR-34's per-subsystem live bytes. D-24's tagging allocator is the only source for them.
+sift-alloc.workspace = true
+sift-subsystem.workspace = true
 
 [lib]
 crate-type = ["staticlib", "rlib"]
