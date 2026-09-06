@@ -908,12 +908,6 @@ impl App {
         if self.account(name)?.adapter.is_none() {
             self.reconnect(name)?;
         }
-        // Reconnect for the same reason `sync` does: an account the last run left behind opens
-        // with no adapter, and a person who triaged before the first sync of a session and
-        // then pressed send would be told Sift could not reach an account it can reach.
-        if self.account(name)?.adapter.is_none() {
-            self.reconnect(name)?;
-        }
         let account = self.account(name)?;
         let adapter = account
             .adapter
@@ -1118,6 +1112,14 @@ impl App {
                 queued: self.account(name)?.queue.len(),
                 error: None,
             });
+        }
+        // Reconnect for the same reason `sync` does: an account the last run left behind
+        // opens with no adapter, and someone who triaged before the first sync of a session
+        // would be told Sift cannot reach an account it can reach. This is already the one
+        // call that goes to the provider, so the round trip costs nothing that was not
+        // already being paid.
+        if self.account(name)?.adapter.is_none() {
+            self.reconnect(name)?;
         }
         let account = self.account(name)?;
         let adapter = account
