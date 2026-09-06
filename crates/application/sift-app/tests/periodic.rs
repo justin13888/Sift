@@ -208,3 +208,57 @@ fn a_still_critical_system_is_not_released_by_the_wheel() {
         "the wheel released a tier while the system was still under critical pressure"
     );
 }
+
+#[test]
+fn a_container_with_no_accounts_still_walks_a_tier_back_down() {
+    // The governor's clock is the wheel, and the wheel used to be armed per account — so a
+    // fresh install with nothing added went to L3 under pressure and stayed there for the
+    // life of the process: every window destroyed, nothing to poll, and therefore nothing to
+    // bring it back. A held tier is installation work, not an account's.
+    let hand = std::sync::Arc::new(Hand::new());
+    let mut app = App::with_clock(Box::new(Shared(std::sync::Arc::clone(&hand))));
+
+    app.memory_pressure(sift_governor::Pressure::Critical);
+    assert_eq!(app.tier(), sift_governor::Tier::L3);
+    app.arm_periodic();
+    assert!(
+        app.next_wake().is_some(),
+        "nothing was armed, so the tier has no clock and can never come down"
+    );
+
+    app.memory_pressure(sift_governor::Pressure::Normal);
+    for _ in 0..4 {
+        advance(&hand, Duration::from_secs(65));
+        let _ = app.tick();
+    }
+    assert_eq!(app.tier(), sift_governor::Tier::L0);
+}
+
+#[test]
+fn a_warning_tier_does_not_revoke_the_open_documents_token() {
+    // Only L3 destroys the views that hold a capability token, and D-67's callback set is
+    // closed at six with nothing that can destroy a body view. Revoking at L2 would leave the
+    // reader on screen with a document whose every resource request answers `Revoked` and
+    // whose consent buttons fail — with no way for the shell to say why. FR-33 requires the
+    // reason be stated, and a dead view that says nothing is worse than an unreleased cache.
+    let mut app = App::new();
+    app.add_replayed_account("mail").expect("added");
+    app.sync("mail", 1).expect("sync");
+    let listed = sift_app::list_messages(app.account("mail").expect("open")).expect("list");
+    let id = listed.first().expect("a message").0;
+
+    let document = app.open_document(id, false).expect("opened");
+    app.memory_pressure(sift_governor::Pressure::Warning);
+    assert_eq!(app.tier(), sift_governor::Tier::L2);
+    assert!(
+        app.resources.origin_of(&document.token).is_some(),
+        "L2 revoked the token of a document still on screen"
+    );
+
+    app.memory_pressure(sift_governor::Pressure::Critical);
+    assert_eq!(app.tier(), sift_governor::Tier::L3);
+    assert!(
+        app.resources.origin_of(&document.token).is_none(),
+        "L3 destroys every window, so a token that outlived one would be unrevocable"
+    );
+}

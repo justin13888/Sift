@@ -205,6 +205,16 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     }
 
     /// Bring an existing window forward. "Open Sift" means *show me Sift*, not *make another*.
+    /// Close this shell's window — L3's shed, issued by the application shell.
+    ///
+    /// Goes through the window so that `windowWillClose` runs and the shell is forgotten the
+    /// same way a user closing it would be forgotten. Tearing the view hierarchy down without
+    /// that would leave this controller in the array `syncActivationPolicy` reads, holding
+    /// Sift in the dock with nothing on screen.
+    func close() {
+        window?.performClose(nil)
+    }
+
     func raise() {
         window?.makeKeyAndOrderFront(nil)
     }

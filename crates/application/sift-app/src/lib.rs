@@ -1259,6 +1259,17 @@ impl App {
                     .arm(deadline, Some(account), Work::FlushMutations),
             );
         }
+
+        // **A held tier arms the wheel even with no accounts.** The governor's hysteresis is
+        // clocked by these fires, and arming only per account meant a fresh install with
+        // nothing added went to L3 under pressure and stayed there for the life of the
+        // process — every window destroyed, nothing to poll, and so nothing to bring it back.
+        // This work belongs to the installation rather than to an account, which is what
+        // `Maintenance` is for.
+        if self.governor.tier() > sift_governor::Tier::L0 {
+            self.armed
+                .push(self.wheel.arm(deadline, None, Work::Maintenance));
+        }
     }
 
     /// How long until the wheel's next fire, if anything is armed.
@@ -1321,9 +1332,12 @@ impl App {
         // level rather than assuming calm is what keeps a still-critical system at L3.
         if self.governor.tier() > sift_governor::Tier::L0 {
             let pressure = self.last_pressure;
-            if let Some(transition) = self.memory_pressure(pressure) {
-                report.entered_l3 = transition.to == sift_governor::Tier::L3;
-            }
+            // Discarded deliberately, and this is the reason: on a wheel fire the tier is
+            // already at least what `last_pressure` demands — the entry point raised it when
+            // the signal arrived — so this call can only release, never deepen. There is no
+            // L3 to issue from here, and a branch pretending otherwise would be dead code
+            // carrying a host callback.
+            let _ = self.memory_pressure(pressure);
         }
 
         self.arm_periodic();
@@ -1384,19 +1398,19 @@ impl App {
     /// The window destruction L3 also requires is not here and cannot be: only a shell owns a
     /// window. The boundary issues that one as a host callback.
     fn shed(&mut self, transition: &sift_governor::Transition) {
-        use sift_subsystem::Subsystem;
-        for subsystem in &transition.sheds {
-            match subsystem {
-                // The broker's decoded-resource state and every live document token with it.
-                // A body view being destroyed at L2 and L3 makes the tokens unreachable
-                // anyway, and a token that outlived its view would be a capability nothing
-                // could revoke.
-                Subsystem::Broker | Subsystem::Bodyview => self.resources.shed(),
-                // The remaining subsystems own caches this layer does not hold yet. Naming
-                // them and doing nothing would be worse than the match being partial, so they
-                // are listed where the reader can see what is outstanding.
-                _ => {}
-            }
+        // **Tokens are revoked only where the views holding them are actually destroyed**,
+        // which today is L3 and only L3. D-67's callback set is closed at six and contains
+        // nothing that can destroy a body view, so at L2 the window and the reader stay on
+        // screen — and revoking there would leave a live document whose every resource
+        // request answers `Revoked`, whose "Load images" button fails, and whose reason the
+        // shell has no way to state. FR-33 requires the reason be given; a dead view that
+        // says nothing is worse than a cache that was not released.
+        //
+        // L2's own targets — the body view, parsed-MIME, database memory, the search index —
+        // are not held by this layer yet, so L2 transitions and releases nothing. That is
+        // stated rather than hidden: the tier is real and the release is outstanding.
+        if transition.to == sift_governor::Tier::L3 {
+            self.resources.shed();
         }
     }
 
@@ -1634,8 +1648,5 @@ pub struct TickReport {
     pub flushed: Vec<String>,
     /// Accounts the wheel reached and did not poll, because the user paused them.
     pub paused: Vec<String>,
-    /// Whether this fire's governor tick entered L3, so the boundary can issue the window
-    /// destruction only a shell can perform.
-    pub entered_l3: bool,
     pub failures: Vec<(String, String)>,
 }
