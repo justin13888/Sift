@@ -278,16 +278,19 @@ pub struct App {
     pub container: Option<container::Container>,
     next_intent: u128,
     next_ordinal: u16,
-    /// FR-8's *load once*, **keyed on the message and not on a token**.
+    /// FR-8's *load once* — **the one message in front of the user**.
     ///
-    /// Accepting withheld content re-renders, and re-rendering mints a new capability token
-    /// and revokes the old one — so an allowance held against the token died with the click
-    /// that made it, and the button stayed a no-op with a passing test beside it. The message
-    /// is what the user made the decision about, and it is what survives the re-render.
+    /// Keyed on the message rather than on a token because accepting re-renders, and a
+    /// re-render mints a new token and revokes the old one: an allowance held against the
+    /// token died with the click that granted it.
     ///
-    /// Session-scoped by construction: this is not persisted, so quitting forgets it, which
-    /// is what "once" should mean at its longest.
-    allowed_once_messages: std::collections::BTreeSet<LocalId>,
+    /// One rather than a set, and that is the contract rather than a size optimisation.
+    /// `pipeline.md` says show-once *"applies to the message in front of the user and is not
+    /// written down anywhere"*, so opening a different message ends it — a set would have made
+    /// "once" mean "for the rest of the session, every time this message is opened", in every
+    /// window at once, which is a durable allowance nobody asked for. It is also bounded by
+    /// construction, in a process specified to run for weeks.
+    allowed_once_message: Option<LocalId>,
 }
 
 impl std::fmt::Debug for App {
@@ -324,7 +327,7 @@ impl App {
             container: None,
             next_intent: 0,
             next_ordinal: 0,
-            allowed_once_messages: std::collections::BTreeSet::new(),
+            allowed_once_message: None,
         }
     }
 
@@ -1185,7 +1188,7 @@ impl App {
     /// re-renders and a re-render replaces the token. It is deliberately not persisted:
     /// "once" that outlived the process would be a durable allowance nobody asked for.
     pub fn allow_remote_content_once(&mut self, id: LocalId) {
-        self.allowed_once_messages.insert(id);
+        self.allowed_once_message = Some(id);
     }
 
     /// Whether the user has paused this account — D-95, per account.

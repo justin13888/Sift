@@ -184,7 +184,11 @@ impl App {
 
         // Nothing keys a durable allowance while the origin is null, so the control that
         // would set one is absent rather than present and ineffective.
-        let may_always_allow = !matches!(context_origin, sift_block::origin::Origin::Null);
+        // **Asked of the origin, not re-derived here.** This used to spell the predicate out
+        // as "not null", and when the boundary tightened to "attested" the two disagreed —
+        // leaving the interface free to draw a button the boundary would refuse, which is the
+        // defect class this whole change exists to remove. One predicate, one place.
+        let may_always_allow = context_origin.can_carry_a_durable_allowance();
 
         let links: Vec<Link> = rendered
             .links
@@ -201,8 +205,12 @@ impl App {
         // allowance held against the token died with the click that granted it, and the
         // button was a no-op with a passing test beside it. The decision is about the
         // message, so it is applied here, to whatever token this render just minted.
-        if self.allowed_once_messages.contains(&id) {
+        // Opening a different message ends the previous allowance: show-once applies to the
+        // message in front of the user, so navigating away is what "once" is bounded by.
+        if self.allowed_once_message == Some(id) {
             self.resources.allow_once(rendered.token.as_str());
+        } else {
+            self.allowed_once_message = None;
         }
 
         Ok(Document {

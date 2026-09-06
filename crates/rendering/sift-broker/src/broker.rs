@@ -213,6 +213,16 @@ impl Broker {
         }
     }
 
+    /// Whether this document carries a one-off allowance.
+    ///
+    /// The state is otherwise only observable through a fetch, and a fetch also passes through
+    /// the authority — which denies while no filter engine is loaded — so without this a test
+    /// cannot tell "allowed" from "allowed and then shed" at all.
+    #[must_use]
+    pub fn is_allowed_once(&self, token: &str) -> bool {
+        self.documents.get(token).is_some_and(|d| d.allowed_once)
+    }
+
     /// The origin a live document came from, for keying a durable allowance on.
     ///
     /// The shell holds a token and not an origin — the origin is the layer's, derived from
