@@ -120,7 +120,7 @@ contestable. A decision without its counter-argument is an assertion.
 **Open questions are not resolved by deletion.** Answering one means writing the answer into its owning
 document and striking the entry in [open questions](open-questions.md) with a pointer.
 
-**The design is settled *pending* ten open questions, three of which are load-bearing. That is a
+**The design is settled *pending* nine open questions, three of which are load-bearing. That is a
 weaker claim than settled, and the distinction between the two groups is the useful part.**
 
 The two that can still move the design: Q-10 leaves every number in this set unfalsifiable until the
@@ -136,15 +136,16 @@ the memory one. Q-15 was the third of this kind until it was answered: D-27's re
 on viewport width while the transform built from it did not, and the answer — a body view pinned to the
 width the cascade resolves at — keeps D-27 whole rather than narrowing it.
 
-The remaining seven are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
-legal in the meantime. Q-13 asks whether one feature works on one platform. Q-18 asks what the list
-endpoint's address and payload commit Sift to, given that nothing self-updates, and **Q-19 is that same
-question reaching a second endpoint** — the crash-report upload, which has a decision about its contents,
+The remaining six are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
+legal in the meantime. Q-13 asks whether one feature works on one platform. **Q-19 asks what a
+permanent address commits Sift to, given that nothing self-updates** — the rule
+[D-33](product/platforms-and-distribution.md) now states for every address a build calls, reaching the
+crash-report upload, which has a decision about its contents,
 a row in the egress table, and no address, operator, or answer about whether it ships at all. Q-20 asks
 whether one guarantee survives one sandbox, and Q-22 asks for the metric and threshold
 [D-64](build/verification.md) requires of every gate and this one lacks.
 
-One of the seven is bounded in design terms and urgent in every other sense, because it cannot be
+One of the six is bounded in design terms and urgent in every other sense, because it cannot be
 revisited. **Q-21 asks what the vendored dependency tree licenses** — the crates, which neither a
 contributor agreement nor a bundled-artefact audit reaches, and where one copyleft crate defeats the App
 Store channel whenever that channel returns.
@@ -168,8 +169,10 @@ the headers D-44 corroborates against are assumed rather than measured to surviv
 
 Q-11 — filter-list integrity, an unclosed injection path into every message body — was the first of the
 load-bearing group, and is now [D-111](rendering/content-blocking.md): every list ships in the binary and
-there is no list-update channel. What it leaves behind is R-11, now permanent for lists as for code, and
-Q-18, whose endpoint that decision does not build.
+there is no list-update channel. What it leaves behind is R-11, now permanent for lists as for code. It
+also answered Q-18, which asked what the list endpoint's address and payload would commit Sift to once
+shipped: with no endpoint, nothing is frozen, and [D-33](product/platforms-and-distribution.md) keeps the
+argument as a rule for every address a build calls, including a list endpoint anyone reinstates.
 
 Everything not on that list is decided. **D-59 onward decide the parts a build runs into rather than
 reasons about** — the on-disk byte layouts, the boundary's representation, the process lifecycle, the

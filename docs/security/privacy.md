@@ -53,7 +53,11 @@ row is once per account.
 binary and arrives through the platform channel with the rest of Sift, so no list traffic exists for a
 table row to describe. The staleness that costs is the one NFR-43 already tolerates, and D-111 records it.
 The same decision answers the integrity question this channel raised, which was
-[tracked separately](../open-questions.md) as Q-11.
+[tracked separately](../open-questions.md) as Q-11. It also removes the permanence Q-18 raised: under
+[D-33](../product/platforms-and-distribution.md#d-33--platform-channels-only-sift-never-updates-itself) a
+build keeps calling the address it shipped with for as long as it stays installed, so a list endpoint
+would have frozen its address and payload at the first release. With no endpoint, nothing is frozen, and
+the same section of D-33 states what a reinstated one would owe.
 
 **There is no update endpoint.** [D-33](../product/platforms-and-distribution.md) removed self-update
 entirely, so update traffic belongs to the platform's own channel and never to a Sift-initiated
@@ -115,7 +119,8 @@ Recent queries within a session are a convenience and are not durable.
 already making to the user's own providers, so there is no detection endpoint and no beacon. A
 conventional 60-second connectivity check would have been a recurring third-party disclosure of when this
 machine is awake and roughly where — the disclosure that removed the list-update rows from this table,
-an order of magnitude more often — and permanent, for the reason [Q-18](../open-questions.md)
+an order of magnitude more often — and permanent, for the reason
+[D-33](../product/platforms-and-distribution.md#d-33--platform-channels-only-sift-never-updates-itself)
 gives about addresses a build keeps calling for years.
 
 The [debug panels](../runtime/observability.md) expose a great deal about a message and about Sift's

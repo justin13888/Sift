@@ -21,8 +21,9 @@ channel.** A channel's own build counter is a packaging detail and never a versi
 
 Support is a **migration floor** — the oldest schema version a current build can still migrate
 forward from — advanced only deliberately and **never past a build that is still plausibly
-installed**. Under D-33 there is no way to force an upgrade, and Q-18 observes that a user
-under Flatpak or a Cask who never upgrades "may be years".
+installed**. Under D-33 there is no way to force an upgrade, and its own section
+([platforms and distribution](../docs/product/platforms-and-distribution.md#d-33--platform-channels-only-sift-never-updates-itself))
+observes that a build a user under Flatpak or a Cask never upgrades stays installed for what "may be years".
 
 The obligation that creates is real work rather than a note: **a migration chain kept
 compiling and kept tested against fixtures of every schema version above the floor.**

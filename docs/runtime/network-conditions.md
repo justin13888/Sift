@@ -94,11 +94,11 @@ spends two paragraphs on for the list-update rows it has since struck under
 [D-111](../rendering/content-blocking.md), and it would have been worse: those were occasional, this is
 once a minute.
 
-It is also permanent, for the reason [Q-18](../open-questions.md) gives about the list endpoint —
-[D-33](../product/platforms-and-distribution.md) means a build keeps calling the address it shipped with
-for as long as it stays installed. Q-18 is scoped to the list endpoint and does not reach this one, so
-adding a probe endpoint would have created a permanent operational commitment without anyone noticing it
-was one.
+It is also permanent:
+[D-33](../product/platforms-and-distribution.md#d-33--platform-channels-only-sift-never-updates-itself)
+means a build keeps calling the address it shipped with for as long as it stays installed. That argument
+was first raised about the list endpoint, as Q-18, and was scoped to it, so adding a probe endpoint would
+have created a permanent operational commitment without anyone noticing it was one.
 
 **Why the provider connection is a better signal anyway.** A portal that intercepts a TLS connection
 cannot present a valid certificate for the provider's name, so interception is *distinguishable from

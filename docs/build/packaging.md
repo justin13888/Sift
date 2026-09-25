@@ -69,8 +69,8 @@ this — monotonic for the life of the record — and is not what a user or an i
 **Why the support floor is the sharp end, and why nobody had accepted it.** Two settled decisions compose
 into an obligation neither of them states. [D-32](../storage/data-model.md) makes migrations
 **forward-only**, so a build must migrate from whatever it finds. D-33 removes any ability to make a user
-upgrade, and [Q-18](../open-questions.md) already observes that under Flatpak or a Cask *"a user never
-upgrades may be years"*. Composed, the migration chain must reach back to the oldest build still in the
+upgrade, and its own section already observes that under Flatpak or a Cask a build a user never
+upgrades stays installed for what *"may be years"*. Composed, the migration chain must reach back to the oldest build still in the
 field, **forever**, and nothing in this set had said how far that is or that it is ever pruned. That is a
 permanent maintenance liability accepted by omission, which is the failure mode this documentation set
 otherwise refuses everywhere.

@@ -58,6 +58,22 @@ the two is narrower than the words suggest, and the sentence above applies to it
 anything else Sift does. [D-111](../rendering/content-blocking.md) measures it against this decision and
 removes it: every list ships in the binary and reaches users through these same channels.
 
+**Every address a shipped build calls is permanent.** Nothing here can make a user upgrade, so a build
+keeps calling the addresses it shipped with for as long as it stays installed — and under Flatpak or a
+Cask a user never upgrades, that may be years. An endpoint Sift operates is therefore a commitment to
+answer at that address, in that payload format, for the life of the oldest build still in the field. It
+is cheap to shape before the first release and impossible to reshape after it. The list endpoint was
+where this first applied, and D-111 answers it by not building the endpoint: the first release fixes no
+list address and no list payload. Two obligations stand in its place:
+
+- **Reinstating a list endpoint reopens D-111, and the permanence returns with it.** An endpoint of that
+  kind MUST carry a version in its address from the outset and serve a payload that states its own
+  version, both fixed before the first build that calls it ships. Neither can be added afterwards,
+  because the builds already in the field would never request the versioned form.
+- **The same argument applies to every other address a build calls.** The crash-report endpoint is
+  [Q-19](../open-questions.md), and the connectivity probe [D-96](../runtime/network-conditions.md)
+  declined is permanent for the same reason.
+
 The two macOS channels reach different people, and neither reaches the other's audience: Homebrew Cask is
 how technically-inclined macOS users install software, while the App Store is where everyone else looks.
 They differ only in packaging and entitlements, not in the process model — a consequence of
