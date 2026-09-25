@@ -76,8 +76,8 @@ impl Default for Conditions {
 ///
 /// A sixty-second beacon from a resident application is "a coarse record of when this
 /// machine is awake and roughly where it is" — the disclosure the privacy egress table exists
-/// to enumerate. And under D-33 it would be **permanent**, for Q-18's reason: a build keeps
-/// calling the address it shipped with for as long as it stays installed.
+/// to enumerate. And it would be **permanent**, for the reason D-33's section gives: a build
+/// keeps calling the address it shipped with for as long as it stays installed.
 ///
 /// The signal is better anyway. An intercepting portal **cannot present a valid certificate
 /// for the provider's name**, so interception is distinguishable from being offline — which
