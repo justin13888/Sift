@@ -135,9 +135,11 @@ known mail infrastructure for attested senders only (D-37).
 
 **Chosen:** serve original bytes after bounded structural validation; decode fully only when the
 [dark transform](dark-mode.md) needs a classification, cached by content hash. Vector images are
-rasterized in the broker or refused.
+rasterized in the broker or refused. **Every parser, decoder and rasterizer that reads image bytes in the
+core MUST be memory-safe**, and a format with no memory-safe decoder is served but never classified — see
+[where the bytes are decoded](#where-the-bytes-are-decoded) below.
 **Rejected:** decoding and re-encoding every image to a normalized format; passing every type through
-untouched.
+untouched; decoding in a separate sandboxed process; accepting unsafe decoders in the core.
 
 **Why.** The transform is **opt-in and default-off** under FR-31, so for most users, most of the time,
 nothing needs the pixels of anything. Transcoding universally would spend CPU on every image in every
@@ -160,7 +162,8 @@ to the engine rather than stripped. The latter is acceptable because the body vi
 script, so metadata is inert there.
 
 **Contestable because:** universal transcoding would give one decoder path facing hostile bytes, one
-format to test, and metadata stripped by construction. If the fidelity corpus shows the engine's decoders
+format to test, and metadata stripped by construction. It would also have to decode every format mail
+carries, which the memory-safety constraint below does not permit. If the fidelity corpus shows the engine's decoders
 are the weak point rather than Sift's, that argument wins.
 
 **The placement question is separate from the transcoding question, and it is the sharper of the two.**
@@ -175,8 +178,57 @@ whether Sift's decoders might turn out better than the engine's. It is that Sift
 the process NFR-19 exists to protect**, while the engine's run in the one component the design is built to
 kill and respawn. [D-8](../architecture/overview.md)'s argument for Rust on hostile-input paths applies
 here at its strongest, and this is also where mature Rust decoders are least available for the formats
-mail actually carries. Left as it stands the placement is [an open question](../open-questions.md), not a
-settled trade.
+mail actually carries. This was [Q-14](../open-questions.md), and the section below answers it.
+
+### Where the bytes are decoded
+
+**The decode stays in the core, and memory safety is a stated constraint on it rather than a hope.**
+Every component that reads image bytes on the broker's path — the structural validation that reads a
+container's declared dimensions before [L-11](../limits.md) is checked, the classification decoder, and
+the vector rasterizer under [L-12](../limits.md) — MUST be written in a memory-safe language, MUST contain
+no unchecked memory access of its own on the path that reads hostile bytes, and MUST NOT call into a codec
+written in a memory-unsafe language, **the platform's own image frameworks included**, since those run in
+the same process. A dependency that satisfies this does so for its whole decoding path, not for its public
+surface.
+
+**A format with no decoder meeting that bar is served and not classified.** Its original bytes still go
+to the engine after the same bounded structural validation, and the engine decodes them in its own
+sandboxed, disposable content process, exactly as for any image while the transform is off. The dark
+transform leaves such an image untransformed, which is the outcome FR-31's asymmetry already prefers when
+Sift does not know what an image is. A vector format with no memory-safe rasterizer is refused, which was
+already the stated fallback above.
+
+**The narrowing is stated in the interface, not discovered by its absence.** A classification has an
+explicit outcome for *not classified because no memory-safe decoder exists for this format*, distinct from
+a decode that failed, a decode refused by a bound, and a classification that ran. Each is recorded against
+the content hash, so a format is not retried every time it is seen, and each is surfaced with its reason in
+the [debug view](../runtime/observability.md). The set of classifiable formats is therefore whatever the
+build can decode safely, and it is a property a reader can inspect rather than infer.
+
+**A decoder defect is then a degradation, which is what the threat model requires of every other layer.**
+Memory safety turns an out-of-bounds read or write into a panic, and
+[D-47](../architecture/overview.md) catches panics at the stage boundary, so the decode is a catch
+boundary like any pipeline stage: a caught panic records the image as not classified and the message
+renders with that image untransformed. It never reaches the process NFR-19 protects as memory corruption.
+The bounds above remain what stops a decode bomb, because memory safety says nothing about how much memory
+or time a correct decoder is persuaded to spend.
+
+**Why this over a separate process.** Decoding in a sandboxed helper would put the bytes back in the
+disposable half of the system, and it costs a process that [D-2](../architecture/process-model.md) is
+built to avoid, for a feature FR-31 leaves off by default. The engine's content process cannot be borrowed
+for it either: script is off there, so it can compute nothing on Sift's behalf, and
+[D-50](webview-isolation.md) leaves no channel out of the body view to return an answer on. **Why this over accepting the placement.** Accepting it would leave
+the one hostile input without a backstop as a known and permanent property of the resident process, when
+the cost of closing it is a narrower set of images the transform can reason about — a cost paid only by
+users who switched the transform on, only on formats nobody has a safe decoder for, and only as an
+untransformed image.
+
+**What it costs, and why it is still contestable.** Memory safety is a weaker boundary than a sandbox. It
+excludes memory corruption; it does not exclude a logic defect that misclassifies, nor resource exhaustion
+the bounds fail to anticipate, nor a defect in the language's own runtime or compiler. If the formats mail
+carries in practice turn out to be mostly ones without a safe decoder, the transform degrades toward doing
+nothing to images, and the separate-process answer — with the D-2 cost it carries — becomes the one to
+reopen.
 
 ## Prefetch
 

@@ -120,7 +120,7 @@ contestable. A decision without its counter-argument is an assertion.
 **Open questions are not resolved by deletion.** Answering one means writing the answer into its owning
 document and striking the entry in [open questions](open-questions.md) with a pointer.
 
-**The design is settled *pending* fourteen open questions, five of which are load-bearing. That is a
+**The design is settled *pending* thirteen open questions, four of which are load-bearing. That is a
 weaker claim than settled, and the distinction between the two groups is the useful part.**
 
 The three that can still move the design: Q-10 leaves every number in this set unfalsifiable until the
@@ -131,11 +131,9 @@ usually described as a set of numbers needing measurement, but [its own entry](o
 model, which is the second document in the reading order and the thing most of the rest hangs from. A
 question that can reverse a settled structural decision is not bounded, whatever its units.
 
-Q-14 joins them for the same reason. It asks where hostile image bytes are decoded, and one of its three
-answers is "in a separate process" — which is D-2 again, arrived at from the rendering side rather than
-the memory one. Q-15 is the third of this kind: it observes that D-27's resolved cascade depends on
-viewport width while the transform built from it does not, and one of its answers is to drop media queries
-from the cascade — which is D-27 being narrowed by a case D-27 did not consider.
+Q-15 joins them for the same reason: it observes that D-27's resolved cascade depends on viewport width
+while the transform built from it does not, and one of its answers is to drop media queries from the
+cascade — which is D-27 being narrowed by a case D-27 did not consider.
 
 The remaining nine are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
 legal in the meantime. Q-13 asks whether one feature works on one platform. Q-18 asks what the list
@@ -157,6 +155,12 @@ crate defeats the same channel.
 Q-8 — the fallback join when the internet message identifier is absent or duplicated — was the fourth, and
 is now [D-44](storage/data-model.md). What it leaves behind is a risk rather than a question: R-5, that
 the headers D-44 corroborates against are assumed rather than measured to survive transit.
+
+Q-14 — where hostile image bytes are decoded — was load-bearing because one of its answers was a separate
+process, which is D-2 again, arrived at from the rendering side. It is now answered inside
+[D-29](rendering/content-blocking.md#where-the-bytes-are-decoded): the decode stays in the core and every
+decoder there MUST be memory-safe, so D-2 keeps its process count and the cost is a narrower set of images
+the dark transform can classify.
 
 Everything not on that list is decided. **D-59 onward decide the parts a build runs into rather than
 reasons about** — the on-disk byte layouts, the boundary's representation, the process lifecycle, the

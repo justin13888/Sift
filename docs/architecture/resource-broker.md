@@ -35,7 +35,7 @@ Every request carries the [capability token](../rendering/webview-isolation.md) 
 | Is it first-party? | the synthetic origin, widened to known infrastructure only for attested senders | [D-11, D-37](../rendering/sender-origin.md) |
 | Does a heuristic block it regardless of list coverage? | the tracking-pixel and CSS-vector heuristics, each logging its reason | [FR-29](../rendering/content-blocking.md) |
 | May it be fetched *now*? | the active network policy tier, and the byte ceiling on a single fetch | [NFR-32, NFR-39](../runtime/network-conditions.md) |
-| What bytes are handed over? | original bytes after bounded structural validation; decode only when a classification is needed; vector images rasterized or refused | [D-29](../rendering/content-blocking.md) |
+| What bytes are handed over? | original bytes after bounded structural validation; decode only when a classification is needed, and only with a memory-safe decoder — a format without one is served unclassified; vector images rasterized or refused | [D-29](../rendering/content-blocking.md) |
 
 **Disagreement between the authority and the backstop is a bug**, and the
 [debug view](../runtime/observability.md) MUST surface it rather than silently taking either answer. That
