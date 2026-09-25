@@ -66,12 +66,29 @@ computed at and at no other. Resizing the reader pane moves the sender's own col
 that did not move with them, and step 5's contrast repair was checked against the pair that no longer
 holds. NFR-47's 95% gate is measured at a single width and cannot see this.
 
-Media queries are ubiquitous in HTML email, so this is the ordinary case rather than a corner. Three
-answers are open and none is free: pin the body view to a fixed layout width and accept that a resized
-reader does not reflow; recompute stages 3 through 6 on a debounced resize, which puts NFR-41's 30 ms
-budget onto an interactive drag that no requirement currently bounds; or drop media-query evaluation from
-the cascade, which weakens D-27's own argument that a colour-only subset fails because specificity is a
-property of the cascade as a whole. It is [an open question](../open-questions.md).
+Media queries are ubiquitous in HTML email, so this is the ordinary case rather than a corner.
+
+**Answered: the body view is pinned to a fixed layout width, and the cascade resolves at that same
+width.** The width is one constant of the render rather than a property of the window. The body view
+MUST lay every body out at exactly that width whatever the reader pane's size — a pane wider than it
+shows the column with room around it, a narrower one scrolls it sideways — and the cascade MUST evaluate
+media queries at the same value. Resizing the reader moves the column and never reflows the document, so
+the sender's colours, the colour graph, and every override stay the ones computed together, and "nothing
+recomputes" holds for every input without exception. Magnification that scales the rendered page without
+laying it out again is compatible with this; anything that changes the layout width is not.
+
+It was preferred over the other two answers because it is the only one that costs nothing elsewhere.
+Recomputing stages 3 through 6 on a debounced resize puts NFR-41's 30 ms budget onto an interactive drag
+that no requirement bounds. Dropping media-query evaluation from the cascade weakens D-27's own argument
+that a colour-only subset fails because specificity is a property of the cascade as a whole. And the pin
+is already [D-50](webview-isolation.md)'s stated retreat for content height, so one mechanism serves both.
+
+**What it costs:** a sender who designed for a narrow viewport sees their wide layout in every pane, and
+a reader pane narrower than the pinned width scrolls sideways rather than reflowing. Both are the
+sender's layout shown faithfully at one width rather than a broken one; a reader who wants reflow is
+asking for the recompute answer and its unbounded drag cost. The value of the width is a hypothesis like
+every other number here, and the one property that MUST hold is that the body view and the cascade use
+the same one.
 
 **Contestable because:** if NFR-41 is missed, this is the first thing to cut, and the retreat is real —
 declarations-only with inheritance approximated for a fixed property list would serve the transform
