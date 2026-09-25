@@ -32,7 +32,11 @@ The broker is the authority; the compiled rules are the backstop. **If the two e
 bug**, and the debug view MUST surface the disagreement rather than silently taking either answer.
 
 **NFR-42.** Filter engine memory MUST stay at or under 40 MB with the standard blocking and privacy lists
-plus the bundled email list loaded. It is a declared, budgeted cache like any other, and it has an
+plus the bundled email list loaded, **in every build, however those lists arrive**: bundled where the
+build carries them, and imported as custom rules where it does not (see
+[D-112](../product/platforms-and-distribution.md#d-112--bundle-only-what-each-channels-licence-can-carry)). A build that does
+not ship a list does not earn a smaller rule set to budget against, because its users can load the same
+list themselves. It is a declared, budgeted cache like any other, and it has an
 eviction policy like any other: **the engine is loaded when a window opens, released when the last window
 closes, and dropped at the L1 shed tier.** No window means no body view and therefore no caller, so
 holding it resident with none open would spend the largest single cache budget in the design on a
@@ -74,9 +78,21 @@ rather than a message that quietly fetched something.
 Content blocking with uBlock Origin-syntax filter lists: the standard public blocking and privacy lists,
 plus a **bundled email-specific list**. List subscriptions and custom rules MUST be user-manageable.
 
+**Which lists those are is fixed by licence, not preference**, and
+[D-112](../product/platforms-and-distribution.md#d-112--bundle-only-what-each-channels-licence-can-carry)
+owns the choice. The standard blocking and privacy lists are **EasyList** and **EasyPrivacy**, carried
+by the Homebrew Cask and Flatpak builds and absent from the App Store build, whose channel cannot carry
+their copyleft terms. The **email list is written by the Sift project** and ships in every build; it is
+where email tracking is covered, since the public lists cover it poorly, and it MUST NOT be derived from a
+copyleft list. NFR-42's budget covers the same three lists in every build, including the App Store
+build where EasyList and EasyPrivacy can only arrive as imported custom rules.
+
 Under D-111 below, a *subscription* is the choice of which bundled lists are enabled, and a *custom rule*
 is one the user writes or imports from a file they choose. Neither names a remote source: a list Sift does
-not bundle reaches the engine as the user's own custom rules, never as an address Sift fetches.
+not bundle reaches the engine as the user's own custom rules, never as an address Sift fetches — which is
+also how a user of the App Store build who wants EasyList gets it: they obtain it and import it, and Sift
+never distributes it in that build. A subscription to a list the running build does not carry is kept and
+shown as inactive rather than dropped or silently satisfied.
 
 **NFR-43.** Filter-list updates MUST NEVER block rendering. A stale list is acceptable; an absent one is
 not. Under D-111 an update is a new build rather than a fetch, so it is not network traffic and no

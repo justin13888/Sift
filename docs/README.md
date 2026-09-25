@@ -120,7 +120,7 @@ contestable. A decision without its counter-argument is an assertion.
 **Open questions are not resolved by deletion.** Answering one means writing the answer into its owning
 document and striking the entry in [open questions](open-questions.md) with a pointer.
 
-**The design is settled *pending* eleven open questions, three of which are load-bearing. That is a
+**The design is settled *pending* ten open questions, three of which are load-bearing. That is a
 weaker claim than settled, and the distinction between the two groups is the useful part.**
 
 The two that can still move the design: Q-10 leaves every number in this set unfalsifiable until the
@@ -136,7 +136,7 @@ the memory one. Q-15 was the third of this kind until it was answered: D-27's re
 on viewport width while the transform built from it did not, and the answer — a body view pinned to the
 width the cascade resolves at — keeps D-27 whole rather than narrowing it.
 
-The remaining eight are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
+The remaining seven are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
 legal in the meantime. Q-13 asks whether one feature works on one platform. Q-18 asks what the list
 endpoint's address and payload commit Sift to, given that nothing self-updates, and **Q-19 is that same
 question reaching a second endpoint** — the crash-report upload, which has a decision about its contents,
@@ -144,19 +144,23 @@ a row in the egress table, and no address, operator, or answer about whether it 
 whether one guarantee survives one sandbox, and Q-22 asks for the metric and threshold
 [D-64](build/verification.md) requires of every gate and this one lacks.
 
-Two of the eight are bounded in design terms and urgent in every other sense, because they are the ones
-that cannot be revisited. **Q-17 asks for the licences of everything Sift bundles but does not own** — the
-filter lists, the sender-infrastructure list and the fonts, which ship inside the binary and which no
-contributor agreement can reach. Nothing in the design turns on it, and shipping is what spends it.
-**Q-21 is the second population and the largest** — the vendored dependency tree, which neither a
+One of the seven is bounded in design terms and urgent in every other sense, because it cannot be
+revisited. **Q-21 asks what the vendored dependency tree licenses** — the crates, which neither a
 contributor agreement nor a bundled-artefact audit reaches, and where one copyleft crate defeats the App
-Store channel exactly as a copyleft list would.
+Store channel whenever that channel returns.
 
-Q-16 — what licence the App Store channel requires of Sift's own code — was the first of that pair, and is
-now [D-112](product/platforms-and-distribution.md): the App Store channel is deferred, AGPL-3.0 is kept, and
+Q-16 — what licence the App Store channel requires of Sift's own code — is now
+[D-113](product/platforms-and-distribution.md): the App Store channel is deferred, AGPL-3.0 is kept, and
 no contributor agreement is required. The question reopens if and when the channel is reconsidered, before
-the first external contribution it would need. What it leaves behind is Q-17 and Q-21, which stand against
-the same channel whenever it returns.
+the first external contribution it would need; until then an external contribution costs nothing, and
+after it each one is a consent that reconsidering the store must obtain.
+
+Q-17 — the licences of the filter lists, the sender-infrastructure list and the fonts Sift bundles but
+does not own — was Q-16's deadline reached from outside, and is now
+[D-112](product/platforms-and-distribution.md): the copyleft public lists ship in the Cask and Flatpak
+builds and not in the App Store build, the two lists nobody publishes are written by the Sift project,
+and every font is under the Open Font License. What it leaves behind is a channel that would block less by
+default than the other two, and two lists that fall under D-113 with the rest of Sift's own code.
 
 Q-8 — the fallback join when the internet message identifier is absent or duplicated — was the fourth, and
 is now [D-44](storage/data-model.md). What it leaves behind is a risk rather than a question: R-5, that

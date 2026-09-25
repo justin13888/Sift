@@ -164,8 +164,9 @@ with no mechanism is not one.**
    recorded as an accepted exception with an expiry date, in this repository, where it is visible.
 2. **Licences.** Every vendored crate's licence is checked against an allowlist. This is not
    housekeeping: **a single copyleft crate defeats the App Store channel exactly as
-   [Q-17](../open-questions.md)'s copyleft filter list would**, with [Q-16](../open-questions.md)'s
-   contributor agreement fully in place, because no agreement can relicense somebody else's work. Q-16
+   [Q-17](../open-questions.md)'s copyleft filter list would**, even with a contributor agreement fully
+   in place — which [D-113](../product/platforms-and-distribution.md) defers with the channel — because
+   no agreement can relicense somebody else's work. Q-16
    is about Sift's own copyright and Q-17 about the artefacts Sift bundles; the dependency tree is a
    third population, two orders of magnitude larger than either, and [R-12](../open-questions.md) stops
    precisely at its edge — *"it counts the components this project builds and cannot count the ones it

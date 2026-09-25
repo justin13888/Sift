@@ -16,7 +16,7 @@ consumed by an App Store record is never released, even after the record is dele
 application id cannot be renamed — a new id is a new application, and existing users are not upgraded to
 it. A URI scheme is a first-come namespace with no registry and no arbiter.
 
-[Q-16](../open-questions.md), now [D-112](platforms-and-distribution.md), observed that licensing is "the only irreversible item in this
+[Q-16](../open-questions.md), now [D-113](platforms-and-distribution.md), observed that licensing is "the only irreversible item in this
 documentation set". That was true of the *decisions*. It was not true of the set as a whole, because the
 set named none of these strings and therefore could not see that it was about to spend them.
 
