@@ -67,6 +67,9 @@ members = [
     # Linux shell and D-65's command-driven harness are Rust and in it.
     "crates/shells/sift-gtk",
     "crates/shells/sift-harness",
+    # NFR-45's soak harness and NFR-44's overhead benchmark. A shell by the same definition:
+    # it drives the assembled application and has no window.
+    "crates/shells/sift-soak",
 
     # Tooling. Not a layer; excluded from the architecture rules it enforces.
     "xtask",

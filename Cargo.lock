@@ -1982,6 +1982,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sift-soak"
+version = "0.1.0"
+dependencies = [
+ "sift-alloc",
+ "sift-app",
+ "sift-observe",
+ "sift-session",
+ "sift-subsystem",
+]
+
+[[package]]
 name = "sift-store"
 version = "0.1.0"
 dependencies = [
