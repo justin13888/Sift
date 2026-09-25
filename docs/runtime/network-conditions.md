@@ -215,7 +215,7 @@ carried the budgets and not the accounting they imply.
 |---|---|
 | **NFR-30** | Detect a path change and re-evaluate the policy tier within 2 seconds. Unknown metered state maps to Conservative, never Unrestricted |
 | **NFR-31** | In Minimal tier, at or under 10 KB per hour per account steady-state, excluding user-initiated fetches |
-| **NFR-32** | **Zero speculative prefetch of any kind** — bodies, images, attachments, filter lists — in Conservative or Minimal |
+| **NFR-32** | **Zero speculative prefetch of any kind** — bodies, images, attachments — in Conservative or Minimal |
 | **NFR-33** | On a path change, all connections torn down within 5 seconds and re-established within 5 seconds **of a usable path being available**: no stuck sockets, no duplicate delivery, no lost mutations. Where the new path is offline, teardown is the whole requirement — re-establishment waits, per NFR-38 |
 | **NFR-34** | Captive portals detected and handled: one probe per 60 seconds, no authentication-failure cascade, no credential re-prompt |
 | **NFR-35** | The override is persisted **by network identity** and takes precedence over detection every time. FR-35 owns the feature; this is the testable property — that a returning network is recognised as the same one, and that detection never overrules a stored answer |
