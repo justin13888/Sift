@@ -131,6 +131,12 @@ against a dead token are the ordinary case rather than the exception. They are c
 generation discipline [D-66](view-protocol.md) applies at the shell boundary, and it is here for the same
 reason: the alternative is completing work into a context that has been destroyed.
 
+**A panic answers too.** The work behind an image request reads hostile bytes in the core under
+[D-29](../rendering/content-blocking.md#where-the-bytes-are-decoded), and no pipeline stage is on the
+stack when it runs, so that work is a [D-47](overview.md) catch boundary of its own. A panic caught there
+is answered *unavailable* with a caught panic as its reason, never with bytes the abandoned work had
+touched, and the request still receives its one answer.
+
 **Every request has an identity, and it is what makes the debug view possible.**
 [FR-33](../runtime/observability.md) requires enumerating *"every candidate URL, its verdict, the matching
 rule"*, which is not expressible without a per-request record. That record is per document and is

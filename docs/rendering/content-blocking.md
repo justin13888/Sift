@@ -250,17 +250,23 @@ the [debug view](../runtime/observability.md). The set of classifiable formats i
 build can decode safely, and it is a property a reader can inspect rather than infer.
 
 **A decoder defect is then a degradation, which is what the threat model requires of every other layer.**
-Memory safety turns an out-of-bounds read or write into a panic, and the decode is not a catch boundary
-of its own: it runs inside [dark mode](dark-mode.md)'s step 6, within the [pipeline](pipeline.md)'s transform stage, so
-[D-47](../architecture/overview.md)'s boundary at that stage is what catches it. The panic therefore does
-exactly what D-47 says every caught panic does — that message degrades to FR-9's raw view, carries the
-*stage failed on a caught panic* state from the [state register](../architecture/state-register.md), and
-is counted against the subsystem whose tag was current under [observability](../runtime/observability.md).
-It is also recorded against the content hash as the *decode panicked* outcome above, which is never folded
-into *decode failed* or *not classified*, since D-47 forbids absorbing a caught panic as an ordinary parse
-failure. Because the outcome is recorded, a later render of a message carrying the same image does not
-decode it again and shows it untransformed; the panic is paid once per image, not once per render. It
-never reaches the process NFR-19 protects as memory corruption.
+Memory safety turns an out-of-bounds read or write into a panic, and something has to catch it. None of
+the pipeline's stage boundaries can: the bytes are read while the broker answers the engine's request for
+the image, on [D-19](../architecture/overview.md)'s blocking pool under [D-91](../architecture/resource-broker.md),
+after the document has rendered, and the structural validation ahead of L-11 runs on every image request
+whether or not the transform is on. So the broker's work on one image request is a catch boundary of its
+own, the one [D-47](../architecture/overview.md) names outside the pipeline, and it wraps all three
+readers above. A panic caught there answers that one request *unavailable*, with a caught panic as its
+reason in the [state register](../architecture/state-register.md)'s *resource unavailable* state — never
+the bytes, since whatever the abandoned work had validated is discarded with it. It is counted against the
+broker's subsystem under [observability](../runtime/observability.md), and it is recorded against the
+content hash as the *decode panicked* outcome above, which is never folded into *decode failed* or *not
+classified*, since D-47 forbids absorbing a caught panic as an ordinary parse failure. The rest of the
+message renders; only that image is missing. Because the outcome is recorded, a later request for the same
+content hash does not repeat the work that panicked: where structural validation had completed, the image
+is served unclassified and left untransformed, and where validation itself panicked, the request is
+answered *unavailable* without the bytes being parsed again. The panic is paid once per image, not once
+per render, and it never reaches the process NFR-19 protects as memory corruption.
 The bounds above remain what stops a decode bomb, because memory safety says nothing about how much memory
 or time a correct decoder is persuaded to spend.
 

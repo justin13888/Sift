@@ -91,9 +91,9 @@ degradation, not an incident:
 the disposable half.** Image bytes are decoded in the core for classification under
 [D-29](../rendering/content-blocking.md), where no process boundary stands behind the decoder. What stands
 there instead is a stated constraint: every component reading image bytes in the core MUST be
-memory-safe, a format without such a decoder is served to the engine and never classified, and a decode
-runs inside the transform stage's [D-47](../architecture/overview.md) catch boundary. A decoder defect is
-therefore a caught and counted panic that degrades that message to the raw view, rather than a
+memory-safe, a format without such a decoder is served to the engine and never classified, and the
+broker's work on each image request is a [D-47](../architecture/overview.md) catch boundary. A decoder
+defect is therefore a caught and counted panic that answers that one image *unavailable*, rather than a
 memory-safety bug in the resident process. This is a weaker backstop than
 the sandbox the engine's own decoders run in — it excludes corruption, not misclassification or exhaustion
 the bounds miss — and [D-29](../rendering/content-blocking.md#where-the-bytes-are-decoded) records why it

@@ -109,7 +109,9 @@ observability story, traded away for scheduling fairness that has not yet been m
 
 **Chosen:** the release binary unwinds on panic; the [rendering pipeline](../rendering/pipeline.md)
 establishes a catch boundary at each stage, and a caught panic degrades that message to FR-9's raw source
-view. No unwind may cross the [C ABI](shell-boundary.md).
+view. The [resource broker](resource-broker.md) establishes one more, around its work on each image
+request, and a panic caught there answers that one request *unavailable*. No unwind may cross the
+[C ABI](shell-boundary.md).
 **Rejected:** aborting on panic; catching nothing and relying on the code being correct.
 
 **Why this is a requirement rather than a build setting.** NFR-19 says a malformed or hostile message
@@ -131,6 +133,15 @@ is discardable. A stage's inputs are its bytes and its output is a fresh tree or
 loses a message, and the pipeline already has somewhere to put that message. Nothing upstream of stage 1
 is invalidated, which is what makes the recovery honest rather than a caught panic that resumes into
 unknown state.
+
+**The broker's image path is the one boundary outside the pipeline.** Image bytes are hostile input read
+in the core under [D-29](../rendering/content-blocking.md#where-the-bytes-are-decoded), but they are read
+while the broker answers the engine's request, on the blocking pool under [D-91](resource-broker.md) and
+after the document has rendered, so no stage boundary is on the stack. The same granularity argument
+places the boundary: one request's inputs are the stored bytes and its output is one answer, so
+abandoning it loses one image, and D-91 already has an answer for a resource that could not be produced.
+Nothing the abandoned work computed is used, and a panic there is counted and recorded exactly as a
+stage's is.
 
 **Nothing may unwind across the ABI.** An unwind through an `extern "C"` frame is undefined behaviour, and
 [shell boundary](shell-boundary.md) already concedes this is the one place in the core where memory-safety
