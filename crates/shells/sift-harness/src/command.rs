@@ -96,7 +96,7 @@ fn help() -> Vec<String> {
         "links <id|#n>                                    FR-30/FR-42: where each link really goes",
         "attachments <id|#n>                              FR-10: what is carried, fetching none of it",
         "search [--in <account>] <query>                  FR-20: operators, and how they were read",
-        "relevance record <file> <#n|id> <query>          #24: the query sought hit n (or id); append it",
+        "relevance record <file> <#n|id> <query>          #24: <query> sought its hit n (unscoped) or <id>",
         "save <id|#n> <part> <dir> [write]              NFR-53: the final path, shown before the write",
         "resource <url|#n>                                answer one load, as the scheme handler does",
         "close <token|#>                                  revoke a document — D-90's navigation",

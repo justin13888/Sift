@@ -303,8 +303,9 @@ description = "#24 — score D-79's ranking against a recorded relevance corpus.
 # Not networked, but it reads a real mailbox and a corpus that exists only on the machine of the
 # person who recorded it, so it belongs with these rather than in CI. A figure, never a gate:
 # it exits zero however the ranking does. Quit the application first. Recording the corpus is
-# `mise run harness -- --root DIR "search <q>" "relevance record CORPUS #n <q>"`; the protocol is
-# docs/product/relevance-corpus.md.
+# `mise run harness -- --root DIR "search <q>" "relevance record CORPUS #n <q>"`, conventionally
+# into ~/something.relevance.tsv — outside the tree, and .gitignore'd by that suffix inside it.
+# The protocol is docs/product/relevance-corpus.md.
 run = "cargo run -q --release -p sift-app --example relevance-eval --"
 
 [tasks.http-probe]

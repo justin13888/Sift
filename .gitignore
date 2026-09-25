@@ -44,7 +44,8 @@ shells/macos/oauth-client.txt
 
 # A relevance corpus is someone's real queries against their real mailbox, keyed on its
 # message identifiers (docs/product/relevance-corpus.md). It is recorded outside the tree; this
-# is the net under the name that document gives it, in case one is recorded inside.
+# is the net under its conventional name (see `mise tasks` → relevance-eval), in case one is
+# recorded inside by mistake.
 *.relevance.tsv
 
 # Written from that client on every macOS build, and read by the generated project so the
