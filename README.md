@@ -155,10 +155,8 @@ the rendering pipeline, runtime behaviour, and security — plus a
 [decision log](docs/decisions.md) recording what was rejected and why each choice is contestable, and a
 list of [open questions](docs/open-questions.md).
 
-Contributors should read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request; contributors
-and agents should also read [`AGENTS.md`](AGENTS.md).
+Contributors and agents should also read [`AGENTS.md`](AGENTS.md).
 
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE). Contributions are accepted only under the contributor licence
-agreement in [`CONTRIBUTING.md`](CONTRIBUTING.md), which keeps the Mac App Store channel possible (D-112).
+AGPL-3.0 — see [LICENSE](LICENSE).

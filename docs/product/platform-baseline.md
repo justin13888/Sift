@@ -51,9 +51,10 @@ installed side by side, which removes a debugging convenience.
 
 **Contestable because:** it makes the direct-download build pay for the store's constraints, in a project
 whose Linux distribution decision ([D-15](platforms-and-distribution.md)) accepted a narrower install base
-for a similar reason and called it out as a cost. If the App Store channel is ever dropped — which
-[D-112](platforms-and-distribution.md) keeps possible — this decision has no remaining argument and should be
-reversed rather than kept out of habit.
+for a similar reason and called it out as a cost. [D-33](platforms-and-distribution.md) now defers the App
+Store channel rather than dropping it, so this decision stands: it is what lets the store be added later
+without splitting the identity. If the channel is ever dropped outright rather than deferred, this decision
+has no remaining argument and should be reversed rather than kept out of habit.
 
 ## D-46 — macOS 13 or later, universal
 

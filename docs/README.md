@@ -153,9 +153,10 @@ contributor agreement nor a bundled-artefact audit reaches, and where one copyle
 Store channel exactly as a copyleft list would.
 
 Q-16 — what licence the App Store channel requires of Sift's own code — was the first of that pair, and is
-now [D-112](product/platforms-and-distribution.md): AGPL-3.0 publicly, and every contribution under a
-contributor licence agreement that preserves the right to relicense. Its deadline was the first external
-contribution; what it leaves behind is Q-17 and Q-21, which the same deadline reaches from outside.
+now [D-112](product/platforms-and-distribution.md): the App Store channel is deferred, AGPL-3.0 is kept, and
+no contributor agreement is required. The question reopens if and when the channel is reconsidered, before
+the first external contribution it would need. What it leaves behind is Q-17 and Q-21, which stand against
+the same channel whenever it returns.
 
 Q-8 — the fallback join when the internet message identifier is absent or duplicated — was the fourth, and
 is now [D-44](storage/data-model.md). What it leaves behind is a risk rather than a question: R-5, that
