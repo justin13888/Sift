@@ -216,6 +216,60 @@ are one budget stated at three lifecycle points, and moving any one of them alon
 incoherence the tier targets above were just corrected for. Tracked with NFR-8's placeholder in
 [open questions](../open-questions.md).
 
+### Provisional figures
+
+**This section changes no target.** The figures below come from the interim rig in the
+[reference environment](../product/reference-environment.md). No target may be accepted on that
+machine's evidence, and it covers one of the four platform and architecture pairs that P0 owes. So
+NFR-8, NFR-9 and the reading peak are **not** re-derived here, and the placeholders above stand. What
+this records is the first cell of the derivation, together with what measuring it showed about the
+states the targets name.
+
+**The protocol.** The shipping Release binary runs against a scratch container and a scratch keychain,
+with the recorded fixture corpus loaded. It is driven from outside the process into three states and
+left to settle for 30 seconds in each. The figure is the median of five `phys_footprint` samples under
+D-16. It covers Sift **and every engine process it owns**, found through the application's own launchd
+domain. This is `mise run measure-footprint`, and per-integration runs the same task on both
+architectures.
+
+| State | Sift | Content | GPU | Networking | Total |
+|---|---:|---:|---:|---:|---:|
+| Window open, nothing selected (NFR-9's state) | 32–34 | 17–25 | 10–11 | 4–5 | **64–74** |
+| One message selected (the reading peak) | 33–34 | 17–26 | 11–14 | 4–5 | **67–78** |
+| L3, body view released: every window destroyed, allocator collected (NFR-8's state) | 32 | — | 12–13 | — | **45** |
+| L3, body view not released | 35 | 24 | 12 | 4 | **75** |
+
+The figures are MiB, from three runs on arm64 with macOS 26.6 and a 16 KB page. The fixture corpus is not
+the scale corpus. It measures toolkit residue and the body view, which is what Q-12 is about. It does
+not measure how the resident floor grows with the index. Loading the scale corpus through the protocol
+needs an answer that nobody is present to give: the corpus writer creates the account keys, so the
+application reading them raises an access prompt.
+
+The figures show four things:
+
+- **Both placeholders have headroom on this cell.** The L3 total is half of NFR-8's 90 MB. The
+  window-open total is under half of NFR-9's 150 MB. That is evidence that the code path fits, and
+  nothing more, because this machine is the opposite of unflattering.
+- **The window-open state contains a content process that NFR-9's definition excludes.** The shell
+  builds the body view along with the reader, before anything is selected. So the state NFR-9 names,
+  with no reader visible and the view torn down under NFR-46, never occurs in the current shell. The
+  measured window figure is the reading state minus one document, not NFR-9's state. The reading peak's
+  increment over it is small for the same reason: most of the body view's cost is already paid.
+- **The one engine process L3 does not release is WebKit's GPU process, at about 13 MB.** L3's target
+  says toolkit residue plus the resident floor. The GPU process belongs to neither, but it is owned by
+  Sift and is therefore counted. Whether it is released at all once no web view exists is WebKit's
+  decision rather than Sift's. Until that is shown otherwise, it is part of the floor.
+- **L3 did not reliably release the body view.** Across five launches, the content process outlived
+  L3 in three. In one of them, a heap inspection showed the list, sidebar and reader controllers and the
+  web view still alive after the window controller that owned them had gone. When that happens, the
+  "floor" is 75 MB rather than 45, and it is the window-open figure less nothing. A tier whose largest
+  reclaim happens only some of the time is a defect. It is tracked as a defect, and it is not averaged
+  into a figure.
+
+What remains before the three targets can be re-derived together: the same protocol on Intel; Linux,
+with PSS in place of `phys_footprint`, which has no instrument yet; the scale corpus; and the reference
+rig itself, which [Q-10](../open-questions.md) has not chosen.
+
 **NFR-13 and NFR-46 measure different clocks, and the distinction is normative.** NFR-13 bounds the time
 from the pressure signal to the governor having *issued* every release the tier calls for — caches
 dropped, the body view told to tear down, the allocator asked to collect. NFR-46 bounds the separate,

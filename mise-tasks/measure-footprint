@@ -173,6 +173,13 @@ alive() {
     kill -USR1 "$pid"; sleep "$settle"; alive; sample l3
 } >"$out"
 
+# A reading figure with no content process is not the reading peak: the list was empty or the
+# selection never landed, and printing it would put a number beside the wrong state.
+if ! awk -F'\t' '$2 == "reading" && $3 == "webcontent"' "$out" | grep -q .; then
+    echo "measure-footprint: no content process in the reading state, so no message was shown." >&2
+    exit 1
+fi
+
 # The host is part of the figure (R-13), so it is recorded beside it rather than recalled.
 {
     echo "### Q-12 footprint — $arch"
@@ -180,6 +187,10 @@ alive() {
     echo "| | |"
     echo "|---|---|"
     echo "| machine | $(sysctl -n hw.model) · $(( $(sysctl -n hw.memsize) / 1073741824 )) GB |"
+    if [[ -n "${ImageOS:-}" ]]; then
+        echo "| runner image | $ImageOS ${ImageVersion:-unknown} — an image's figure, not the rig's |"
+    fi
+    echo "| Xcode | $(xcodebuild -version 2>/dev/null | tr '\n' ' ') |"
     echo "| macOS | $(sw_vers -productVersion) ($(sw_vers -buildVersion)) |"
     echo "| architecture | $arch · page size $(pagesize) |"
     echo "| corpus | D-65's recorded fixtures |"
