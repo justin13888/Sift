@@ -1,6 +1,6 @@
 # Privacy
 
-**Owns:** D-35, NFR-22.
+**Owns:** D-35, D-114, NFR-22.
 
 ## The posture
 
@@ -27,7 +27,7 @@ The complete set of permitted outbound connections is:
 | ~~The bundled-list update source~~ | **removed by [D-111](../rendering/content-blocking.md)** — the [sender-infrastructure list](../rendering/sender-origin.md) and the bundled email filter list update with the binary | nothing |
 | Autoconfiguration discovery | **only** during interactive account setup — see below | **the domain of an address the user is adding**, to a host that is not yet their provider |
 | Remote content hosts | **only** for resources the user has explicitly allowed, and only through the [resource broker](../architecture/resource-broker.md) | that the message was opened, to the host the user allowed |
-| The crash-report endpoint | **only** on an opt-in upload of a report the user has read in full — D-35 | what the report contains, which the user has read |
+| ~~The crash-report endpoint~~ | **removed by [D-114](#d-114--a-crash-report-is-a-file-the-user-sends-themselves)** — a report is a local file the user reads and sends by their own means; Sift makes no connection for it | nothing |
 
 Anything else is a defect. In particular there is **no analytics endpoint**, and there is no path by which
 message content reaches any host other than the provider it came from.
@@ -59,6 +59,11 @@ build keeps calling the address it shipped with for as long as it stays installe
 would have frozen its address and payload at the first release. With no endpoint, nothing is frozen, and
 the same section of D-33 states what a reinstated one would owe.
 
+**The crash-report row is struck for the same reason, and it described less.** Unlike the list rows it
+was never a design with a disclosure to remove: it named an endpoint with no address, no operator and no
+retention, which [D-114](#d-114--a-crash-report-is-a-file-the-user-sends-themselves) settles by not having
+one. Nothing about a crash crosses the network under Sift's own hand.
+
 **There is no update endpoint.** [D-33](../product/platforms-and-distribution.md) removed self-update
 entirely, so update traffic belongs to the platform's own channel and never to a Sift-initiated
 connection. FR-26 in [process model](../architecture/process-model.md) is the requirement; this table is
@@ -73,8 +78,9 @@ disabled entirely under constrained network conditions — see
 ## D-35 — Crash reports carry no heap
 
 **Chosen:** capture stack backtraces, per-subsystem counters and build metadata. Never capture heap
-memory. Disable the operating system's own core dumps for the process, and make upload opt-in on a report
-the user can read in full first.
+memory. Disable the operating system's own core dumps for the process, and let nothing leave the machine
+except a report the user has read in full and chosen to send — which, under
+[D-114](#d-114--a-crash-report-is-a-file-the-user-sends-themselves), they send themselves.
 **Rejected:** conventional minidumps with a scrubbing pass; no crash reporting at all.
 
 **Why.** A minidump of this process contains message bodies, addresses, subjects and — despite NFR-23's
@@ -95,6 +101,45 @@ report. This decision accepts worse post-mortem debugging on the failures that m
 surface in the product. The mitigation is that the [fidelity corpus](../product/reference-environment.md)
 and the fuzzing under NFR-40 are supposed to find these before users do — if they do not, this decision is
 what made the difference.
+
+## D-114 — A crash report is a file the user sends themselves
+
+**Chosen:** a crash writes its D-35 report to a local file in Sift's own data directory. At the next launch
+Sift says that a report exists, shows it in full, and offers to save a copy wherever the user chooses
+through the platform's own save dialog. The user sends that copy by whatever means they like. Sift keeps
+only the most recent report, so a new crash replaces an unsent one and the store is bounded by
+construction; dismissing the notice deletes it. **Sift makes no connection for a crash report**, holds no
+address for one, and ships none in any build. Where the project accepts reports is documented with the
+release, not compiled into it.
+**Rejected:** operating a crash-report endpoint; dropping crash reporting from the first release and
+keeping D-35 as the seam.
+
+**Why.** Under
+[D-33](../product/platforms-and-distribution.md#d-33--platform-channels-only-sift-never-updates-itself)
+every address a build calls is permanent, so an endpoint would have to be named, versioned and answered
+for the life of the oldest installed build, by an operator with a retention policy — none of which exists,
+and all of which would have to exist before the first release. It would also add the disclosure the list
+rows were struck for: the network address and the time a report was sent, to a host the user did not
+choose. A file needs none of it. It also makes D-35's condition literal rather than procedural: the user
+cannot send a report without holding it, so reading it in full is the path, not a promise about the path.
+Dropping reporting altogether would give up the one post-mortem signal D-35 kept, on the hostile-input
+failures where it is already weakest.
+
+The save dialog is chosen over revealing the file in place because it works the same way inside the macOS
+sandboxes [D-45](../product/platform-baseline.md) requires and under Flatpak: the platform grants access
+to the location the user picked, and Sift needs no broader file access to hand the report over. The
+retained report holds what D-35 allows and nothing else, so it adds no correspondence metadata to a data
+directory that is backed up and copied between machines.
+
+**What it costs:** reports arrive only when a user bothers to send one, so they are far fewer, skewed
+towards technical users, and cannot be counted, grouped or correlated by the project. A crash loop keeps
+only its last report, which may not be its first cause. Nothing tells the project that a build is crashing
+widely until someone says so.
+
+**Contestable because:** a project with no crash volume learns about its worst failures late, and the
+fuzzing under NFR-40 is carrying more of the load than D-35 already asked of it. Reinstating an endpoint
+reopens this decision and D-33's permanence with it: its address and payload would have to be versioned
+before the first build that calls it ships, and its row would return to the egress table.
 
 ## Queries are not retained
 
