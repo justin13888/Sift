@@ -51,6 +51,13 @@ Gating on attestation is what keeps this from being a hole. An unauthenticated s
 widening at all, so a spoofed message gains nothing, which preserves the property D-11 exists for:
 authentication results directly harden blocking.
 
+**The curator is the Sift project.** The list is written in the tree rather than taken from a third
+party, so it is Sift's own copyright and no third party's terms travel with it, under
+[D-112](../product/platforms-and-distribution.md#d-112--bundle-only-what-each-channels-licence-can-carry).
+Each entry records its justification — the provider's own documentation of the hosts it serves images
+from, or observed mail — and none may be taken from a copyleft list, which would bring terms the App Store
+build cannot carry into every build.
+
 **What it costs:** a list somebody has to curate, forever, and the coarseness of a flat list — any attested
 sender is widened to any listed host, not merely to their own provider. The list is also a fingerprinting
 surface in the sense that it encodes which providers Sift knows about, though it is bundled rather than
