@@ -158,8 +158,8 @@ the store's usage rules add restrictions that GPL-3.0 forbids a distributor to a
 option does not escape it, because CC BY-SA forbids applying technological measures that restrict what a
 recipient may do with the material, which the store's delivery does. Dropping the channel to keep one
 list set would have decided [Q-16](../open-questions.md), since answered by D-113, as a side effect of a
-question about somebody else's lists; replacing the public lists everywhere would degrade the two channels that can carry them to match
-the one that cannot.
+question about somebody else's lists; replacing the public lists everywhere would degrade the two channels
+that can carry them to match the one that cannot.
 
 **The App Store build is not left without the lists; it is left without Sift distributing them.** FR-27's
 custom rules are imported from a file the user chooses, so a user who wants EasyList in that build obtains
