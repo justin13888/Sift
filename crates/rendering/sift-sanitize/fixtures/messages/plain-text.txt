@@ -1,0 +1,27 @@
+Hi all,
+
+The build on the release branch is green again. Two notes:
+
+  1. The flaky test was a real race: see <https://ci.example.test/runs/88213>.
+  2. If you still see "error: <unknown> at line 3" locally, run `cargo clean`
+     first -- the stale artefact is from before the fix.
+
+Quoting Sam's question from yesterday:
+
+> Can we ship with <script> in a plain-text body and have it show literally?
+> And what about &amp; and a bare < sign?
+
+Yes -- a plain-text part is escaped, never parsed, so <script>alert(1)</script>
+is shown exactly as typed, & and < included.
+
+Tables still line up in a monospace font:
+
+  name       | count
+  -----------+------
+  inbox      |   412
+  archive    | 18034
+
+Cheers,
+Alex
+--
+Alex Example | https://www.example.test

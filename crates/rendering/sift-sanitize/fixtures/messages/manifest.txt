@@ -1,0 +1,19 @@
+# The fidelity corpus's message samples: one line per file in this directory.
+#
+#   <file> | <category> | <provenance>
+#
+# <category> is one of the six the reference environment names: marketing, transactional,
+# mailing-list, cjk, rtl, plain-text. Every category MUST have at least one entry.
+# <provenance> is `constructed` (written for this corpus after the structure of real mail of
+# its kind, with every name, address and host replaced by reserved example domains) or
+# `captured` (taken from real mail and scrubbed of addresses, subjects and content under
+# NFR-22 before it was committed). A file listed here that is not in the directory, or the
+# reverse, fails the corpus test: nothing enters the corpus without a provenance.
+
+marketing-newsletter.html | marketing | constructed
+transactional-receipt.html | transactional | constructed
+mailing-list-reply.html | mailing-list | constructed
+cjk-japanese.html | cjk | constructed
+cjk-chinese-korean.html | cjk | constructed
+rtl-hebrew-arabic.html | rtl | constructed
+plain-text.txt | plain-text | constructed
