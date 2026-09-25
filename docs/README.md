@@ -138,8 +138,8 @@ width the cascade resolves at — keeps D-27 whole rather than narrowing it.
 
 The remaining four are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
 legal in the meantime. Q-13 asks whether one feature works on one platform. Q-20 asks
-whether one guarantee survives one sandbox, and Q-22 asks for the metric and threshold
-[D-64](build/verification.md) requires of every gate and this one lacks.
+whether one guarantee survives one sandbox, and Q-22 now asks only for the threshold
+[D-64](build/verification.md) requires of every gate — its metric and derivation rule are recorded.
 
 Q-16 — what licence the App Store channel requires of Sift's own code — is now
 [D-113](product/platforms-and-distribution.md): the App Store channel is deferred, AGPL-3.0 is kept, and

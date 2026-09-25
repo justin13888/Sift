@@ -116,6 +116,54 @@ that are already agreed to render acceptably — so the number describes the cor
 build. Until both are recorded the gate reports a figure and blocks nothing, and that state is a
 [roadmap](../product/roadmap.md) obligation rather than a permanent option.
 
+*The metric is recorded; the number is not.* [Q-22](../open-questions.md) is answered as far as the
+metric and the rule that derives the number, and stays open on the number itself:
+
+- **Metric: ꟻLIP**, the published perceptual difference for rendered images. Each pair — a message's
+  macOS render and its Linux render, at the same layout width and device scale — produces a per-pixel
+  error map in which a difference counts by how visible it is at a fixed viewing distance, not by how
+  many pixels it touches. That is the inversion the gate needs. Hinting and anti-aliasing move glyph
+  edges by a fraction of a pixel, which the metric's contrast-sensitivity filtering attenuates at the
+  viewing distance; an inverted colour, a missing block or a reflowed column changes colour and
+  structure over an area, which it does not. Colour is compared in a perceptual space, so a hue swap at
+  equal lightness is an error, which a luminance-only structural measure would not see.
+- **Statistic: the 99th percentile of each message's error map**, gated per message. A mean over the
+  map lets a localised regression — a dropped button in a long marketing message — dilute to nothing
+  across the surrounding white space; a percentile fails whenever at least one per cent of the message
+  is visibly wrong. The percentile is itself a hypothesis, fixed here so that it is not chosen by a
+  failing build, and it moves only by the same amendment the threshold does. The mean is reported beside
+  it and gates nothing.
+- **Viewing condition: the reference implementation's default**, fixed and recorded with the threshold,
+  because the attenuation above depends on it. Changing it changes every figure, and is the same
+  amendment a threshold change is.
+- **Both of NFR-26's comparisons use it.** The per-platform snapshot comparison uses the same metric and
+  statistic, with its own threshold derived by the same rule from repeated renders of one build on one
+  machine, so that it measures render nondeterminism and nothing else.
+
+**How the threshold is derived.** The calibration set is the fidelity-corpus messages whose render pair
+a person has reviewed and agreed renders acceptably on both platforms, each agreement recorded with the
+two engine versions it was made against. The threshold is the **largest statistic over that set**, with no
+margin: every agreed pair passes by construction, and a pair worse than the worst one anybody accepted
+fails. A margin would be a second number chosen by judgement, which is what D-64 exists to remove. A
+failing pair is resolved by fixing the render or by a person agreeing to it — which adds it to the set,
+and so moves the threshold, by amendment and never in the run it failed.
+
+**The derivation carries its own falsifier.** Every calibration render also yields negative controls — its
+colour inversion and its hue rotation at equal lightness — and the smallest statistic over those controls
+MUST exceed the threshold. If it does not, the metric cannot separate what the gate is for from what it
+is not, and this choice reopens rather than the threshold moving.
+
+**Rejected:** a pixel-difference count, for the reason above; a luminance-only structural similarity,
+which is blind to hue and, having no viewing distance, reads sub-pixel glyph shifts as structure; the
+difference measures tuned for image compression, whose purpose is to detect differences at the
+threshold of visibility, so that every hinting difference — which is visible, close up — fails; a mean
+over the error map, for dilution.
+
+**What is still missing is the number**, and the run that produces it cannot happen yet: it needs render
+pairs from both platforms, and the Linux shell is deferred. Until that run is recorded here the gate still
+reports and blocks nothing. The remainder is #95; recording the number strikes
+Q-22.
+
 **NFR-47's contrast threshold** is deliberately deferred by its owning document to the same corpus, and
 that deferral stands. What is new is that the deferral is registered here as an outstanding gate value
 rather than left as a sentence in a rendering document, so that the set of gates with no pass condition is

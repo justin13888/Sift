@@ -144,6 +144,11 @@ snapshots alone would let the two platforms drift apart while each remains self-
 
 This gate is a CI job, not a manual spot check.
 
+The perceptual metric, the statistic gated per message, and the rule that derives the threshold from
+agreed corpus pairs are recorded under [D-64](../build/verification.md). The threshold's value is not yet
+recorded, because the pairs it is calibrated on need a Linux render, and until it is the gate reports a
+figure and blocks nothing.
+
 ## Measurement discipline
 
 - Memory is measured as `phys_footprint` on macOS and PSS on Linux, never RSS. See
