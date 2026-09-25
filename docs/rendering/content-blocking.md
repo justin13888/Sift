@@ -3,7 +3,7 @@
 Blocking at the quality bar of a serious browser blocker, using a structural advantage a browser does not
 have.
 
-**Owns:** D-10, D-29, FR-27, FR-29, NFR-42, NFR-43.
+**Owns:** D-10, D-29, D-111, FR-27, FR-29, NFR-42, NFR-43.
 
 ## The structural advantage
 
@@ -74,9 +74,52 @@ rather than a message that quietly fetched something.
 Content blocking with uBlock Origin-syntax filter lists: the standard public blocking and privacy lists,
 plus a **bundled email-specific list**. List subscriptions and custom rules MUST be user-manageable.
 
+Under D-111 below, a *subscription* is the choice of which bundled lists are enabled, and a *custom rule*
+is one the user writes or imports from a file they choose. Neither names a remote source: a list Sift does
+not bundle reaches the engine as the user's own custom rules, never as an address Sift fetches.
+
 **NFR-43.** Filter-list updates MUST NEVER block rendering. A stale list is acceptable; an absent one is
-not. Updates are network traffic and MUST obey the active policy tier in
-[network conditions](../runtime/network-conditions.md).
+not. Under D-111 an update is a new build rather than a fetch, so it is not network traffic and no
+[policy tier](../runtime/network-conditions.md) governs it; a stale list is the one the installed build
+carries.
+
+## D-111 — Every list ships in the binary; there is no list-update channel
+
+**Chosen:** every list the filter engine and the broker consume — the standard public blocking and privacy
+lists, the bundled email list, and the [sender-infrastructure list](sender-origin.md) — ships inside the
+binary, fixed at build time, and changes only when the binary does, through the platform channels
+[D-33](../product/platforms-and-distribution.md) names. Sift fetches no list from anywhere at run time.
+**Rejected:** a Sift-operated update endpoint serving signed lists; fetching the public lists from their
+upstream sources at run time; subscriptions to a list by address.
+
+**Why.** A hostile or compromised list injects CSS into every message body through the generated
+stylesheet, and a run-time channel is how such a list would arrive. D-33 removed self-update because a
+resident mail client "is the wrong place to put a bespoke code-delivery path", and a list channel is that
+shape: operated by or for Sift, reaching every body, carrying content that becomes CSS. Signing the lists
+would defend the channel; not having it removes the gap instead. A list then reaches a user the way code
+does — as a reviewed change to the source tree, carried inside a binary the platform channel signs,
+delivers and can revoke — so the integrity of list content is the integrity of the build rather than a
+second mechanism beside it. It also removes the list rows from the [egress table](../security/privacy.md),
+and with them the recurring record of when this machine is awake and roughly where that those rows
+disclosed, and it leaves no endpoint whose address and format the first release would freeze.
+
+**What it costs.** Staleness, bounded by the user's upgrade habits rather than by Sift: under a Cask or
+Flatpak that is never upgraded, the lists are as old as the build. NFR-43 already accepts a stale list, and
+the direction of failure is tolerable on both kinds — a blocking list that is behind misses newer
+trackers, and remote content being blocked by default confines that to senders the user has allowed; an
+infrastructure list that is behind widens *less* than it should. The second cost is
+[R-11](../open-questions.md): an endpoint that was already signed and revocable would have been most of the
+machinery an urgent-fix path needs, and without it no fix of any kind, list or code, reaches users outside
+the platform channel. R-11 stays open, and this decision makes it permanent for lists as D-33 does for
+code. The third is the integrity question narrowed rather than closed: a list compromised upstream at the
+moment it is taken into the tree reaches the binary, and the defence there is the review that change
+receives — the same supply-chain position as any vendored dependency, and no longer a live path an
+attacker can reach after release.
+
+**Contestable because:** blocking lists exist to be current, and a blocker updated at the pace a user
+upgrades is weaker against new trackers than every browser blocker it is measured against. If R-11 is ever
+answered with a signed out-of-band channel, lists are the first content that would reasonably ride on it,
+and this decision should be reopened then rather than a second channel built beside that one.
 
 ## Where each half of blocking happens
 
