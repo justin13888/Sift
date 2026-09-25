@@ -22,8 +22,8 @@
 static ALLOC: sift_alloc::Tagging<std::alloc::System> = sift_alloc::Tagging(std::alloc::System);
 
 use core::time::Duration;
-use sift_observe::soak::{self, Verdict};
-use sift_soak::{Soak, describe, parse_duration};
+use sift_observe::soak;
+use sift_soak::{Soak, describe, parse_duration, verdict_code};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -100,20 +100,12 @@ impl<'a> Flags<'a> {
     }
 }
 
-fn verdict_code(verdict: Verdict) -> ExitCode {
-    match verdict {
-        Verdict::Passed { .. } => ExitCode::SUCCESS,
-        Verdict::Failed { .. } => ExitCode::from(1),
-        Verdict::TooShort { .. } | Verdict::NoUsableSamples => ExitCode::from(2),
-    }
-}
-
 fn print_report(rows: &[soak::Row], warmup: Duration) -> ExitCode {
     let report = soak::report(rows, warmup);
     for line in describe(&report) {
         println!("{line}");
     }
-    verdict_code(report.verdict)
+    ExitCode::from(verdict_code(report.verdict))
 }
 
 fn run(args: &[String]) -> Result<ExitCode, String> {

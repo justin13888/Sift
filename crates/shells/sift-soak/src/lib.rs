@@ -341,6 +341,17 @@ pub fn read(path: &Path) -> Result<Vec<Row>, String> {
     soak::parse(&text)
 }
 
+/// The exit status `run` and `report` end with: 0 on NFR-45's pass, 1 on its failure, and 2
+/// where there is no verdict, so a script cannot read a short run as a pass.
+#[must_use]
+pub const fn verdict_code(verdict: Verdict) -> u8 {
+    match verdict {
+        Verdict::Passed { .. } => 0,
+        Verdict::Failed { .. } => 1,
+        Verdict::TooShort { .. } | Verdict::NoUsableSamples => 2,
+    }
+}
+
 /// A report as lines a person reads.
 #[must_use]
 pub fn describe(report: &Report) -> Vec<String> {
@@ -639,6 +650,54 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_verdict_has_its_own_exit_status_and_headline() {
+        // A script reads the status and a person reads the first line; neither may mistake
+        // a run with no verdict for a pass.
+        let cases = [
+            (
+                Verdict::Passed {
+                    projected_growth: 0.01,
+                },
+                0,
+                "PASS  NFR-45",
+            ),
+            (
+                Verdict::Failed {
+                    projected_growth: 0.09,
+                },
+                1,
+                "FAIL  NFR-45",
+            ),
+            (
+                Verdict::TooShort {
+                    ran_for: Duration::from_secs(600),
+                },
+                2,
+                "NO VERDICT  the run lasted",
+            ),
+            (
+                Verdict::NoUsableSamples,
+                2,
+                "NO VERDICT  no footprint samples",
+            ),
+        ];
+        for (verdict, code, headline) in cases {
+            assert_eq!(verdict_code(verdict), code, "{verdict:?}");
+            let report = Report {
+                verdict,
+                baseline_bytes: None,
+                subsystems: Vec::new(),
+                unattributed: None,
+                residual: None,
+                wakeups_per_minute: None,
+                missing_samples: 0,
+            };
+            let lines = describe(&report);
+            assert!(lines[0].starts_with(headline), "{verdict:?}: {}", lines[0]);
+        }
+    }
 
     #[test]
     fn durations_read_the_way_a_person_writes_them() {
