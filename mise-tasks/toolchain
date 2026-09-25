@@ -40,9 +40,22 @@ for component in rustfmt clippy; do
     grep -q "^${component}" <<<"$installed" || missing+=("$component")
 done
 
-if [[ ${#missing[@]} -eq 0 ]]; then
-    exit 0
+if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "toolchain: adding ${missing[*]} to the pinned toolchain"
+    rustup component add "${missing[@]}"
 fi
 
-echo "toolchain: adding ${missing[*]} to the pinned toolchain"
-rustup component add "${missing[@]}"
+# The same gap exists for `targets`: an install that did not read `rust-toolchain.toml` carries
+# only the host's standard library, and a matrix leg cross-building through CARGO_BUILD_TARGET
+# (the Intel leg on an Apple-silicon runner) then fails with
+#
+#     error[E0463]: can't find crate for `std`
+#
+# Only the target this invocation builds for is checked, so a host build never reaches the
+# network here.
+if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
+    if ! rustup target list --installed 2>/dev/null | grep -qx "$CARGO_BUILD_TARGET"; then
+        echo "toolchain: adding target $CARGO_BUILD_TARGET to the pinned toolchain"
+        rustup target add "$CARGO_BUILD_TARGET"
+    fi
+fi
