@@ -35,7 +35,7 @@ Every request carries the [capability token](../rendering/webview-isolation.md) 
 | Is it first-party? | the synthetic origin, widened to known infrastructure only for attested senders | [D-11, D-37](../rendering/sender-origin.md) |
 | Does a heuristic block it regardless of list coverage? | the tracking-pixel and CSS-vector heuristics, each logging its reason | [FR-29](../rendering/content-blocking.md) |
 | May it be fetched *now*? | the active network policy tier, and the byte ceiling on a single fetch | [NFR-32, NFR-39](../runtime/network-conditions.md) |
-| What bytes are handed over? | original bytes after bounded structural validation; decode only when a classification is needed; vector images rasterized or refused | [D-29](../rendering/content-blocking.md) |
+| What bytes are handed over? | original bytes after bounded structural validation; decode only when a classification is needed, and only with a memory-safe decoder — a format without one is served unclassified; vector images rasterized or refused | [D-29](../rendering/content-blocking.md) |
 
 **Disagreement between the authority and the backstop is a bug**, and the
 [debug view](../runtime/observability.md) MUST surface it rather than silently taking either answer. That
@@ -130,6 +130,12 @@ against a dead token are the ordinary case rather than the exception. They are c
 *unavailable*; the answer is discarded by the engine along with the document it was for. This is the same
 generation discipline [D-66](view-protocol.md) applies at the shell boundary, and it is here for the same
 reason: the alternative is completing work into a context that has been destroyed.
+
+**A panic answers too.** The work behind an image request reads hostile bytes in the core under
+[D-29](../rendering/content-blocking.md#where-the-bytes-are-decoded), and no pipeline stage is on the
+stack when it runs, so that work is a [D-47](overview.md) catch boundary of its own. A panic caught there
+is answered *unavailable* with a caught panic as its reason, never with bytes the abandoned work had
+touched, and the request still receives its one answer.
 
 **Every request has an identity, and it is what makes the debug view possible.**
 [FR-33](../runtime/observability.md) requires enumerating *"every candidate URL, its verdict, the matching

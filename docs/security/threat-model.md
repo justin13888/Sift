@@ -60,7 +60,7 @@ requirement rather than as a definition.
 | HTML body | the sanitizer, then the body view | [sanitizer invariants](../rendering/sanitizer-invariants.md) I1–I10 |
 | CSS | the sanitizer, the blocker, the dark transform | parsed as a tree, fetching positions enumerated explicitly |
 | Remote resource URLs | the resource broker | blocked by default; [content blocking](../rendering/content-blocking.md) |
-| Images | the decoder, **in the resident process** | bounded decode; classification cached by content hash. The placement is [an open question](../open-questions.md) |
+| Images | the decoder, **in the resident process** | bounded decode by memory-safe decoders only; a format without one is served unclassified; classification cached by content hash — [D-29](../rendering/content-blocking.md#where-the-bytes-are-decoded) |
 | Link targets | the confirmation UI | punycode decoding and bidi stripping — [link handling](../rendering/link-handling.md) |
 | Header text — display names, subject | the **native** list, reader chrome, notifications and the tray | normalized once at the boundary — NFR-54 in [presentation layer](../architecture/presentation-layer.md). No sanitizer invariant sees this path |
 | The `Date` header | list ordering, if it were trusted | it is not: [D-55](../architecture/presentation-layer.md) orders on the server's received time |
@@ -85,12 +85,19 @@ degradation, not an incident:
 - A sanitizer URL-rewriting failure is backstopped by the body view having no network capability.
 - A blocker rule failure is backstopped by compiled engine-level content rules from the same source.
 - A containment failure is backstopped by the body rendering in its own document with its own data store.
+- An image decoder defect is backstopped by the decoder being memory-safe and its panics being caught.
 
-**One attacker-controlled input in the table above reaches no layer at all.** Image bytes are decoded in
-the core for classification under [D-29](../rendering/content-blocking.md), so a decoder defect is a
-memory-safety bug in the resident process rather than a degradation something else catches — and it is the
-one hostile input the design hands to the trusted half of the system rather than the disposable half. That
-placement is tracked as [an open question](../open-questions.md).
+**One attacker-controlled input in the table above is handed to the trusted half of the system rather than
+the disposable half.** Image bytes are decoded in the core for classification under
+[D-29](../rendering/content-blocking.md), where no process boundary stands behind the decoder. What stands
+there instead is a stated constraint: every component reading image bytes in the core MUST be
+memory-safe, a format without such a decoder is served to the engine and never classified, and the
+broker's work on each image request is a [D-47](../architecture/overview.md) catch boundary. A decoder
+defect is therefore a caught and counted panic that answers that one image *unavailable*, rather than a
+memory-safety bug in the resident process. This is a weaker backstop than
+the sandbox the engine's own decoders run in — it excludes corruption, not misclassification or exhaustion
+the bounds miss — and [D-29](../rendering/content-blocking.md#where-the-bytes-are-decoded) records why it
+was chosen over a separate process. It answered [Q-14](../open-questions.md).
 
 The invariants **without** a backstop — idempotence, boundedness, parse stability, no content invention,
 encoding determinism — are where review attention belongs. See
