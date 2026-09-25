@@ -164,8 +164,9 @@ with no mechanism is not one.**
    recorded as an accepted exception with an expiry date, in this repository, where it is visible.
 2. **Licences.** Every vendored crate's licence is checked against an allowlist. This is not
    housekeeping: **a single crate whose licence reaches the whole binary defeats the App Store channel
-   exactly as [Q-17](../open-questions.md)'s copyleft filter list would**, with [Q-16](../open-questions.md)'s
-   contributor agreement fully in place, because no agreement can relicense somebody else's work. Q-16
+   exactly as [Q-17](../open-questions.md)'s copyleft filter list would**, even with a contributor
+   agreement fully in place — which [D-113](../product/platforms-and-distribution.md) defers with the
+   channel — because no agreement can relicense somebody else's work. Q-16
    is about Sift's own copyright and Q-17 about the artefacts Sift bundles; the dependency tree is a
    third population, two orders of magnitude larger than either, and [R-12](../open-questions.md) stops
    precisely at its edge — *"it counts the components this project builds and cannot count the ones it
@@ -210,8 +211,9 @@ is the property that collides with the App Store's terms, and "copyleft" is the 
   it under that one.
 
 **The bar is the strictest channel's, applied to every build.** [D-33](../product/platforms-and-distribution.md)
-names three channels, and the App Store's terms are the strictest of them; holding every build to that
-bar means no channel decision ever waits on re-auditing the tree, and every channel's build of one
+names the channels, and the App Store's terms are the strictest of them. That channel is deferred rather
+than rejected, so holding every build to its bar means no channel decision, the store's return included,
+ever waits on re-auditing the tree, and every channel's build of one
 platform carries the same crates. The crate graph does differ between platforms, because each platform's
 shell and its platform bindings are that platform's alone, and the gate holds both graphs to the same bar.
 Bundled artefacts differ by channel under [D-112](../product/platforms-and-distribution.md); linked code

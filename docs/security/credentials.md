@@ -247,8 +247,8 @@ decision made elsewhere. Reading them against that decision is what turns this f
 a single question.
 
 **Requiring each user to supply their own OAuth client identifier is incompatible with the App Store
-channel.** [D-33](../product/platforms-and-distribution.md) ships two macOS channels on the argument that
-they reach different people, and it names the App Store as where "everyone else" looks — the non-technical
+channel.** [D-33](../product/platforms-and-distribution.md) names two macOS channels — Cask from the first
+release, the App Store deferred — on the argument that they reach different people, and it names the App Store as where "everyone else" looks — the non-technical
 half, explicitly. Asking that audience to create a cloud project and paste a client identifier is not a
 first run they complete. So this hatch is available to the Homebrew Cask and Flatpak builds and absent
 from the one channel it would matter most for.

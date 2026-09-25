@@ -36,8 +36,9 @@ ignore = []
 #
 # "Every vendored crate's licence is checked against an allowlist." Q-17 records why the
 # bar is where it is: a single crate whose licence reaches the whole binary defeats the App
-# Store channel exactly as a copyleft filter list would, and with Q-16's contributor agreement
-# fully in place — no agreement can relicense somebody else's work.
+# Store channel exactly as a copyleft filter list would, even with the contributor agreement
+# D-113 defers with that channel fully in place — no agreement can relicense somebody else's
+# work.
 #
 # Sift's own crates are AGPL-3.0-only and are excluded by `private`, since they are
 # `publish = false` and are the copyright the relicensing question is about.
@@ -58,8 +59,9 @@ allow = [
     # MPL-2.0 is admitted, and the reasoning is worth writing down because the first version
     # of this list got it wrong by treating "copyleft" as a synonym for "incompatible".
     #
-    # D-33's requirement is that the **copyright holder can relicense Sift's own code** under
-    # the store's terms. That is Q-16, and it is about authorship. For a *dependency* the
+    # The App Store channel, deferred by D-113, would require that the **copyright holder can
+    # relicense Sift's own code** under the store's terms. D-113 answers that for Sift's own
+    # code, and it is about authorship. For a *dependency* the
     # question is different: does its licence permit distribution through that channel at
     # all? MPL-2.0's §3.3 says a Larger Work may be distributed under terms of your choice
     # provided the covered files' obligations are met, and §3.2's obligation is source
