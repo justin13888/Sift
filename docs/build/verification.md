@@ -137,8 +137,12 @@ metric and the rule that derives the number, and stays open on the number itself
   because the attenuation above depends on it. Changing it changes every figure, and is the same
   amendment a threshold change is.
 - **Both of NFR-26's comparisons use it.** The per-platform snapshot comparison uses the same metric and
-  statistic, with its own threshold derived by the same rule from repeated renders of one build on one
-  machine, so that it measures render nondeterminism and nothing else.
+  statistic, with its own threshold, so that it measures render nondeterminism and nothing else. Its
+  calibration set is every fidelity-corpus message rendered repeatedly by one build on one machine, each
+  pair of those renders being one comparison. No person reviews those pairs: one build rendering one
+  message is by definition the intended output, so every such pair is agreed without review. What carries
+  over from the rule below is the rest of it — the threshold is the largest statistic over the set, with
+  no margin, and the same negative controls, qualified the same way, MUST exceed it.
 
 **How the threshold is derived.** The calibration set is the fidelity-corpus messages whose render pair
 a person has reviewed and agreed renders acceptably on both platforms, each agreement recorded with the
@@ -148,10 +152,16 @@ fails. A margin would be a second number chosen by judgement, which is what D-64
 failing pair is resolved by fixing the render or by a person agreeing to it — which adds it to the set,
 and so moves the threshold, by amendment and never in the run it failed.
 
-**The derivation carries its own falsifier.** Every calibration render also yields negative controls — its
-colour inversion and its hue rotation at equal lightness — and the smallest statistic over those controls
-MUST exceed the threshold. If it does not, the metric cannot separate what the gate is for from what it
-is not, and this choice reopens rather than the threshold moving.
+**The derivation carries its own falsifier.** Calibration renders also yield negative controls of two
+types — a colour inversion and a hue rotation at equal lightness — and, **for each control type**, the
+smallest statistic over the renders that qualify for it MUST exceed the threshold. If it does not, the
+metric cannot separate what the gate is for from what it is not, and this choice reopens rather than the
+threshold moving. Every render qualifies for inversion. A render qualifies for hue rotation only when its
+chromatic area is larger than the share of the message the statistic reads — more than one per cent at
+the 99th percentile — because a hue rotation leaves achromatic pixels unchanged: a plain-text message
+rotates to itself, scores nothing, and says nothing about the metric. What counts as a chromatic pixel is
+fixed with the threshold and moves only by the same amendment. A control type no calibration render
+qualifies for leaves the falsifier unperformed, which is recorded as such and never read as a pass.
 
 **Rejected:** a pixel-difference count, for the reason above; a luminance-only structural similarity,
 which is blind to hue and, having no viewing distance, reads sub-pixel glyph shifts as structure; the
