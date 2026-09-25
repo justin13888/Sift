@@ -70,6 +70,7 @@ fn dispatch(session: &mut Session, verb: &str, rest: &[&str]) -> Output {
         "links" => links(app, &rest),
         "attachments" => attachments(app, &rest),
         "search" => search(app, &rest),
+        "relevance" => relevance(app, &rest),
         "save" => save(app, &rest),
         "resource" => resource(app, &rest),
         "close" => close(app, &rest),
@@ -95,7 +96,8 @@ fn help() -> Vec<String> {
         "links <id|#n>                                    FR-30/FR-42: where each link really goes",
         "attachments <id|#n>                              FR-10: what is carried, fetching none of it",
         "search [--in <account>] <query>                  FR-20: operators, and how they were read",
-        "save <id|#n> <part> <dir> [write]                NFR-53: the final path, shown before the write",
+        "relevance record <file> <#n|id> <query>          #24: the query sought hit n (or id); append it",
+        "save <id|#n> <part> <dir> [write]              NFR-53: the final path, shown before the write",
         "resource <url|#n>                                answer one load, as the scheme handler does",
         "close <token|#>                                  revoke a document — D-90's navigation",
         "net [account]                                    bytes on the wire (FR-36)",
@@ -1026,7 +1028,7 @@ fn search(app: &mut App, args: &[&str]) -> Output {
     if terms.is_empty() {
         return Err("search [--in <account>] <query>".to_owned());
     }
-    let report = app.search(&terms.join(" "), account, 50)?;
+    let report = app.search(&terms.join(" "), account, SEARCH_LIMIT)?;
 
     let mut out = vec![format!("read as: {}", report.interpretation.join("; "))];
     out.extend(report.caveats.iter().map(|c| format!("-- {c}")));
@@ -1039,9 +1041,12 @@ fn search(app: &mut App, args: &[&str]) -> Output {
             ""
         }
     ));
-    out.extend(report.hits.iter().map(|h| {
+    // Numbered, so that `relevance record` can name the hit the person was looking for by the
+    // position they saw it at.
+    out.extend(report.hits.iter().enumerate().map(|(n, h)| {
         format!(
-            "  [{}] {}  {}  {}",
+            "  #{} [{}] {}  {}  {}",
+            n + 1,
             match h.source {
                 sift_app::search::Source::Local => "local",
                 sift_app::search::Source::Server => "server",
@@ -1052,6 +1057,50 @@ fn search(app: &mut App, args: &[&str]) -> Output {
         )
     }));
     Ok(out)
+}
+
+/// How many results `search` shows, and so how far `relevance record`'s `#n` can reach.
+const SEARCH_LIMIT: u32 = 50;
+
+/// #24 — record one relevance judgement: this query was issued, and this was the message sought.
+///
+/// `#n` is position n of `search <query>`'s results — the same query, the same limit, so the
+/// number a person read off the transcript names the message they meant. The judgement is keyed
+/// on the provider's identifiers rather than the local identity, so it survives a resync; see
+/// `sift_app::relevance`. Nothing is ranked here: `mise run relevance-eval` does that.
+fn relevance(app: &mut App, args: &[&str]) -> Output {
+    let ["record", file, target, query @ ..] = args else {
+        return Err("relevance record <file> <#n|id> <query>".to_owned());
+    };
+    if query.is_empty() {
+        return Err("relevance record <file> <#n|id> <query>".to_owned());
+    }
+    let query = query.join(" ");
+    let id = match target.strip_prefix('#') {
+        Some(n) => {
+            let n: usize = n
+                .parse()
+                .map_err(|_| format!("`{target}` is not a result number"))?;
+            let report = app.search(&query, None, SEARCH_LIMIT)?;
+            report
+                .hits
+                .get(n.checked_sub(1).ok_or("results are numbered from 1")?)
+                .map(|h| h.row.id)
+                .ok_or_else(|| {
+                    format!(
+                        "`{query}` has no result {n}; it returned {}",
+                        report.hits.len()
+                    )
+                })?
+        }
+        None => parse_id(target)?,
+    };
+    let judgement = app.relevance_judgement(&query, id)?;
+    judgement.append_to(std::path::Path::new(file))?;
+    Ok(vec![format!(
+        "recorded: `{}` sought {id} in {}",
+        judgement.query, judgement.account
+    )])
 }
 
 /// FR-10 — what a message carries, without fetching any of it.
