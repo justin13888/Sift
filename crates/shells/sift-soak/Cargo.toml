@@ -34,6 +34,7 @@ path = "src/baseline.rs"
 [dependencies]
 sift-alloc.workspace = true
 sift-app.workspace = true
+sift-foundation.workspace = true
 sift-observe.workspace = true
 sift-session.workspace = true
 sift-subsystem.workspace = true

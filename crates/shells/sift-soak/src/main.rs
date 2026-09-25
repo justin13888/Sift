@@ -193,13 +193,16 @@ fn overhead(args: &[String]) -> Result<ExitCode, String> {
     println!("{trials} trial(s) of {rounds} round(s) each, {accounts} account(s), alternated");
 
     let measured = sift_soak::overhead(&tagged, &baseline, rounds, trials, accounts)?;
+    println!("         CPU (platform units)             wall (ms, reported, not judged)");
     for (i, (t, b)) in measured.tagged.iter().zip(&measured.baseline).enumerate() {
         println!(
-            "trial {:>2}  tagged {:>10.3} ms  baseline {:>10.3} ms  {:>+7.2}%",
+            "trial {:>2}  tagged {:>12}  baseline {:>12}  {:>+7.2}%   tagged {:>9.1}  baseline {:>9.1}",
             i + 1,
-            t.as_secs_f64() * 1e3,
-            b.as_secs_f64() * 1e3,
-            (t.as_secs_f64() / b.as_secs_f64() - 1.0) * 100.0
+            t.cpu,
+            b.cpu,
+            (t.cpu as f64 / b.cpu.max(1) as f64 - 1.0) * 100.0,
+            t.wall.as_secs_f64() * 1e3,
+            b.wall.as_secs_f64() * 1e3,
         );
     }
     let fraction = measured.fraction();
@@ -211,19 +214,27 @@ fn overhead(args: &[String]) -> Result<ExitCode, String> {
         );
         return Ok(ExitCode::from(2));
     }
-    if measured.within_budget() {
-        println!(
-            "PASS  NFR-44: attribution costs {:+.2}% (ratio of medians), within {:.0}%",
-            fraction * 100.0,
-            sift_soak::NFR44_BUDGET * 100.0
-        );
-        Ok(ExitCode::SUCCESS)
-    } else {
-        println!(
-            "FAIL  NFR-44: attribution costs {:+.2}% (ratio of medians), beyond {:.0}%",
-            fraction * 100.0,
-            sift_soak::NFR44_BUDGET * 100.0
-        );
-        Ok(ExitCode::from(1))
+    let budget = sift_soak::NFR44_BUDGET * 100.0;
+    let figure = format!(
+        "{:+.2}% ± {:.2}% (median paired CPU ratio, two standard errors)",
+        fraction * 100.0,
+        2.0 * measured.uncertainty() * 100.0
+    );
+    match measured.verdict() {
+        Some(true) => {
+            println!("PASS  NFR-44: attribution costs {figure}, within {budget:.0}%");
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(false) => {
+            println!("FAIL  NFR-44: attribution costs {figure}, beyond {budget:.0}%");
+            Ok(ExitCode::from(1))
+        }
+        None => {
+            println!(
+                "NO VERDICT  {figure} straddles {budget:.0}% — this machine is too noisy to \
+                 resolve NFR-44; run more trials, or run it where nothing else is"
+            );
+            Ok(ExitCode::from(2))
+        }
     }
 }

@@ -1987,6 +1987,7 @@ version = "0.1.0"
 dependencies = [
  "sift-alloc",
  "sift-app",
+ "sift-foundation",
  "sift-observe",
  "sift-session",
  "sift-subsystem",

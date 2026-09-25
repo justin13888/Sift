@@ -162,6 +162,25 @@ pub fn total_attributed() -> i64 {
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn phys_footprint() -> Option<u64> {
+    rusage().map(|info| info.ri_phys_footprint)
+}
+
+/// CPU time this process has spent, user and system, **in the platform's own units**.
+///
+/// NFR-44's benchmark divides one process's figure by another's on the same machine, so the
+/// unit cancels — which is as well, because on Apple silicon it is the timebase's ticks
+/// rather than nanoseconds, and converting would need a second call for nothing. Never
+/// compare it against a figure from another machine or another platform.
+///
+/// Read from the same call as the footprint, which is why it is here.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn cpu_time_units() -> Option<u64> {
+    rusage().map(|info| info.ri_user_time.saturating_add(info.ri_system_time))
+}
+
+#[cfg(target_os = "macos")]
+fn rusage() -> Option<libc::rusage_info_v2> {
     let pid = libc::c_int::try_from(std::process::id()).ok()?;
     let mut info = core::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
     // SAFETY: flavour V2 writes exactly one `rusage_info_v2` into the buffer, which is that
@@ -172,8 +191,7 @@ pub fn phys_footprint() -> Option<u64> {
     }
     // SAFETY: the call succeeded, so the structure was written; it was also zeroed, and
     // every field is a plain integer for which zero is a valid value.
-    let info = unsafe { info.assume_init() };
-    Some(info.ri_phys_footprint)
+    Some(unsafe { info.assume_init() })
 }
 
 /// The header word stored immediately before every returned pointer.
@@ -473,6 +491,21 @@ mod tests {
             "64 MiB touched moved the footprint from {before} to {during}"
         );
         drop(core::hint::black_box(held));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_time_advances_with_work() {
+        let before = cpu_time_units().expect("proc_pid_rusage answered");
+        let mut x = 0u64;
+        for i in 0..50_000_000u64 {
+            x = core::hint::black_box(x.wrapping_mul(31).wrapping_add(i));
+        }
+        let after = cpu_time_units().expect("proc_pid_rusage answered");
+        assert!(
+            after > before,
+            "work took no CPU time ({before} -> {after}, {x})"
+        );
     }
 
     #[test]

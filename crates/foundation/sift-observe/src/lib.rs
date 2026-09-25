@@ -81,6 +81,45 @@ pub fn footprint() -> Option<u64> {
     }
 }
 
+/// CPU time this process has spent, user plus system, **in the platform's own units** —
+/// timebase ticks on macOS, clock ticks on Linux.
+///
+/// Only ever divided by another reading from the same machine, which is what NFR-44's
+/// benchmark does: wall time on a shared machine charges a trial for every other process that
+/// ran beside it, and a 2% budget cannot be resolved through that.
+#[must_use]
+pub fn cpu_time() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        sift_alloc::cpu_time_units()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/self/stat")
+            .ok()
+            .as_deref()
+            .and_then(cpu_ticks_from_stat)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+/// `utime + stime` from a Linux `/proc/<pid>/stat` line.
+///
+/// Split after the **last** `)`, because the command name before it is in parentheses and
+/// may itself contain spaces and parentheses.
+#[must_use]
+pub fn cpu_ticks_from_stat(line: &str) -> Option<u64> {
+    let (_, rest) = line.rsplit_once(')')?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // `rest` starts at field 3 (state); utime and stime are fields 14 and 15.
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    utime.checked_add(stime)
+}
+
 /// The `Pss:` line of a Linux `smaps_rollup`, in bytes.
 ///
 /// Parsed rather than approximated from `statm`, which reports resident pages — exactly the
@@ -140,6 +179,20 @@ mod tests {
         assert_eq!(pss_from_smaps_rollup("Rss: 100 kB\n"), None);
         assert_eq!(pss_from_smaps_rollup("Pss: 100 pages\n"), None);
         assert_eq!(pss_from_smaps_rollup(""), None);
+    }
+
+    #[test]
+    fn cpu_ticks_survive_a_command_name_with_spaces_and_parentheses() {
+        let stat = "4242 (sift (soak) x) S 1 4242 4242 0 -1 4194304 100 0 0 0 \
+                    37 5 0 0 20 0 1 0 12345 0 0";
+        assert_eq!(cpu_ticks_from_stat(stat), Some(42));
+        assert_eq!(cpu_ticks_from_stat("4242 (short) S 1"), None);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn this_platform_reports_cpu_time() {
+        assert!(cpu_time().is_some());
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
