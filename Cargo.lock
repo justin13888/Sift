@@ -1678,6 +1678,7 @@ dependencies = [
 name = "sift-alloc"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "sift-subsystem",
 ]
 
@@ -1992,6 +1993,18 @@ dependencies = [
  "sift-mutations",
  "sift-presentation",
  "sift-provider",
+]
+
+[[package]]
+name = "sift-soak"
+version = "0.1.0"
+dependencies = [
+ "sift-alloc",
+ "sift-app",
+ "sift-foundation",
+ "sift-observe",
+ "sift-session",
+ "sift-subsystem",
 ]
 
 [[package]]

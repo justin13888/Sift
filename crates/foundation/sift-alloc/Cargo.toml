@@ -22,3 +22,8 @@ dbg_macro = "deny"
 
 [dependencies]
 sift-subsystem.workspace = true
+
+# D-16's footprint on macOS is a system call, and this is the one crate in the foundation
+# layer permitted to make one. Already in the vendored set; no new crate arrives with it.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

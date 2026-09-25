@@ -157,7 +157,9 @@ Two policies follow from D-47 and D-8 and are code-review rules of the same kind
 
 **Unsafe code is confined to four places and forbidden elsewhere**, from the first commit rather than as a
 later cleanup: the C ABI of [D-17](shell-boundary.md), the tagging global allocator of
-[D-24](../runtime/observability.md), the page-level encryption layer of
+[D-24](../runtime/observability.md) together with the process footprint and CPU-time reads that are
+measured against it (the system call macOS offers for both is the only route to the footprint the
+residual subtracts its counters from), the page-level encryption layer of
 [D-42](../storage/encryption.md), and the database engine's foreign-function interface under
 [D-21](../storage/data-model.md). Those four are unavoidable and each is named in its own document as
 carrying risk. Everywhere else — and in particular everywhere that parses attacker-controlled input —

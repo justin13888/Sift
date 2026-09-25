@@ -166,6 +166,15 @@ vocabulary. That is only true if the action registry is a real surface reachable
 harness and the registry are one thing, and the registry crosses the boundary under
 [D-56](../architecture/presentation-layer.md) like every other identified thing.
 
+**The soak harness stands on two of these.** It drives the assembled application through the surface
+the command-driven harness drives, over the replay harness's recorded corpus, so a 72-hour run needs no
+account and no network and measures nothing but Sift. Its slope gate is the derived value above, fitted
+once and reused for the per-subsystem decomposition, and it runs in the continuous tier and nowhere else.
+Its companion, NFR-44's overhead benchmark, has a pass, a failure, **and a no-verdict band**: a machine
+too noisy to resolve 2% says so rather than reporting whichever side of the line the noise landed on,
+which is what keeps it off the hosted scaffold for the same reason the soak is. The method is in
+[observability](../runtime/observability.md#nfr-45--soak-harness).
+
 **What it costs:** three harnesses in a phase that ships no features, on top of the two the roadmap
 already puts there. P0 is now most of the project's testing infrastructure and none of its product.
 

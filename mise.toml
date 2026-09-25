@@ -262,6 +262,29 @@ description = "NFR-26's scale corpus into an empty container. Args: --root DIR [
 # net.justinchung.sift, then the directory) is in crates/application/sift-corpus/src/main.rs.
 run = "cargo run -q --release -p sift-corpus --"
 
+# ── The soak (NFR-45) and the attribution overhead (NFR-44) ──────────────────
+#
+# Continuous-tier instruments under D-63, never a per-change check: a 72-hour job cannot gate a
+# change. Release builds, because both requirements are properties of release.
+
+[tasks.soak]
+description = "NFR-45 — soak the application under synthetic load (72 h by default). Args pass through."
+# e.g. mise run soak -- --for 30m --out /tmp/short.tsv
+run = "cargo run -q --release -p sift-soak --bin sift-soak -- run"
+
+[tasks.soak-report]
+description = "NFR-45 — judge a recorded series and decompose its slope by subsystem"
+# e.g. mise run soak-report -- sift-soak-1759000000.tsv
+run = "cargo run -q --release -p sift-soak --bin sift-soak -- report"
+
+[tasks.soak-overhead]
+description = "NFR-44 — the tagging allocator's overhead against the system allocator, in release"
+# Both binaries are built first: the benchmark runs the baseline beside itself.
+run = '''
+cargo build -q --release -p sift-soak --bins
+"${CARGO_TARGET_DIR:-target}/release/sift-soak" overhead "$@"
+'''
+
 # ── Live probes ───────────────────────────────────────────────────────────────
 #
 # These reach the real network. D-63 puts network-needing gates in the per-integration tier,

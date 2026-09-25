@@ -1,0 +1,40 @@
+[package]
+name = "sift-soak"
+description = "NFR-45's soak harness and NFR-44's attribution-overhead benchmark."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+# A harness prints its results — that is the whole of what it does — so, like D-65's harness,
+# it does not take the workspace's `print_stdout` deny.
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+todo = "warn"
+dbg_macro = "deny"
+
+# The soak itself, with D-24's tagging allocator installed — the configuration a release
+# build ships, which is the one NFR-12 is a property of.
+[[bin]]
+name = "sift-soak"
+path = "src/main.rs"
+
+# The same workload under the plain system allocator and nothing else. NFR-44's overhead is
+# the difference between the two, and a global allocator is chosen per binary, so the only
+# honest comparison is two binaries built from one source.
+[[bin]]
+name = "sift-soak-baseline"
+path = "src/baseline.rs"
+
+[dependencies]
+sift-alloc.workspace = true
+sift-app.workspace = true
+sift-foundation.workspace = true
+sift-observe.workspace = true
+sift-session.workspace = true
+sift-subsystem.workspace = true
