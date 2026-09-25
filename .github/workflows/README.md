@@ -34,7 +34,7 @@ and a threshold moves only by amendment — never in the run that is failing it.
 Two gates currently report a figure and block nothing, and that state is a roadmap
 obligation rather than a permanent option:
 
-- **NFR-26**'s perceptual diff, which needs a metric as well as a number — #15.
+- **NFR-26**'s perceptual diff, whose metric is recorded and whose number is not — #95.
 - **NFR-47**'s contrast threshold — #26.
 
 ## What is deliberately not here
