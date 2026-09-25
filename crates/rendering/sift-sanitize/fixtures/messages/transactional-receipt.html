@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Your receipt</title>
+<style>
+  .wrap { max-width:640px; margin:0 auto; font-family:-apple-system, "Segoe UI", Roboto, sans-serif; color:#1f2328; }
+  table.items { width:100%; border-collapse:collapse; }
+  table.items th, table.items td { border-bottom:1px solid #d0d7de; padding:8px; text-align:left; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <img src="cid:logo@example.test" alt="Example Books" width="120" height="32">
+  </header>
+  <main>
+    <h1>Thanks for your order</h1>
+    <p>Order <strong>#EB-20260917-4411</strong> was placed on <time datetime="2026-09-17T10:42:00Z">17 September 2026</time>.</p>
+    <h2>Items</h2>
+    <table class="items">
+      <caption>Items in order EB-20260917-4411</caption>
+      <thead>
+        <tr><th scope="col">Item</th><th scope="col">Qty</th><th scope="col" class="num">Price</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row" id="i1">The Art of Readable Mail</th><td headers="i1">1</td><td headers="i1" class="num">$24.00</td></tr>
+        <tr><th scope="row" id="i2">Parsing, Carefully (2nd ed.)</th><td headers="i2">2</td><td headers="i2" class="num">$78.00</td></tr>
+      </tbody>
+      <tfoot>
+        <tr><th scope="row" colspan="2">Subtotal</th><td class="num">$102.00</td></tr>
+        <tr><th scope="row" colspan="2">Shipping</th><td class="num">$0.00</td></tr>
+        <tr><th scope="row" colspan="2">Total</th><td class="num"><strong>$102.00</strong></td></tr>
+      </tfoot>
+    </table>
+    <h2>Shipping to</h2>
+    <address>A. Reader<br>10 Example Road<br>Sampletown, ST 00000</address>
+    <h3>Payment</h3>
+    <p>Charged to the card ending <code>4242</code>.</p>
+    <p><a href="https://orders.example.test/EB-20260917-4411">View or manage your order</a></p>
+  </main>
+  <footer>
+    <p><small>This is a service message about an order you placed. Questions? Reply to this message.</small></p>
+  </footer>
+</div>
+</body>
+</html>

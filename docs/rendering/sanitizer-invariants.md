@@ -191,7 +191,18 @@ I1 through I10 MUST hold for every input, verified in CI by five complementary m
    divergence is a candidate I8 failure. Run continuously over the whole
    [fidelity corpus](../product/reference-environment.md).
 4. **Fuzzing** of the MIME parser and the sanitizer, seeded with the real-world corpus.
-5. **Fixed regression vectors** — every published mutation-XSS payload as a permanent test case.
+5. **Fixed regression vectors** — every published mutation-XSS payload as a permanent test case. Each
+   is recorded with its source and its expected outcome, and is never removed or renumbered once admitted
+   ([D-115](../product/reference-environment.md#d-115--the-fidelity-corpus-admits-nothing-without-a-recorded-provenance)).
+   A vector is judged against the tree the engine's parsing algorithm builds from the output, never by
+   searching the output's bytes: a correctly neutralized payload often still contains its handler and
+   its script as escaped characters in an attribute value, which the engine renders rather than runs.
+
+The fidelity corpus is held to all ten invariants in its own right, not only to I8: every message in it
+is accepted rather than rejected by a bound, and loses no visible text, alternative text, heading level,
+table or list structure, direction or language to sanitization — NFR-50's survival requirement, verified
+here rather than in manual spot checks. One gap is known and open: direction and language declared only on
+the document root are lost when the tree builder's scaffolding is unwrapped (#91).
 
 Methods 2 and 3 share code with the [per-message debug view](../runtime/observability.md). Build it once,
 use it twice.

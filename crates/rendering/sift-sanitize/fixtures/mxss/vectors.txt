@@ -1,0 +1,223 @@
+# NFR-40 method 5: every published mutation-XSS payload, as a permanent regression vector.
+#
+# Format. A record is a header line, then exactly one payload line, taken byte for byte:
+#
+#   @ <id> | <expect> | <source>
+#   <payload>
+#
+# <id> is `mx-NNN`, assigned in order and never renumbered, reused or removed. A vector that
+# stops being interesting stays; that is what "permanent" means.
+# <expect> is `clean` (the sanitizer accepts it and nothing forbidden survives into the
+# re-parsed tree) or `rejected` (a bound in the limits register refuses it, and the message
+# falls back to the raw view).
+# <source> names the publication the shape comes from, the specification rule it exploits,
+# or the earlier vector it is a variant of. A published payload is recorded in its canonical
+# form, with the proof-of-concept call normalized to `alert(1)`; a variant says so.
+# Lines starting with `#`, and blank lines, are ignored between records.
+
+# ---- Raw-text and escapable raw-text elements: the serialize-then-reparse class ----
+
+@ mx-001 | clean | M. Kinugawa, mutation XSS in Google Search via noscript (2019)
+<noscript><p title="</noscript><img src=x onerror=alert(1)>">
+
+@ mx-002 | clean | M. Bentkowski, DOMPurify 2.0.0 bypass using mutation XSS (2019)
+<svg></p><style><a id="</style><img src=1 onerror=alert(1)>">
+
+@ mx-003 | clean | M. Bentkowski, namespace-confusion mutation XSS against DOMPurify 2.0.x (2020)
+<math><mtext><table><mglyph><style><!--</style><img title="--&gt;&lt;/mglyph&gt;&lt;img&Tab;src=1&Tab;onerror=alert(1)&gt;">
+
+@ mx-004 | clean | M. Bentkowski, mutation XSS via namespace confusion, DOMPurify < 2.0.17 bypass (2020)
+<form><math><mtext></form><form><mglyph><style></math><img src onerror=alert(1)>
+
+@ mx-005 | clean | M. Kinugawa, DOMPurify 2.2.2 bypass (2020)
+<math><mtext><h1><a><h6></a></h6><mglyph><svg><mtext><style><a title="</style><img src onerror=alert(1)>"></style></h1>
+
+@ mx-006 | clean | Bleach CVE-2020-6802, noscript raw-text mutation
+<noscript><style></noscript><img src=x onerror=alert(1)>
+
+@ mx-007 | clean | Bleach CVE-2020-6816, foreign-content style mutation
+<math></p><style><!--</style><img src/onerror=alert(1)>
+
+@ mx-008 | clean | Bleach CVE-2021-23980, svg title comment mutation
+<svg></p><title><!--</title><img src/onerror=alert(1)>-->
+
+@ mx-009 | clean | IcesFont, DOMPurify 3.1.x advisory, foreignObject table comment mutation (2024)
+<svg><a><foreignObject><a><table><a></table><style><!--</style></svg><a id="-><img src onerror=alert(1)>">
+
+@ mx-010 | clean | SVG paragraph breakout into style (the mx-002 shape with the paragraph inside the svg)
+<svg><p><style><g title="</style><img src=x onerror=alert(1)>">
+
+@ mx-011 | clean | Raw-text element breakout, style closed by a nested style tag (OWASP XSS filter evasion)
+<style><style/><img src=x onerror=alert(1)>
+
+@ mx-012 | clean | Raw-text element breakout, xmp (the mx-001 shape on another raw-text element)
+<xmp><p title="</xmp><img src=x onerror=alert(1)>">
+
+@ mx-013 | clean | Raw-text element breakout, listing (the mx-001 shape on another raw-text element)
+<listing><p title="</listing><img src=x onerror=alert(1)>">
+
+@ mx-014 | clean | Raw-text element breakout, noembed (the mx-001 shape on another raw-text element)
+<noembed><p title="</noembed><img src=x onerror=alert(1)>">
+
+@ mx-015 | clean | Raw-text element breakout, noframes (the mx-001 shape on another raw-text element)
+<noframes><p title="</noframes><img src=x onerror=alert(1)>">
+
+@ mx-016 | clean | Raw-text element breakout, iframe (the mx-001 shape on another raw-text element)
+<iframe><p title="</iframe><img src=x onerror=alert(1)>">
+
+@ mx-017 | clean | Escapable raw-text breakout, textarea (OWASP XSS filter evasion)
+<textarea><p title="</textarea><img src=x onerror=alert(1)>">
+
+@ mx-018 | clean | Escapable raw-text breakout, title (OWASP XSS filter evasion)
+<title><p title="</title><img src=x onerror=alert(1)>">
+
+@ mx-019 | clean | plaintext element swallowing the rest of the document (HTML parsing specification hazard)
+<plaintext><img src=x onerror=alert(1)>
+
+@ mx-020 | clean | Nested table, caption and foreignObject comment mutation (DOMPurify 2.x namespace-confusion family; Sift's first I8 regression set)
+<table><caption><svg><foreignobject><desc><table><tr><td><style><!--</style><img title="--></style><img src=x onerror=alert(1)>">
+
+@ mx-021 | clean | Style inside svg inside a paragraph (the mx-002 family; Sift's first I8 regression set)
+<p><svg><style><img src=x onerror=alert(1)></style></svg></p>
+
+@ mx-022 | clean | Style inside math, foreign-content raw-text confusion (M. Bentkowski, 2020)
+<math><style><img src=x onerror=alert(1)></style></math>
+
+@ mx-023 | clean | annotation-xml HTML integration point (M. Bentkowski, 2020)
+<math><annotation-xml encoding="text/html"><style><img src=x onerror=alert(1)></style></annotation-xml></math>
+
+@ mx-024 | clean | foreignObject integration point with a commented style (the mx-003 shape through an SVG integration point)
+<svg><foreignobject><style><!--</style><p id="--><img src=x onerror=alert(1)>"></foreignobject></svg>
+
+@ mx-025 | clean | select and template reparenting (the mx-003 comment shape across select's content model)
+<select><template><style><!--</style><a rel="--></template></select><img src=x onerror=alert(1)>">
+
+@ mx-026 | clean | template content and raw-text style (template's separate content fragment, HTML parsing specification)
+<template><style></template><img src=x onerror=alert(1)></style>
+
+@ mx-027 | clean | noscript inside template (the mx-001 shape inside template content)
+<template><noscript><p title="</noscript><img src=x onerror=alert(1)>"></noscript></template>
+
+# ---- Comments, processing instructions and character data ----
+
+@ mx-028 | clean | Abrupt comment close `<!-->` (HTML parsing specification error abrupt-closing-of-empty-comment)
+<!--><img src=x onerror=alert(1)>-->
+
+@ mx-029 | clean | Abrupt comment close `<!--->` (HTML parsing specification error abrupt-closing-of-empty-comment)
+<!---><img src=x onerror=alert(1)>-->
+
+@ mx-030 | clean | Incorrectly closed comment `--!>` (HTML parsing specification error incorrectly-closed-comment)
+<!-- --!><img src=x onerror=alert(1)> -->
+
+@ mx-031 | clean | Processing instruction in foreign content (DOMPurify 3.1.x processing-instruction advisories, 2024)
+<svg><?xml-stylesheet ><img src=x onerror=alert(1)>?></svg>
+
+@ mx-032 | clean | CDATA section in foreign content (HTML parsing specification, cdata-in-html-content)
+<svg><![CDATA[><img src=x onerror=alert(1)>]]></svg>
+
+@ mx-033 | clean | CDATA section in HTML content, parsed as a bogus comment (HTML parsing specification)
+<![CDATA[><img src=x onerror=alert(1)>]]>
+
+# ---- innerHTML mutation classes (Heiderich et al., CCS 2013) ----
+
+@ mx-034 | clean | M. Heiderich et al., mXSS Attacks, backtick attribute mutation (CCS 2013)
+<img src="test.jpg" alt="``onload=alert(1)">
+
+@ mx-035 | clean | M. Heiderich et al., mXSS Attacks, CSS escape decoding mutation (CCS 2013)
+<p style="font-family:'\22\3bx:expression(alert(1))/*'">x</p>
+
+@ mx-036 | clean | M. Heiderich et al., mXSS Attacks, xmlns attribute mutation (CCS 2013)
+<article xmlns="urn:img src=x onerror=alert(1)//">123</article>
+
+@ mx-037 | clean | M. Heiderich et al., mXSS Attacks, listing entity decoding mutation (CCS 2013)
+<listing>&lt;img src=x onerror=alert(1)&gt;</listing>
+
+@ mx-038 | clean | M. Heiderich et al., mXSS Attacks, CSS expression through a style element (CCS 2013)
+<style>p { width: expression(alert(1)); }</style><p>x</p>
+
+# ---- Script-bearing URLs, obfuscated in ways the URL parser undoes ----
+
+@ mx-039 | clean | Named character reference for the scheme colon (OWASP XSS filter evasion)
+<a href="javascript&colon;alert(1)">x</a>
+
+@ mx-040 | clean | Decimal character reference inside the scheme (OWASP XSS filter evasion)
+<a href="java&#115;cript:alert(1)">x</a>
+
+@ mx-041 | clean | Fully character-referenced scheme (OWASP XSS filter evasion)
+<a href="&#106;&#97;&#118;&#97;&#115;&#99;&#114;&#105;&#112;&#116;&#58;alert(1)">x</a>
+
+@ mx-042 | clean | Literal tab inside the scheme, stripped by the URL parser (OWASP XSS filter evasion)
+<a href="jav	ascript:alert(1)">x</a>
+
+@ mx-043 | clean | Leading space and control character before the scheme (OWASP XSS filter evasion)
+<a href=" &#14;javascript:alert(1)">x</a>
+
+@ mx-044 | clean | Newline reference inside the scheme, stripped by the URL parser (OWASP XSS filter evasion)
+<a href="javascript&NewLine;:alert(1)">x</a>
+
+@ mx-045 | clean | Base64 data URL carrying a document (OWASP XSS filter evasion)
+<a href="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">x</a>
+
+@ mx-046 | clean | vbscript scheme (OWASP XSS filter evasion)
+<a href="vbscript:msgbox(1)">x</a>
+
+# ---- Foreign content carrying links and animation ----
+
+@ mx-047 | clean | SVG xlink:href script URL (PortSwigger XSS cheat sheet)
+<svg><a xlink:href="javascript:alert(1)"><text x="0" y="20">x</text></a></svg>
+
+@ mx-048 | clean | SVG animate rewriting href to a script URL (PortSwigger XSS cheat sheet)
+<svg><a><animate attributeName="href" values="javascript:alert(1)"/><text x="0" y="20">x</text></a></svg>
+
+@ mx-049 | clean | SVG set installing an event handler (PortSwigger XSS cheat sheet)
+<svg><set attributeName="onmouseover" to="alert(1)"/></svg>
+
+@ mx-050 | clean | MathML href on an arbitrary element (G. Heyes, PortSwigger XSS cheat sheet)
+<math href="javascript:alert(1)">x</math>
+
+@ mx-051 | clean | MathML xlink:href with a data URL (G. Heyes, PortSwigger XSS cheat sheet)
+<math><mi xlink:href="data:x,<script>alert(1)</script>">x</mi></math>
+
+@ mx-052 | clean | SVG image with an external href (I2 regression shape)
+<svg><image href="https://evil.example.test/p.png"/></svg>
+
+# ---- Classic element and attribute vectors (PortSwigger XSS cheat sheet) ----
+
+@ mx-053 | clean | Unquoted handler with a trailing slash-slash (PortSwigger XSS cheat sheet)
+<img src="x" alt="" onerror=alert(1) //>
+
+@ mx-054 | clean | iframe srcdoc carrying an escaped document (PortSwigger XSS cheat sheet)
+<iframe srcdoc="&lt;img src=x onerror=alert(1)&gt;"></iframe>
+
+@ mx-055 | clean | formaction script URL (PortSwigger XSS cheat sheet)
+<form><button formaction="javascript:alert(1)">x</button></form>
+
+@ mx-056 | clean | details ontoggle, fires without interaction (PortSwigger XSS cheat sheet)
+<details open ontoggle=alert(1)><summary>x</summary></details>
+
+@ mx-057 | clean | object data script URL (PortSwigger XSS cheat sheet)
+<object data="javascript:alert(1)"></object>
+
+@ mx-058 | clean | embed src script URL (PortSwigger XSS cheat sheet)
+<embed src="javascript:alert(1)">
+
+@ mx-059 | clean | base href hijacking every relative URL (PortSwigger XSS cheat sheet)
+<base href="javascript:/"><a href="/alert(1)">x</a>
+
+@ mx-060 | clean | meta refresh to a script URL (PortSwigger XSS cheat sheet)
+<meta http-equiv="refresh" content="0;url=javascript:alert(1)">
+
+@ mx-061 | clean | link stylesheet from an external origin (I2 regression shape)
+<link rel="stylesheet" href="https://evil.example.test/x.css">
+
+@ mx-062 | clean | srcset carrying an external candidate (I2 regression shape)
+<img srcset="https://evil.example.test/a.png 1x, https://evil.example.test/b.png 2x" alt="x">
+
+@ mx-063 | clean | background URL in an inline style (I2 regression shape)
+<div style="background:url(https://evil.example.test/p.png)">x</div>
+
+@ mx-064 | clean | @import in a style element (I2 regression shape)
+<style>@import url(https://evil.example.test/x.css);</style><p>x</p>
+
+@ mx-065 | clean | input autofocus onfocus, fires without interaction (PortSwigger XSS cheat sheet)
+<input autofocus onfocus=alert(1)>
