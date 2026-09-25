@@ -35,9 +35,9 @@ ignore = []
 # Gate 2 — Licences.
 #
 # "Every vendored crate's licence is checked against an allowlist." Q-17 records why the
-# bar is where it is: a single copyleft crate defeats the App Store channel exactly as a
-# copyleft filter list would, and with Q-16's contributor agreement fully in place — no
-# agreement can relicense somebody else's work.
+# bar is where it is: a single crate whose licence reaches the whole binary defeats the App
+# Store channel exactly as a copyleft filter list would, and with Q-16's contributor agreement
+# fully in place — no agreement can relicense somebody else's work.
 #
 # Sift's own crates are AGPL-3.0-only and are excluded by `private`, since they are
 # `publish = false` and are the copyright the relicensing question is about.

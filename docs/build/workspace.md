@@ -201,25 +201,40 @@ is the property that collides with the App Store's terms, and "copyleft" is the 
   family a problem for the store. **Admitting it is load-bearing:** [D-10](../rendering/content-blocking.md)
   names the filter engine, and that engine is MPL-2.0, so a stricter list would have overruled a decision
   the specification already made.
-- **Rejected — GPL, LGPL and AGPL in every version.** The GPL family's terms reach the whole binary, and
-  LGPL's relinking requirement cannot be honoured by a statically linked, sandboxed, store-signed
-  application. Sift's own crates are AGPL-3.0 and are outside the gate, because they are the copyright
+- **Rejected — GPL, LGPL and AGPL in every version, for crates.** The GPL family's terms reach the whole
+  binary, and LGPL's relinking requirement cannot be honoured by a statically linked, sandboxed,
+  store-signed application. Native libraries the platform supplies are a separate case, covered below.
+  Sift's own crates are AGPL-3.0 and are outside the gate, because they are the copyright
   [Q-16](../open-questions.md) is about rather than somebody else's.
 - **A crate offered under a choice of licences passes when any one of them is admitted**, since Sift takes
   it under that one.
 
 **The bar is the strictest channel's, applied to every build.** [D-33](../product/platforms-and-distribution.md)
 names three channels, and the App Store's terms are the strictest of them; holding every build to that
-bar means no channel decision ever waits on re-auditing the tree, and every build carries the same crates.
+bar means no channel decision ever waits on re-auditing the tree, and every channel's build of one
+platform carries the same crates. The crate graph does differ between platforms, because each platform's
+shell and its platform bindings are that platform's alone, and the gate holds both graphs to the same bar.
 Bundled artefacts differ by channel under [D-112](../product/platforms-and-distribution.md); linked code
 does not, because one source tree per platform is simpler to reason about than a crate graph that
 varies by channel, and the permissive-plus-MPL set has so far cost nothing to hold everywhere.
 
 **A crate the gate rejects is replaced or not taken.** The allowlist does not grow to fit a dependency:
 adding a licence to it is an amendment to this section, argued here against the test above, and the
-gate's configuration follows this document rather than the other way round. The reasoning for each
-direct dependency, its licence included, is recorded beside the reviewed edge list the third gate keeps,
-which is where the MPL-2.0 case was first met and decided.
+gate's configuration follows this document rather than the other way round. The notes kept beside the
+reviewed edge list the third gate keeps record the reasoning for the crates whose review had a
+non-obvious answer, licence included. The MPL-2.0 case was first met there, when the filter engine
+tripped the gate, and was decided in the gate's configuration. This section now states that decision as
+policy.
+
+**The gate's scope is the crate graph compiled into Sift's binary, and native libraries the platform
+supplies are outside it.** The Linux shell links GTK4, libadwaita and WebKitGTK, which are LGPL. They are
+shared libraries supplied by the pinned Flatpak runtime ([D-15](../product/platforms-and-distribution.md)),
+and are never vendored or linked statically. The LGPL rejection above rests on relinking. A shared
+library the runtime supplies can be replaced without relinking Sift, so the objection does not apply,
+and none of these libraries reaches a macOS channel. The same reasoning covers the system frameworks the
+macOS shell links. The Rust bindings to these libraries are crates, and the gate checks them like any
+other. A native library that Sift itself vendors, builds, or links statically is not covered by this
+exclusion. It would have to pass the test above like a crate.
 
 ## Related
 
