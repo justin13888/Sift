@@ -212,9 +212,24 @@ mod macos {
         else {
             return Ok(None);
         };
-        SecKeychain::open(path)
-            .map(Some)
-            .map_err(|e| StoreError::Unavailable(format!("SIFT_KEYCHAIN: {e}")))
+        open_named(path).map(Some)
+    }
+
+    /// Opens the keychain file at `path`, refusing one that does not exist.
+    ///
+    /// `SecKeychainOpen` does not check the file: it hands back a reference to a keychain
+    /// that is not there, lookups through it then fail as not-found, and a delete through it
+    /// succeeds having removed nothing. So a mistyped `SIFT_KEYCHAIN` would read as an
+    /// account with no credentials rather than as the refusal the doc comment on `named`
+    /// promises. The existence check is what makes that promise true.
+    pub(super) fn open_named(path: &std::path::Path) -> Result<SecKeychain, StoreError> {
+        if !path.is_file() {
+            return Err(StoreError::Unavailable(format!(
+                "SIFT_KEYCHAIN: no keychain file at {}",
+                path.display()
+            )));
+        }
+        SecKeychain::open(path).map_err(|e| StoreError::Unavailable(format!("SIFT_KEYCHAIN: {e}")))
     }
 
     impl CredentialStore for Platform {
@@ -388,6 +403,22 @@ mod tests {
             store.read(account, Item::Refresh),
             Err(StoreError::NotFound)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_named_keychain_that_does_not_exist_is_unavailable_rather_than_empty() {
+        // A mistyped SIFT_KEYCHAIN must refuse, not read back as NotFound: the latter makes
+        // an account look credential-less and makes a delete succeed having removed nothing.
+        let missing = std::env::temp_dir().join(format!(
+            "sift-no-such-keychain-{}.keychain-db",
+            std::process::id()
+        ));
+        assert!(!missing.exists());
+        assert!(matches!(
+            macos::open_named(&missing),
+            Err(StoreError::Unavailable(_))
+        ));
     }
 
     #[cfg(not(target_os = "macos"))]
