@@ -14,8 +14,10 @@
 #     change in the host — but a baseline taken here is a baseline of an image, not of a
 #     machine, and regenerating one is exactly the operation R-13 warns can absorb a regression.
 #   - **No dedicated host.** No soak (NFR-45 needs 72 hours; a hosted job is capped far below
-#     that), no footprint figures (NFR-8, NFR-9, NFR-12 are measured on the reference rig, and a
-#     shared virtual machine is not it), and no Linux leg beyond what per-change already runs.
+#     that), no footprint figures that count as the rig's (NFR-8, NFR-9, NFR-12 are measured on
+#     the reference rig, and a shared virtual machine is not it — the `footprint` job below
+#     records an image's figures as evidence, and gates nothing), and no Linux leg beyond what
+#     per-change already runs.
 #   - **The three real-session gates** — Keychain, entitlements and sandbox on both channels,
 #     login-item residency — still need a signed build in a real macOS session, which a runner
 #     image is not. They stay absent rather than being run here and believed.
@@ -96,6 +98,41 @@ jobs:
         run: mise run test-fault
       - name: D-61 — the shell links this architecture's core
         run: mise run macos
+
+  # Q-12's footprint protocol, per architecture (D-46). The header above says a shared virtual
+  # machine is not the reference rig, and that stands: these figures are **an image's**, recorded
+  # as evidence beside the rig's and never substituted for them. What this job is for is the
+  # architecture nobody has a machine for — Intel (#81) — and a series over time that shows when
+  # an image change, rather than a Sift change, moved the numbers (R-13). It gates nothing: a
+  # figure is uploaded and summarised, and only a run that could not measure fails.
+  footprint:
+    name: Q-12 footprint ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "macos intel",         os: macos-15-intel, arch: x86_64 }
+          - { name: "macos apple silicon", os: macos-15,       arch: arm64 }
+    steps:
+      - name: D-46 — on ${{ matrix.arch }}, natively, or not at all
+        run: |
+          machine="$(uname -m)"
+          translated="$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)"
+          if [ "$machine" != "${{ matrix.arch }}" ] || [ "$translated" != "0" ]; then
+            echo "::error::expected native ${{ matrix.arch }}, got $machine (translated=$translated)"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: footprint-${{ matrix.arch }}
+      - run: mise run measure-footprint -- --out footprint-${{ matrix.arch }}.tsv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: footprint-${{ matrix.arch }}
+          path: footprint-${{ matrix.arch }}.tsv
 
   # The schema-diff job (docs/build/verification.md): it depends on a third party's document at
   # a third party's address, so it runs on a cadence rather than per change, and an unreachable
