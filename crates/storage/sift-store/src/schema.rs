@@ -34,7 +34,9 @@
 use rusqlite::{Connection, Result as SqlResult};
 
 /// The schema version this build writes.
-pub const CURRENT_VERSION: u32 = 1;
+///
+/// Version 2 is [`STORE_MIGRATION_V2`]: the two lookups ingest makes per message, indexed.
+pub const CURRENT_VERSION: u32 = 2;
 
 /// The oldest version this build can migrate forward from — D-62's migration floor.
 ///
@@ -328,10 +330,62 @@ CREATE TABLE overlay (
 CREATE INDEX overlay_message ON overlay(message_id);
 ";
 
+/// Version 2 of the store: the lookups ingest makes **once per message**, indexed.
+///
+/// Sync resolves every change in a delta page by provider identifier — is this message held,
+/// which local identity is it — and every threaded envelope by the provider's conversation
+/// identifier. Version 1 indexed neither, so each lookup scanned the whole table beneath the
+/// page-decryption layer, and a first sync cost the square of the mailbox: a backfill of ten
+/// thousand messages took minutes and one of the reference environment's 50,000-message inbox
+/// did not finish. The scale corpus found it, by being written through that path.
+///
+/// Partial, because a message recorded as present before its envelope arrived may have no
+/// conversation identifier, and neither column is ever looked up by its absence. **Not
+/// unique**: that would be a claim about provider identifiers this layer has no standing to
+/// make, and a violation would turn a delta page into a refused transaction.
+pub const STORE_MIGRATION_V2: &str = r"
+CREATE INDEX message_remote ON message(remote_id) WHERE remote_id IS NOT NULL;
+CREATE INDEX thread_remote ON thread(remote_thread_id) WHERE remote_thread_id IS NOT NULL;
+";
+
 /// Apply a schema to a fresh connection.
 pub fn create(conn: &Connection, sql: &str, version: u32) -> SqlResult<()> {
     conn.execute_batch(sql)?;
     conn.pragma_update(None, "user_version", version)?;
+    Ok(())
+}
+
+/// What one version adds to each half, in D-74's order: `(journal, store)`.
+const fn step(version: u32) -> (&'static str, &'static str) {
+    match version {
+        2 => ("", STORE_MIGRATION_V2),
+        _ => ("", ""),
+    }
+}
+
+/// Carry both halves forward from `from` to [`CURRENT_VERSION`], one version at a time.
+///
+/// Each version is one transaction per half, and the half's version is stamped **inside** that
+/// transaction, so a half is never left with a version its contents do not match. **Journal
+/// first, store second** — D-74's order for everything written to the pair. A crash between the
+/// two leaves the halves disagreeing, which the next open refuses rather than guesses at; that
+/// is D-74's rule, and the window is the length of one index build.
+///
+/// A fresh account runs this too, from version 1, so there is one path to the current schema
+/// rather than a creation script and a migration chain that could drift apart.
+///
+/// # Errors
+/// The engine refused a statement. The half that failed is left at the version it had.
+pub fn migrate(store: &Connection, journal: &Connection, from: u32) -> SqlResult<()> {
+    for version in from.saturating_add(1)..=CURRENT_VERSION {
+        let (journal_sql, store_sql) = step(version);
+        for (conn, sql) in [(journal, journal_sql), (store, store_sql)] {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(sql)?;
+            tx.pragma_update(None, "user_version", version)?;
+            tx.commit()?;
+        }
+    }
     Ok(())
 }
 

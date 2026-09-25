@@ -92,20 +92,20 @@ impl Account {
 
         // A fresh account is both halves at zero. One at zero and the other not is a
         // half-created account, and it is a disagreement like any other.
+        //
+        // Created at version 1 and carried forward by the same chain an existing account
+        // takes, so a fresh account and a migrated one cannot differ.
         if store_version == 0 && journal_version == 0 {
-            schema::create(&store, STORE_SCHEMA_V1, schema::CURRENT_VERSION)?;
-            schema::create(&journal, JOURNAL_SCHEMA_V1, schema::CURRENT_VERSION)?;
+            schema::create(&store, STORE_SCHEMA_V1, 1)?;
+            schema::create(&journal, JOURNAL_SCHEMA_V1, 1)?;
+            schema::migrate(&store, &journal, 1)?;
             return Ok(Self { store, journal, id });
         }
 
         match admit_pair(store_version, journal_version)? {
             Migration::None => {}
-            Migration::Forward { from } => {
-                // Forward-only, ordered, and both halves together. There is nothing to do at
-                // version 1; the arm exists so that the first real migration has a place
-                // rather than a redesign.
-                let _ = from;
-            }
+            // Forward-only, ordered, and both halves together.
+            Migration::Forward { from } => schema::migrate(&store, &journal, from)?,
         }
         Ok(Self { store, journal, id })
     }
@@ -301,7 +301,7 @@ mod tests {
         // Migrate one half and not the other, which is what a crash mid-migration leaves.
         let store = Connection::open(&p.store).expect("open store");
         store
-            .pragma_update(None, "user_version", 2i64)
+            .pragma_update(None, "user_version", i64::from(schema::CURRENT_VERSION) + 1)
             .expect("bump");
         drop(store);
 
@@ -409,5 +409,120 @@ mod tests {
             )
             .expect("query");
         assert_eq!(pending, 1);
+    }
+
+    /// The query plan SQLite chooses for `sql`, flattened.
+    fn plan(conn: &Connection, sql: &str) -> String {
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("explain");
+        stmt.query_map(["x"], |r| r.get::<_, String>(3))
+            .expect("plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows")
+            .join("; ")
+    }
+
+    #[test]
+    fn the_lookups_ingest_makes_per_message_are_indexed() {
+        // Sync resolves every change in a page by provider identifier and every threaded
+        // envelope by conversation identifier. Unindexed, each was a scan of the whole table
+        // beneath the page-decryption layer, and a first sync cost the square of the mailbox.
+        // These are the statements ingest issues, verbatim.
+        let s = Scratch::new("lookups");
+        let a = Account::open(&s.paths(), AccountId::from_u128(1)).expect("open");
+        for (sql, index) in [
+            (
+                "SELECT id FROM message WHERE remote_id = ?1",
+                "message_remote",
+            ),
+            (
+                "SELECT 1 FROM message WHERE remote_id = ?1",
+                "message_remote",
+            ),
+            (
+                "SELECT id FROM thread WHERE remote_thread_id = ?1",
+                "thread_remote",
+            ),
+        ] {
+            let chosen = plan(&a.store, sql);
+            assert!(
+                chosen.contains(index),
+                "`{sql}` does not use {index}: {chosen}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_version_one_account_is_carried_forward_with_its_mail() {
+        // The migration fixture packaging.md asks for: an account exactly as a version-1
+        // build wrote it, holding a message, opened by this build.
+        let s = Scratch::new("v1");
+        let p = s.paths();
+        {
+            let store = Connection::open(&p.store).expect("store");
+            let journal = Connection::open(&p.journal).expect("journal");
+            schema::create(&store, STORE_SCHEMA_V1, 1).expect("v1 store");
+            schema::create(&journal, JOURNAL_SCHEMA_V1, 1).expect("v1 journal");
+            store
+                .execute(
+                    "INSERT INTO message (id, remote_id, fallback_digest, digest_rule_version,
+                                          received_at_millis, sender, recipients, provenance)
+                     VALUES (X'01', 'kept', X'00', 1, 0, '', '', 'Delivered')",
+                    [],
+                )
+                .expect("a version-1 message");
+        }
+
+        let a = Account::open(&p, AccountId::from_u128(1)).expect("migrate");
+        for (name, conn) in [("store", &a.store), ("journal", &a.journal)] {
+            assert_eq!(
+                schema::version_of(conn).expect("version"),
+                schema::CURRENT_VERSION,
+                "the {name} was not carried forward"
+            );
+        }
+        let kept: i64 = a
+            .store
+            .query_row(
+                "SELECT count(*) FROM message WHERE remote_id = 'kept'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(kept, 1, "the migration lost mail");
+        assert!(
+            plan(&a.store, "SELECT id FROM message WHERE remote_id = ?1")
+                .contains("message_remote")
+        );
+
+        // And it is idempotent across a reopen: nothing runs twice.
+        drop(a);
+        Account::open(&p, AccountId::from_u128(1)).expect("reopen at the current version");
+    }
+
+    #[test]
+    fn a_fresh_account_and_a_migrated_one_have_the_same_schema() {
+        let objects = |conn: &Connection| -> Vec<String> {
+            let mut stmt = conn
+                .prepare("SELECT type || ' ' || name FROM sqlite_master ORDER BY 1")
+                .expect("prepare");
+            stmt.query_map([], |r| r.get(0))
+                .expect("query")
+                .collect::<Result<_, _>>()
+                .expect("rows")
+        };
+        let fresh = Scratch::new("fresh-schema");
+        let migrated = Scratch::new("migrated-schema");
+        {
+            let store = Connection::open(&migrated.paths().store).expect("store");
+            let journal = Connection::open(&migrated.paths().journal).expect("journal");
+            schema::create(&store, STORE_SCHEMA_V1, 1).expect("v1 store");
+            schema::create(&journal, JOURNAL_SCHEMA_V1, 1).expect("v1 journal");
+        }
+        let f = Account::open(&fresh.paths(), AccountId::from_u128(1)).expect("fresh");
+        let m = Account::open(&migrated.paths(), AccountId::from_u128(1)).expect("migrated");
+        assert_eq!(objects(&f.store), objects(&m.store));
+        assert_eq!(objects(&f.journal), objects(&m.journal));
     }
 }
