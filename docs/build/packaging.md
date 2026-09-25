@@ -83,6 +83,16 @@ store, which under D-32's own rules means removal and resync rather than corrupt
 amending this document, exactly as moving a requirement between phases is amending the
 [roadmap](../product/roadmap.md).
 
+**The floor's value: schema version 1.** The floor at first release is the first schema version
+[data model](../storage/data-model.md) defines, so every store any released build has written is at or
+above it and the chain it obliges is, today, empty. That is trivially correct, and it is recorded here
+rather than left to be read out of a build so that the value has an owner: until this paragraph changes,
+no build may refuse a store for being below the floor, and no migration step may be deleted. The first
+*advance* is an amendment to this paragraph that states the new value, the evidence that no build
+writing a version below it is still plausibly installed on any channel, and that the drain-or-export
+path D-32's removal-and-resync requires exists for the users it will strand anyway. A build whose floor
+disagrees with this paragraph is a defect in whichever of the two moved without the other.
+
 **What it costs:** a migration chain that is longer than any single release needs, kept compiling and
 kept tested against fixtures of every schema version above the floor. That fixture set is a
 [verification](verification.md) obligation, not a nice-to-have: an untested migration is worse than an
