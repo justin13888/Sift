@@ -288,6 +288,10 @@ quotes obtained.
 | **Lab-verified assessment** (the provider's middle tier: a scan the applicant runs, validated by an authorised lab) | Of the order of US$500–2,000 at the provider's preferred lab; other authorised labs list higher | The same, because the assessment repeats |
 | **Lab-conducted assessment** (the top tier: a penetration test run by the lab) | Of the order of US$4,500–8,000 or more | The same |
 
+**Sift does not choose the row.** The provider decides during review both whether an assessment applies
+and, if one does, which tier it assigns; the applicant cannot elect the cheaper tier. Every row is
+therefore a branch the budget must be able to absorb, and the top tier is its ceiling.
+
 The historical figure that made this "expensive" — tens of thousands a year for a bespoke audit — predates
 the provider's standardised assessment framework and is not the current price. The residual cost that no
 branch avoids is **engineering time**: a reviewer's questions, a re-recorded video, and a reverification
@@ -345,8 +349,11 @@ list. The weekly re-consent above is accepted as the cost; none of the hundred-u
 application is filed and nothing is paid.
 
 **General availability: the assessment decision is deferred to it.** Before a build is offered to users
-who are not on a test-user list, verification is filed, and the budget is the table above: the
-no-assessment branch if the provider accepts the no-server reading, the middle tier if not. Because the
+who are not on a test-user list, verification is filed, and the budget is the whole table above: nothing
+paid to the provider if it accepts the no-server reading, and otherwise whichever tier it assigns — of the
+order of US$500–2,000 a year at the middle tier, and US$4,500–8,000 or more a year at the top. The
+top-tier figure is the one the general-availability budget must be able to carry, because the provider,
+not Sift, selects the tier. Because the
 application takes one to three months, the filing date is set from the intended release date rather than
 after it.
 
