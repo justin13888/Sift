@@ -73,12 +73,14 @@ allow = [
     # This is load-bearing rather than incidental: **D-10 names the filter engine** — "the
     # one powering a shipping browser's native blocker" — and that engine is MPL-2.0. A list
     # that rejected it would have made a decision the specification already made, by
-    # accident, in a file nobody reads as normative. See #26.
+    # accident, in a file nobody reads as normative. docs/build/workspace.md's licence
+    # allowlist is the normative statement of this list (Q-21's answer, #14).
     "MPL-2.0",
 ]
 # Still deliberately absent: LGPL, GPL, AGPL. LGPL's relinking requirement and the GPL
 # family's terms are the ones that genuinely collide with the store's, and admitting one is
-# a decision on #26 (Q-21) rather than a change to this file alone.
+# an amendment to docs/build/workspace.md's licence allowlist (Q-21's answer) rather than a
+# change to this file alone.
 confidence-threshold = 0.9
 private = { ignore = true }
 

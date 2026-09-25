@@ -120,7 +120,7 @@ contestable. A decision without its counter-argument is an assertion.
 **Open questions are not resolved by deletion.** Answering one means writing the answer into its owning
 document and striking the entry in [open questions](open-questions.md) with a pointer.
 
-**The design is settled *pending* nine open questions, three of which are load-bearing. That is a
+**The design is settled *pending* eight open questions, three of which are load-bearing. That is a
 weaker claim than settled, and the distinction between the two groups is the useful part.**
 
 The two that can still move the design: Q-10 leaves every number in this set unfalsifiable until the
@@ -136,16 +136,21 @@ the memory one. Q-15 was the third of this kind until it was answered: D-27's re
 on viewport width while the transform built from it did not, and the answer — a body view pinned to the
 width the cascade resolves at — keeps D-27 whole rather than narrowing it.
 
-The remaining six are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
+The remaining five are bounded. Q-9 needs a number per provider and now has a rule that makes its absence
 legal in the meantime. Q-13 asks whether one feature works on one platform. Q-20 asks
 whether one guarantee survives one sandbox, and Q-22 asks for the metric and threshold
 [D-64](build/verification.md) requires of every gate and this one lacks.
 
-One of the six is bounded in design terms and urgent in every other sense, because it cannot be
+One of the five is bounded in design terms and urgent in every other sense, because it cannot be
 revisited. Q-16 asks what licence the App Store channel requires of Sift's own code; its deadline is the
-first external contribution, and shipping is what spends it. **Q-21 is the same channel reached from the
-dependency tree** — the vendored crates, which neither a contributor agreement nor a bundled-artefact
-audit reaches, and where one copyleft crate defeats the channel.
+first external contribution, and shipping is what spends it.
+
+Q-21 — the same channel reached from the dependency tree, the vendored crates that neither a contributor
+agreement nor a bundled-artefact audit reaches — is now answered in
+[workspace](build/workspace.md#the-licence-allowlist): the tree is audited on every change rather than
+before a release, against an allowlist that admits permissive licences and MPL-2.0 and rejects the GPL
+family, held to the App Store's bar in every build. What it leaves behind is Q-16 alone, since no answer
+about somebody else's code reaches Sift's own.
 
 Q-17 — the licences of the filter lists, the sender-infrastructure list and the fonts Sift bundles but
 does not own — was Q-16's deadline reached from outside, and is now

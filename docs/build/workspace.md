@@ -163,8 +163,8 @@ with no mechanism is not one.**
    blocks the build. It is not muted; it is either upgraded, replaced, or — where neither is possible —
    recorded as an accepted exception with an expiry date, in this repository, where it is visible.
 2. **Licences.** Every vendored crate's licence is checked against an allowlist. This is not
-   housekeeping: **a single copyleft crate defeats the App Store channel exactly as
-   [Q-17](../open-questions.md)'s copyleft filter list would**, with [Q-16](../open-questions.md)'s
+   housekeeping: **a single crate whose licence reaches the whole binary defeats the App Store channel
+   exactly as [Q-17](../open-questions.md)'s copyleft filter list would**, with [Q-16](../open-questions.md)'s
    contributor agreement fully in place, because no agreement can relicense somebody else's work. Q-16
    is about Sift's own copyright and Q-17 about the artefacts Sift bundles; the dependency tree is a
    third population, two orders of magnitude larger than either, and [R-12](../open-questions.md) stops
@@ -179,6 +179,45 @@ with no mechanism is not one.**
 **A crate on a hostile-input path is held to the unsafe rule above.** Sift refusing unsafe code
 everywhere but four places buys nothing if a MIME or CSS dependency is a thin wrapper over unsafe
 parsing, so that is a question the third gate asks rather than one the policy assumes away.
+
+### The licence allowlist
+
+This answers [Q-21](../open-questions.md), which asked whether the dependency tree would be audited before
+the first release or would make the channel decision by whatever happened to be vendored. **Neither: the
+tree is audited on every change, from the first commit**, because the licence gate runs in the same sweep
+as every other gate and fails the build rather than warning. There is no release-time audit to schedule,
+because there is no moment at which an unaudited crate is in the tree.
+
+**The test a licence has to pass is whether it constrains the terms of the work it is linked into.** That
+is the property that collides with the App Store's terms, and "copyleft" is the wrong name for it:
+
+- **Admitted — permissive licences:** Apache-2.0 (with or without the LLVM exception), MIT, MIT-0,
+  BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unicode-3.0, CC0-1.0 and the Unlicense. They attach notice
+  obligations and nothing else.
+- **Admitted — MPL-2.0.** Its copyleft is per file: a larger work containing it may be distributed under
+  any terms, provided the covered files' source stays available, and Sift's sources and its
+  dependencies' are public already, so the obligation is met rather than newly incurred. It has no
+  anti-circumvention clause and no installation-information requirement, which are what make the GPL
+  family a problem for the store. **Admitting it is load-bearing:** [D-10](../rendering/content-blocking.md)
+  names the filter engine, and that engine is MPL-2.0, so a stricter list would have overruled a decision
+  the specification already made.
+- **Rejected — GPL, LGPL and AGPL in every version.** The GPL family's terms reach the whole binary, and
+  LGPL's relinking requirement cannot be honoured by a statically linked, sandboxed, store-signed
+  application. Sift's own crates are AGPL-3.0 and are outside the gate, because they are the copyright
+  [Q-16](../open-questions.md) is about rather than somebody else's.
+- **A crate offered under a choice of licences passes when any one of them is admitted**, since Sift takes
+  it under that one.
+
+**The bar is the strictest channel's, applied to every build.** [D-33](../product/platforms-and-distribution.md)
+names three channels, and only the App Store's terms collide with any of these licences; holding every
+build to that bar means no channel decision — including taking up a deferred one — ever waits on
+re-auditing the tree, and no build carries a crate another build cannot.
+
+**A crate the gate rejects is replaced or not taken.** The allowlist does not grow to fit a dependency:
+adding a licence to it is an amendment to this section, argued here against the test above, and the
+gate's configuration follows this document rather than the other way round. The reasoning for each
+direct dependency — its licence among it — is recorded beside the reviewed edge list the third gate keeps,
+which is where the MPL-2.0 case was first met and decided.
 
 ## Related
 
