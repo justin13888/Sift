@@ -143,6 +143,11 @@ pub struct Context<'a> {
     /// backstop.
     pub blocker: Option<&'a Authority>,
     pub dark: bool,
+    /// The system's increased-contrast preference. Raises the threshold the dark
+    /// transform's contrast repair targets: a user who asked the system for more contrast
+    /// has not asked for it everywhere except inside the message. Meaningless while `dark`
+    /// is off, because the repair is a step of the transform.
+    pub increased_contrast: bool,
     pub broker: &'a mut Broker,
 }
 
@@ -223,7 +228,8 @@ pub fn render(selected: &Selected, context: &mut Context<'_>) -> Result<Rendered
     // over the *sanitized* document rather than the sender's — the cascade resolves against
     // what will actually be rendered.
     let document = sift_sanitize::document::read(&sanitized.html);
-    let (transform, overrides) = dark_transform(&document, context.dark);
+    let (transform, overrides) =
+        dark_transform(&document, context.dark, context.increased_contrast);
     stages.push("transform");
 
     // ---- 7. Render. The overrides are appended as a last stylesheet rather than written
@@ -271,6 +277,7 @@ fn decide(authority: Option<&Authority>, url: &str, source_domain: &str) -> Deci
 fn dark_transform(
     document: &sift_sanitize::document::Document,
     enabled: bool,
+    increased_contrast: bool,
 ) -> (TransformOutcome, String) {
     if !enabled {
         return (TransformOutcome::NotRequested, String::new());
@@ -300,7 +307,7 @@ fn dark_transform(
         .collect();
     let computed = sift_css::cascade::resolve(&sheet, &inline, &elements, viewport);
 
-    match sift_css::transform::run(&document.stylesheet, true, &computed) {
+    match sift_css::transform::run(&document.stylesheet, true, increased_contrast, &computed) {
         Err(sift_css::transform::Skipped::SenderDeclaredDarkMode) => {
             (TransformOutcome::SenderDeclaredTheirOwn, String::new())
         }
@@ -435,6 +442,7 @@ mod tests {
             origin: origin(),
             blocker: None,
             dark: false,
+            increased_contrast: false,
             broker,
         }
     }
@@ -685,6 +693,44 @@ Content-Type: text/html\r\n\
         )
         .unwrap();
         assert!(!out.html.contains("rgb(0, 0, 0)"), "{}", out.html);
+    }
+
+    #[test]
+    fn the_increased_contrast_preference_reaches_the_repair_inside_the_message() {
+        // The UI shell: a user who asked the system for more contrast has not asked for it
+        // everywhere except inside the message. `#383838` on white transforms to a pair
+        // that clears the ordinary threshold and not the raised one, so only the raised
+        // render repairs the foreground — which changes the appended stylesheet.
+        let body = "<style>p{color:#383838;background-color:#ffffff}</style><p>x</p>";
+        let mut broker = Broker::new();
+        let ordinary = render(
+            &html(body),
+            &mut Context {
+                dark: true,
+                ..context(&mut broker)
+            },
+        )
+        .unwrap();
+        let raised = render(
+            &html(body),
+            &mut Context {
+                dark: true,
+                increased_contrast: true,
+                ..context(&mut broker)
+            },
+        )
+        .unwrap();
+        for out in [&ordinary, &raised] {
+            assert!(
+                matches!(out.transform, TransformOutcome::Ran { unrepaired: 0, .. }),
+                "{:?}",
+                out.transform
+            );
+        }
+        assert_ne!(
+            ordinary.html, raised.html,
+            "the preference did not change what the transform produced"
+        );
     }
 
     #[test]

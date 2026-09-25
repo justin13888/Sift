@@ -153,6 +153,38 @@ pub fn contrast_ratio(a: Rgb, b: Rgb) -> f64 {
 /// derived threshold, and moving it is an amendment rather than a tuning.
 pub const ACCEPTABLE_CONTRAST: f64 = 4.5;
 
+/// The raised contrast threshold, for a reader whose system asks for increased contrast.
+///
+/// [The UI shell](../../../../docs/architecture/ui-shell.md) requires the dark transform's
+/// repair target to move under that preference —
+/// a user who asked the system for more contrast has not asked for it everywhere except
+/// inside the message — and does not say to what. This is the third value of the same
+/// unrecorded set as [`ACCEPTABLE_CONTRAST`] and [`NEAR_NEUTRAL_CHROMA`], registered in
+/// issue #26 and blocked on the fidelity corpus (Q-10).
+///
+/// **Provisional.** A stated starting value rather than a derived one: the enhanced-contrast
+/// ratio accessibility guidance already names for body text. It MUST stay above
+/// [`ACCEPTABLE_CONTRAST`], or the preference would lower the bar it exists to raise; the
+/// build holds that. Moving it is an amendment rather than a tuning.
+pub const INCREASED_CONTRAST_THRESHOLD: f64 = 7.0;
+
+// An amendment that moved either value past the other fails to compile rather than shipping
+// a preference that lowers the bar.
+const _: () = assert!(INCREASED_CONTRAST_THRESHOLD > ACCEPTABLE_CONTRAST);
+
+/// The threshold step 5 of the dark transform repairs toward.
+///
+/// One place decides which of the two provisional values applies, so the transform and
+/// anything that later reports against NFR-47 cannot disagree about it.
+#[must_use]
+pub const fn contrast_threshold(increased_contrast: bool) -> f64 {
+    if increased_contrast {
+        INCREASED_CONTRAST_THRESHOLD
+    } else {
+        ACCEPTABLE_CONTRAST
+    }
+}
+
 /// The chroma below which a colour counts as near-neutral.
 ///
 /// D-27's gradient rule tests **every** stop against this: a gradient is transformed only
@@ -306,6 +338,17 @@ mod tests {
         assert!(rgb(255, 0, 0).to_oklab().chroma() > NEAR_NEUTRAL_CHROMA);
         assert!(rgb(128, 128, 128).to_oklab().chroma() < NEAR_NEUTRAL_CHROMA);
         assert!(rgb(250, 250, 250).to_oklab().chroma() < NEAR_NEUTRAL_CHROMA);
+    }
+
+    #[test]
+    fn the_increased_contrast_preference_raises_the_bar_rather_than_lowering_it() {
+        // The UI shell's requirement: a user who asked the system for more contrast has not
+        // asked for it everywhere except inside the message. A provisional value that fell
+        // below the ordinary one would invert that request; the ordering itself is held at
+        // compile time beside the constant, and this holds the selection.
+        assert!(contrast_threshold(true) > contrast_threshold(false));
+        assert!((contrast_threshold(false) - ACCEPTABLE_CONTRAST).abs() < f64::EPSILON);
+        assert!((contrast_threshold(true) - INCREASED_CONTRAST_THRESHOLD).abs() < f64::EPSILON);
     }
 
     #[test]
