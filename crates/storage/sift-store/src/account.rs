@@ -502,6 +502,73 @@ mod tests {
     }
 
     #[test]
+    fn a_migration_whose_store_step_fails_resumes_on_the_next_open() {
+        // NFR-48 and D-32: an ordinary failure during an upgrade — here the store's index build
+        // refused, as a full disk or an I/O error would — must not cost the account a resync.
+        // Journal first, so the failure leaves the journal one version ahead of the store.
+        let s = Scratch::new("interrupted");
+        let p = s.paths();
+        {
+            let store = Connection::open(&p.store).expect("store");
+            let journal = Connection::open(&p.journal).expect("journal");
+            schema::create(&store, STORE_SCHEMA_V1, 1).expect("v1 store");
+            schema::create(&journal, JOURNAL_SCHEMA_V1, 1).expect("v1 journal");
+            store
+                .execute(
+                    "INSERT INTO message (id, remote_id, fallback_digest, digest_rule_version,
+                                          received_at_millis, sender, recipients, provenance)
+                     VALUES (X'01', 'kept', X'00', 1, 0, '', '', 'Delivered')",
+                    [],
+                )
+                .expect("a version-1 message");
+            // An object in the name the store's step creates makes that step fail.
+            store
+                .execute_batch("CREATE TABLE message_remote (x INTEGER) STRICT;")
+                .expect("obstruction");
+        }
+
+        assert!(
+            matches!(
+                Account::open(&p, AccountId::from_u128(1)),
+                Err(OpenError::Sql(_))
+            ),
+            "the obstructed store step did not fail"
+        );
+        let stamp = |f: &std::path::Path| {
+            schema::version_of(&Connection::open(f).expect("open")).expect("version")
+        };
+        assert_eq!(stamp(&p.journal), schema::CURRENT_VERSION);
+        assert_eq!(stamp(&p.store), schema::CURRENT_VERSION - 1);
+
+        // The cause clears, as a disk that frees space does. The next open finishes the step.
+        Connection::open(&p.store)
+            .expect("store")
+            .execute_batch("DROP TABLE message_remote;")
+            .expect("clear");
+        let a = Account::open(&p, AccountId::from_u128(1)).expect("resumed");
+        for (name, conn) in [("store", &a.store), ("journal", &a.journal)] {
+            assert_eq!(
+                schema::version_of(conn).expect("version"),
+                schema::CURRENT_VERSION,
+                "the {name} was not carried forward"
+            );
+        }
+        let kept: i64 = a
+            .store
+            .query_row(
+                "SELECT count(*) FROM message WHERE remote_id = 'kept'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(kept, 1, "the resumed migration lost mail");
+        assert!(
+            plan(&a.store, "SELECT id FROM message WHERE remote_id = ?1")
+                .contains("message_remote")
+        );
+    }
+
+    #[test]
     fn a_fresh_account_and_a_migrated_one_have_the_same_schema() {
         let objects = |conn: &Connection| -> Vec<String> {
             let mut stmt = conn
