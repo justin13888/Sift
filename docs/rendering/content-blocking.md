@@ -200,16 +200,24 @@ already the stated fallback above.
 
 **The narrowing is stated in the interface, not discovered by its absence.** A classification has an
 explicit outcome for *not classified because no memory-safe decoder exists for this format*, distinct from
-a decode that failed, a decode refused by a bound, and a classification that ran. Each is recorded against
+a decode that failed, a decode refused by a bound, a decode that panicked, and a classification that ran.
+Each is recorded against
 the content hash, so a format is not retried every time it is seen, and each is surfaced with its reason in
 the [debug view](../runtime/observability.md). The set of classifiable formats is therefore whatever the
 build can decode safely, and it is a property a reader can inspect rather than infer.
 
 **A decoder defect is then a degradation, which is what the threat model requires of every other layer.**
-Memory safety turns an out-of-bounds read or write into a panic, and
-[D-47](../architecture/overview.md) catches panics at the stage boundary, so the decode is a catch
-boundary like any pipeline stage: a caught panic records the image as not classified and the message
-renders with that image untransformed. It never reaches the process NFR-19 protects as memory corruption.
+Memory safety turns an out-of-bounds read or write into a panic, and the decode is not a catch boundary
+of its own: it runs inside [dark mode](dark-mode.md)'s step 6, within the [pipeline](pipeline.md)'s transform stage, so
+[D-47](../architecture/overview.md)'s boundary at that stage is what catches it. The panic therefore does
+exactly what D-47 says every caught panic does — that message degrades to FR-9's raw view, carries the
+*stage failed on a caught panic* state from the [state register](../architecture/state-register.md), and
+is counted against the subsystem whose tag was current under [observability](../runtime/observability.md).
+It is also recorded against the content hash as the *decode panicked* outcome above, which is never folded
+into *decode failed* or *not classified*, since D-47 forbids absorbing a caught panic as an ordinary parse
+failure. Because the outcome is recorded, a later render of a message carrying the same image does not
+decode it again and shows it untransformed; the panic is paid once per image, not once per render. It
+never reaches the process NFR-19 protects as memory corruption.
 The bounds above remain what stops a decode bomb, because memory safety says nothing about how much memory
 or time a correct decoder is persuaded to spend.
 
