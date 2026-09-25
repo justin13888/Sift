@@ -109,8 +109,9 @@ one-liners now need a platform answer and P0 proof:
   container, and the obvious route on one target platform does not exist. The mechanism MUST be a
   non-script platform interface, and it MUST be demonstrated in P0 rather than assumed — see
   [roadmap](../product/roadmap.md). If none exists, the retreat is a body view pinned to a fixed layout
-  width, which is one of the answers [Q-15](../open-questions.md) is already weighing for a different
-  reason.
+  width — which [Q-15](../open-questions.md)'s answer in [dark mode](dark-mode.md) has since adopted for
+  a different reason, so the retreat costs nothing further. The body view already lays out at one
+  width, and owning its own scrolling means it never needs the height.
 - **Find-in-message.** FR-24 makes every action keyboard-reachable, so finding text in a message is a
   requirement rather than a convenience. Both engines offer a script-free find facility; it carries a
   minimum-version floor, which is one of the constraints setting [D-46](../product/platform-baseline.md).
