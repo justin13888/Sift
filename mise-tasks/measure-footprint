@@ -93,17 +93,9 @@ binary="$app/Contents/MacOS/Sift"
 scratch="$PWD/target/measure/$arch-$(date +%Y%m%d-%H%M%S)"
 container="$scratch/container"
 keychain="$scratch/measure.keychain-db"
-mkdir -p "$container"
-out="${out:-$PWD/target/measure/footprint-$arch.tsv}"
-mkdir -p "$(dirname "$out")"
 
-# The scratch keychain. `create-keychain` does not add it to the search list, so nothing else on
-# the machine can find it, and deleting it at the end removes every item this run created.
-password="$(openssl rand -hex 24)"
-security create-keychain -p "$password" "$keychain"
-security set-keychain-settings "$keychain"          # no idle lock mid-run
-security unlock-keychain -p "$password" "$keychain"
-
+# Installed before anything is created under $scratch, so a failure at any later step, the keychain
+# commands included, still removes the keychain and the scratch directory.
 pid=""
 cleanup() {
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
@@ -115,6 +107,17 @@ cleanup() {
     rm -rf "$scratch"
 }
 trap cleanup EXIT
+
+mkdir -p "$container"
+out="${out:-$PWD/target/measure/footprint-$arch.tsv}"
+mkdir -p "$(dirname "$out")"
+
+# The scratch keychain. `create-keychain` does not add it to the search list, so nothing else on
+# the machine can find it, and deleting it at the end removes every item this run created.
+password="$(openssl rand -hex 24)"
+security create-keychain -p "$password" "$keychain"
+security set-keychain-settings "$keychain"          # no idle lock mid-run
+security unlock-keychain -p "$password" "$keychain"
 
 export SIFT_CONTAINER="$container" SIFT_KEYCHAIN="$keychain" SIFT_MEASURE=1 SIFT_FIXTURES=1
 
