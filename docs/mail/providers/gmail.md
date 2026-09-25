@@ -106,8 +106,12 @@ D-13's drift check run against that file.
 
 ## Authentication gate
 
-Gmail access requires restricted OAuth scopes, and obtaining them is a **business-level blocker that MUST
-be resolved before the adapter is written**. See [credentials](../../security/credentials.md).
+Gmail access requires restricted OAuth scopes, and obtaining them is a **business-level blocker, not a
+technical one**. The P0 gate once required it resolved before the adapter was written; the adapter was
+written first, and the spike has since passed by being answered rather than granted. The requirements,
+cost, timeline and decision — unverified on test users for the release candidate, verification filed
+ahead of general availability — are in
+[the Gmail verification blocker](../../security/credentials.md#the-gmail-verification-blocker).
 
 The scope set is exactly one scope — the provider's *modify* scope — and it is permanent. It reads,
 searches, labels, trashes, untrashes and reports junk in both directions. It cannot send, cannot

@@ -233,31 +233,128 @@ Crash reports are scrubbed and opt-in — see [privacy](privacy.md).
 ## The Gmail verification blocker
 
 **This is a business-level blocker, not a technical one, and it is the top risk in the entire project.**
+It is now an *answered* one: the requirements, the cost and the timeline below are what the
+[roadmap](../product/roadmap.md)'s P0 spike asked for, and the decision they feed is recorded at the end of
+this section. The spike passed by becoming answerable, not by being granted.
 
-Gmail access — both API and IMAP-over-OAuth — requires **restricted** scopes. Restricted scopes require
-the provider's verification process, including a recurring third-party security assessment that is
-expensive and repeats. Without it, users see an unverified-application warning and the client is capped at
-a small number of users. Every serious third-party Gmail client has had to solve this.
+Gmail access — both API and IMAP-over-OAuth — requires **restricted** scopes. The one scope Sift requests
+([Gmail](../mail/providers/gmail.md)) is on the provider's restricted list, as is every scope that reads
+message content. Restricted scopes require the provider's verification process. Without it, users see an
+unverified-application warning and the client is capped at a small number of users. Every serious
+third-party Gmail client has had to solve this.
 
-**It MUST be resolved before a line of the Gmail adapter is written** — see
-[roadmap](../product/roadmap.md), where it is a P0 gate.
+The P0 gate required this answered before the adapter was written. The adapter was written first, under
+an approved plan that builds all four adapters; this section records that the code was never the thing
+blocking Gmail, and that what blocks it is the decision below.
+
+### What verification requires
+
+Everything here is the provider's published policy as read in September 2026. It is the provider's to
+change, and the section is re-read against the provider's pages before an application is filed.
+
+- **Brand verification first.** A verified home-page domain owned by the applicant, an application home
+  page on it, and a privacy policy on the same domain that discloses how Google user data is accessed,
+  used, stored and shared. Sift's [privacy](privacy.md) position — no server, no telemetry, no endpoint —
+  makes that policy short, but it still has to exist and be hosted.
+- **A permitted application type.** Restricted Gmail scopes are granted only to application types the
+  provider's user-data policy permits, and a mail client whose user reads their own mail is the central
+  one. The application states the type and the user-facing feature each scope serves.
+- **Least privilege, argued per scope.** Each requested scope is justified as the narrowest that delivers
+  the feature. D-88's one-scope set is that argument, and it is settled before filing, because
+  verification is what makes it permanent.
+- **A demonstration video** showing a user initiating and granting consent, and then the use of the
+  granted scope in the product, in detail.
+- **Compliance with the provider's limited-use terms**: no transfer of user data except to deliver the
+  user-facing feature, no advertising use, no human reading of mail. Sift's architecture satisfies these
+  by construction rather than by policy, because no data leaves the device except to the provider it came
+  from.
+- **A security assessment — conditionally.** The provider requires one of every application that "has the
+  ability to access data from or through a third-party server". Sift has no server: mail travels between
+  the device and the provider and nowhere else, and [D-111](../rendering/content-blocking.md)
+  removed the last Sift-operated endpoint. On the policy's own wording the assessment does not apply. The
+  provider, not Sift, makes that determination during review, so the budget below prices both branches
+  rather than assuming the favourable one.
+- **Annual reverification.** Access to a verified restricted scope is kept only by reverifying at least
+  every twelve months — and, where an assessment applied, by repeating it on the same cycle.
+
+### What it costs
+
+Every figure is a hypothesis in the sense [the specification's conventions](../README.md) use the word: observed list prices, not
+quotes obtained.
+
+| Branch | First year | Every year after |
+|---|---|---|
+| **No assessment** (the no-server reading holds) | A registered domain, its hosting, and the time to write the privacy policy and record the video. No fee is paid to the provider | The domain, and the reverification's time |
+| **Lab-verified assessment** (the provider's middle tier: a scan the applicant runs, validated by an authorised lab) | Of the order of US$500–2,000 at the provider's preferred lab; other authorised labs list higher | The same, because the assessment repeats |
+| **Lab-conducted assessment** (the top tier: a penetration test run by the lab) | Of the order of US$4,500–8,000 or more | The same |
+
+**Sift does not choose the row.** The provider decides during review both whether an assessment applies
+and, if one does, which tier it assigns; the applicant cannot elect the cheaper tier. Every row is
+therefore a branch the budget must be able to absorb, and the top tier is its ceiling.
+
+The historical figure that made this "expensive" — tens of thousands a year for a bespoke audit — predates
+the provider's standardised assessment framework and is not the current price. The residual cost that no
+branch avoids is **engineering time**: a reviewer's questions, a re-recorded video, and a reverification
+every year for as long as Gmail is supported.
+
+### How long it takes
+
+| Step | Stated duration |
+|---|---|
+| Brand verification | A few business days |
+| Restricted-scope review | "Several weeks", in the provider's words |
+| Assessment, where it applies | One to four weeks at the middle tier; two to six at the top |
+
+End to end, a first application is planned at **one to three months**, most of it waiting on review
+rounds. Filing is the critical path, not engineering, so the application is filed well ahead of the
+release that depends on it.
+
+### What an unverified client can do meanwhile
+
+An unverified client is not blocked; it is **capped and warned**. Two publishing states exist, and they
+fail differently:
+
+- **Testing.** Only accounts on an explicit test-user list, up to one hundred, can grant consent, and
+  every grant's refresh token **expires after seven days**. Under D-88 that expiry is a well-formed denial,
+  so the account correctly enters the [needs-authentication](../runtime/failure-model.md) state weekly —
+  expected behaviour on this state, not a defect.
+- **Production, unverified.** Any account can consent through the unverified-application warning, up to
+  one hundred new users over the project's lifetime, and refresh tokens do not carry the seven-day expiry.
+
+### The escape hatches, read against D-33
 
 The escape hatches each reshape the product rather than merely delaying it, and each one collides with a
 decision made elsewhere. Reading them against that decision is what turns this from a list of options into
 a single question.
 
-**Requiring each user to supply their own OAuth client identifier is incompatible with the App Store
-channel.** [D-33](../product/platforms-and-distribution.md) names two macOS channels — Cask from the first
-release, the App Store deferred — on the argument that they reach different people, and it names the App Store as where "everyone else" looks — the non-technical
-half, explicitly. Asking that audience to create a cloud project and paste a client identifier is not a
-first run they complete. So this hatch is available to the Homebrew Cask and Flatpak builds and absent
-from the one channel it would matter most for.
+**Requiring each user to supply their own OAuth client identifier is not a first run the non-technical
+user completes.** [D-33](../product/platforms-and-distribution.md) names the App Store as where "everyone
+else" looks — the non-technical half, explicitly — and that audience does not create a cloud project and
+paste a client identifier. D-33 as amended defers the App Store, so every channel that ships today could
+carry this hatch; what it cannot do is reach the audience the App Store is deferred *for*, so it remains a
+hatch for the technical user rather than an answer.
 
 **Restricting Gmail support to organizational tenants** gives up the consumer Gmail user, who is the
 largest single population this product could serve.
 
-What is left once both are read against D-33 is not an engineering choice between three options. It is:
-**fund a recurring third-party security assessment, or ship a client whose largest provider is unreachable
-through its largest channel.** That is a budget question rather than a design one, which is why it is
-settled before the adapter is written rather than discovered during it. Tracked in
-[open questions](../open-questions.md).
+What is left is not an engineering choice between three options. It is: **fund verification, or ship a
+client whose largest provider is capped at a hundred users.** That is a budget question rather than a
+design one, and the figures above make it an answerable one.
+
+### The decision
+
+**Release candidate: unverified, on test users.** The release candidate — the build that exists for its
+own maintainer's QA — uses Sift's own client in the testing state, with the QA accounts on its test-user
+list. The weekly re-consent above is accepted as the cost; none of the hundred-user cap is reached. No
+application is filed and nothing is paid.
+
+**General availability: the assessment decision is deferred to it.** Before a build is offered to users
+who are not on a test-user list, verification is filed, and the budget is the whole table above: nothing
+paid to the provider if it accepts the no-server reading, and otherwise whichever tier it assigns — of the
+order of US$500–2,000 a year at the middle tier, and US$4,500–8,000 or more a year at the top. The
+top-tier figure is the one the general-availability budget must be able to carry, because the provider,
+not Sift, selects the tier. Because the
+application takes one to three months, the filing date is set from the intended release date rather than
+after it.
+
+Tracked in [open questions](../open-questions.md) as R-1, now answered by this section.
