@@ -209,14 +209,16 @@ is the property that collides with the App Store's terms, and "copyleft" is the 
   it under that one.
 
 **The bar is the strictest channel's, applied to every build.** [D-33](../product/platforms-and-distribution.md)
-names three channels, and only the App Store's terms collide with any of these licences; holding every
-build to that bar means no channel decision — including taking up a deferred one — ever waits on
-re-auditing the tree, and no build carries a crate another build cannot.
+names three channels, and the App Store's terms are the strictest of them; holding every build to that
+bar means no channel decision ever waits on re-auditing the tree, and every build carries the same crates.
+Bundled artefacts differ by channel under [D-112](../product/platforms-and-distribution.md); linked code
+does not, because one source tree per platform is simpler to reason about than a crate graph that
+varies by channel, and the permissive-plus-MPL set has so far cost nothing to hold everywhere.
 
 **A crate the gate rejects is replaced or not taken.** The allowlist does not grow to fit a dependency:
 adding a licence to it is an amendment to this section, argued here against the test above, and the
 gate's configuration follows this document rather than the other way round. The reasoning for each
-direct dependency — its licence among it — is recorded beside the reviewed edge list the third gate keeps,
+direct dependency, its licence included, is recorded beside the reviewed edge list the third gate keeps,
 which is where the MPL-2.0 case was first met and decided.
 
 ## Related
