@@ -54,6 +54,7 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         // wakeup counted against NFR-11 and a worse answer than the one the system already
         // has — it knows about pressure before free memory reflects it.
         installMemoryPressureSource()
+        installMeasurementSignalsIfAsked()
 
         // A minimal bar first, so that a launch which fails before the layer exists is still
         // quittable from the keyboard — FR-24 does not allow an application that is frontmost
@@ -247,6 +248,49 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         }
         source.resume()
         pressureSource = source
+    }
+
+    /// Q-12's measurement protocol, driven from outside the process.
+    ///
+    /// **Off unless asked for, like `SIFT_FIXTURES`, and for the same reason**: the thing
+    /// measured has to be the shipping binary, not a build configuration of it. With
+    /// `SIFT_MEASURE` set, two signals move the application between the lifecycle states
+    /// NFR-8, NFR-9 and the reading peak are stated over:
+    ///
+    /// - `SIGUSR2` selects the next message in the frontmost main window — the reading state,
+    ///   one warm body view under D-54.
+    /// - `SIGUSR1` is a critical pressure signal, delivered through the same entry point the
+    ///   platform source calls — L3: every window destroyed, every cache at its floor, the
+    ///   allocator collected. What remains is toolkit residue plus the resident floor.
+    ///
+    /// **Signals, not a socket and not UI scripting.** NFR-24 admits no listening endpoint of
+    /// any kind, and a signal is not one: only a process running as this user can send it, and
+    /// that process could already end this one. UI scripting would make the protocol depend on
+    /// an accessibility grant a hosted runner may not have, and a simulated system pressure
+    /// level needs root and moves every other process on the machine with it.
+    private var measurementSignals: [DispatchSourceSignal] = []
+
+    private func installMeasurementSignalsIfAsked() {
+        guard ProcessInfo.processInfo.environment["SIFT_MEASURE"] != nil else { return }
+        let actions: [(Int32, () -> Void)] = [
+            (SIGUSR1, { [weak self] in
+                guard let app = self?.app else { return }
+                var tier: UInt32 = 0
+                _ = sift_memory_pressure(UnsafeMutablePointer(app), 2, &tier)
+            }),
+            (SIGUSR2, { [weak self] in
+                self?.windows.last?.moveSelection(by: 1, unreadOnly: false)
+            }),
+        ]
+        for (number, action) in actions {
+            // The default disposition of both is to terminate, and a dispatch source observes
+            // a signal without replacing that disposition — so it is ignored first.
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler(handler: action)
+            source.resume()
+            measurementSignals.append(source)
+        }
     }
 
     // MARK: - The always-on surface
@@ -917,13 +961,23 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// Application Support rather than Caches, because the layout MUST NOT live anywhere the
     /// operating system may purge on its own. Under the sandbox this already resolves inside
     /// the app's own container; outside it, the bundle identifier keeps it to itself.
+    ///
+    /// `SIFT_CONTAINER` names another one. It exists for the measurement protocol, which has
+    /// to run the shipping binary against a corpus of its own without touching the container
+    /// the user's real accounts live in — and like `SIFT_FIXTURES` it is the environment of a
+    /// process this user started, which is already this user's to direct.
     private static func containerRoot() -> String? {
-        guard
-            let base = FileManager.default.urls(
-                for: .applicationSupportDirectory, in: .userDomainMask
-            ).first
-        else { return nil }
-        let root = base.appendingPathComponent("net.justinchung.sift", isDirectory: true)
+        let root: URL
+        if let named = ProcessInfo.processInfo.environment["SIFT_CONTAINER"], !named.isEmpty {
+            root = URL(fileURLWithPath: named, isDirectory: true)
+        } else {
+            guard
+                let base = FileManager.default.urls(
+                    for: .applicationSupportDirectory, in: .userDomainMask
+                ).first
+            else { return nil }
+            root = base.appendingPathComponent("net.justinchung.sift", isDirectory: true)
+        }
         do {
             try FileManager.default.createDirectory(
                 at: root, withIntermediateDirectories: true
