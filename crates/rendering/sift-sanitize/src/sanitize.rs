@@ -92,6 +92,7 @@ pub fn sanitize(html: &str) -> Result<Sanitized, SanitizeError> {
     });
 
     walk(&dom.document, 0, &state)?;
+    drop_leading_whitespace(&dom.document);
 
     let mut serialized = Vec::new();
     let handle: SerializableHandle = dom.document.clone().into();
@@ -182,6 +183,34 @@ fn walk(node: &Handle, depth: u64, state: &RefCell<State>) -> Result<(), Sanitiz
 
     *node.children.borrow_mut() = keep;
     Ok(())
+}
+
+/// I6 and I8 over the scaffolding the walk unwrapped.
+///
+/// Unwrapping `html`, `head` and `body` flattens their children into one list, which
+/// carries the whitespace text that sat between head elements and before the body's first
+/// child. On the way back in, the tree builder **discards** whitespace before the document's
+/// first element and moves a leading `<style>`, with the whitespace after it, into a head it
+/// creates — so a second pass sees a different tree and writes different bytes. Every real
+/// message with a `<head>` did this; the fidelity corpus is what showed it.
+///
+/// So whitespace-only text is dropped from the leading run of the top-level list that holds
+/// nothing but stylesheets and whitespace — exactly the run a reparse places in the head.
+/// Whitespace there is never rendered, so I9 loses nothing a reader sees.
+fn drop_leading_whitespace(document: &Handle) {
+    let mut children = document.children.borrow_mut();
+    let mut i = 0;
+    while let Some(child) = children.get(i) {
+        match &child.data {
+            NodeData::Text { contents } if contents.borrow().trim().is_empty() => {
+                children.remove(i);
+            }
+            NodeData::Element { name, .. } if name.local.eq_str_ignore_ascii_case("style") => {
+                i += 1;
+            }
+            _ => break,
+        }
+    }
 }
 
 enum Verdict {
@@ -847,6 +876,10 @@ mod invariants {
             "<div><script>alert(1)</script><b>bold</b></div>",
             r#"<table><tr><td style="color:red">cell</td></tr></table>"#,
             "<svg><script>alert(1)</script></svg>",
+            // The scaffolding's whitespace, which a reparse discards or moves into a head.
+            "<html>\n<head>\n<style>p{color:red}</style>\n</head>\n<body>\n<p>x</p>\n</body></html>",
+            "<html><head></head><body>\n<style>p{color:red}</style>\n<style>b{color:blue}</style>\n<p>x</p></body></html>",
+            "\n\n<p>x</p>",
         ] {
             let once = clean(html);
             let twice = clean(&once.html);
