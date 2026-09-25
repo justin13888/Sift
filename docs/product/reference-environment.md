@@ -1,6 +1,6 @@
 # Reference environment
 
-**Owns:** NFR-26.
+**Owns:** NFR-26, D-115.
 
 Every performance and resource figure in this documentation set is a **hypothesis to be validated**, not a
 measured fact. A number without a defined machine and corpus is unfalsifiable, and arguing about such a
@@ -81,7 +81,44 @@ population:
 
 **Fidelity corpus** — for rendering correctness. Real-world messages spanning marketing HTML, transactional
 mail, mailing-list traffic, CJK, RTL, and plain text, plus every published mutation-XSS payload as a
-permanent regression vector. See [sanitizer invariants](../rendering/sanitizer-invariants.md).
+permanent regression vector. See [sanitizer invariants](../rendering/sanitizer-invariants.md). It is
+checked into the tree beside the sanitizer, and what it admits is D-115.
+
+### D-115 — The fidelity corpus admits nothing without a recorded provenance
+
+**Chosen:** every message in the fidelity corpus carries one of two provenances. A **captured** message is
+real mail, scrubbed of addresses, subjects and content under [NFR-22](../security/privacy.md) before it
+is committed — the rule the provider fixtures already follow. A **constructed** message is written for the
+corpus after the structure of real mail of its category — table layout, conditional word-processor markup,
+preheaders and tracking pixels for marketing mail; captioned, scoped tables for transactional mail; quoted
+replies and list footers for mailing-list traffic; ruby, mixed scripts and both writing directions — with
+every name, address and host replaced by reserved example domains. Every category MUST be present, and a
+file with no provenance fails the corpus's own test. Every mutation-XSS vector carries the publication its
+shape comes from, or the earlier vector it varies, and an expectation — accepted with nothing forbidden
+surviving, or refused by a bound. **Vector identifiers are permanent**: a vector is never renumbered,
+reused or removed, which is what "permanent regression vector" means.
+**Rejected:** a corpus of captured mail only, which cannot exist until someone donates mail and scrubs it,
+and would leave every gate below with nothing to run over until then; synthetic generation, as the scale
+corpus uses, because a generator reproduces its own idea of structure rather than the structure real
+senders write — the thing this corpus is for.
+
+**Why.** The gates that depend on this corpus — NFR-26's snapshots, NFR-47's contrast measurement, NFR-40's
+dual-parser divergence and fuzzing, and the limits register's rule that the corpus decides whether a bound
+is wrong — all need *something* to run over, and each is worth more running today over a small honest set
+than waiting for a large captured one. Recording provenance is what keeps the two kinds from being confused:
+a constructed message is evidence about the structure it was built to reproduce and about nothing else, and
+it says so where the corpus is read. The first run over it found a real defect — the sanitizer was not
+idempotent on any message with a head, because the whitespace between head elements moved on a reparse —
+which no hand-written invariant test had reached.
+
+**What it costs:** a constructed message proves only the structures its author thought to include. The
+quirks nobody has catalogued — a particular sender's broken nesting, a charset declared three different
+ways — arrive only with captured mail, and until they do the limits register's "the corpus decides" is
+deciding over a sample that was chosen rather than met.
+
+**Contestable because:** a constructed corpus can drift towards the markup the sanitizer already handles,
+since its author knows the sanitizer. The provenance column makes the ratio visible and captured messages
+are what correct it; nothing yet requires the ratio to move.
 
 **Relevance corpus** — for search ranking. Real queries against a known mailbox, each recorded with the
 message the person issuing it was actually looking for. This corpus MUST exist, and it is the one that

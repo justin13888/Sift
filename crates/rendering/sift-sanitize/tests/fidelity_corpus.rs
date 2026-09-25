@@ -377,7 +377,7 @@ fn direction_and_language_survive_on_sender_content() {
     // A right-to-left message rendered left-to-right, or a Japanese one shaped with a
     // Chinese font, is a message the reader was not sent. Checked on sender content below the
     // scaffolding: `dir` and `lang` on `html` and `body` are lost when the walk unwraps
-    // them, which is a known gap tracked on its own rather than asserted away here.
+    // them — a known NFR-50 gap, #91, which removes this exclusion when it lands.
     let scaffolding = ["html", "head", "body"];
     for m in messages() {
         let pick = |doc: &Document| -> Vec<(String, String, String)> {
