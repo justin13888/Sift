@@ -1,0 +1,42 @@
+[package]
+name = "sift-corpus"
+description = "NFR-26's scale corpus: 5 accounts, 500,000 messages, a 50,000-message inbox, written through the real ingest path."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+# A generator reports what it wrote — that is the whole of what its binary does — so the binary
+# does not take the workspace's `print_stdout` deny, which exists because a resident mail client
+# writing to a terminal is a defect. The library below it still never prints.
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+todo = "warn"
+dbg_macro = "deny"
+
+[[bin]]
+name = "sift-corpus"
+path = "src/main.rs"
+
+[dependencies]
+sift-foundation.workspace = true
+sift-provider.workspace = true
+sift-store.workspace = true
+# The envelope tokenizer, so the report can say what the index would hold for this population —
+# the half of L-20's "two kilobytes per message including its index entry" the store cannot.
+sift-index.workspace = true
+# The ingest path sync itself writes through. A generator with its own INSERT statements would
+# produce a store that looked like the product's and was not, and every figure measured against
+# it would describe that difference.
+sift-sync.workspace = true
+# The installation container and its sealed registry, so the result is a container the
+# application opens at launch rather than loose files beside one.
+sift-app.workspace = true
+sift-credentials.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"] }
