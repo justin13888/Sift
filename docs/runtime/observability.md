@@ -142,6 +142,58 @@ This is the only thing that will catch NFR-12 — no footprint ratchet over 14 d
 weeks earlier than manual testing would. It also produces the baseline against which
 [D-1](../architecture/ui-shell.md) and [D-2](../architecture/process-model.md) are validated in P0.
 
+**What the harness drives.** The assembled application, through the same registry a shell binds to,
+with no window. The load is the recorded provider corpus of [D-65](../build/verification.md) — no
+network and no credential, so a three-day run measures Sift rather than a provider's latency, and
+nothing in it expires. Each round does what a person does with a resident client: sync every account,
+list it, open and close every message, search, and triage one message and take the triage back, so the
+mailbox ends each round where it began and nothing accumulates but what Sift itself keeps. Between rounds
+the process idles on the application's own coalesced wheel, so periodic sync and flush run exactly as
+they would under a shell.
+
+**What a sample holds.** Footprint as D-16 requires; D-24's live bytes for every row of the partition;
+the sum of declared caches; and the wheel's fires. One row per interval, keyed on the partition's stable
+names rather than on position, appended and flushed as it is taken — a run killed on its third day leaves
+two days of evidence. A series recorded under a name the partition no longer has is refused rather than
+folded into another row, because that is a discontinued history, not a column to skip.
+
+**The harness MUST NOT perturb what it measures.** It retains no series in memory: four thousand rows
+held for three days grow the footprint linearly, charged to the shell row, and that alone is enough to
+fail the gate. And a load that fails stops the run rather than continuing idle, because a load that
+silently stopped doing anything draws a flat line, and a flat line passes.
+
+**The decomposition uses the gate's own fit.** The same least-squares slope that produces the verdict is
+fitted to each subsystem's series and to the unattributed remainder — footprint minus everything the
+tagging allocator accounts for — and each is expressed in the gate's unit, a fraction of the run's
+post-first-hour baseline. The shares therefore sum to the footprint's projection, and the row that moved
+is the row to chase. A run shorter than 72 hours may be decomposed early, with a shorter warm-up, and
+still cannot pass: the verdict keeps its own warm-up and its own minimum whatever the decomposition used.
+
+**Where the footprint comes from.** On Linux the kernel publishes PSS as a file. On macOS the figure is
+reachable only through a system call, and it is made from the tagging allocator's crate — one of the four
+places [overview](../architecture/overview.md) permits unsafe code — rather than from a fifth: the
+footprint is the other operand of the residual, and it belongs beside the counters it is subtracted
+from. The harness owns no engine process, so it has no engine contribution to add; a shell that does
+adds it.
+
+**Two gaps, stated so a pass is not read as more than it is.** No cache in the application yet reports
+itself, so the declared total is zero and the residual this harness records is the whole footprint;
+the residual starts meaning what this document says it means when the first cache declares. And the
+series is a plain columnar record read back by the gate, not [D-34](#d-34--trace-output-in-an-established-viewers-format)'s
+trace format — which is the case D-34's own counter-argument names, and its emission is outstanding.
+
+**How NFR-44 is measured.** The same workload runs under the tagging allocator and under the system
+allocator alone, in separate processes built from one source, alternated and with the order swapped each
+trial. It times the reading half of a round — dense allocation and no durable write — because a disk's
+latency moves tens of percent between trials and swamps a 2% budget, and because time spent waiting on a
+disk allocates nothing: the fraction measured on the reading half bounds the whole load's from above. The
+figure is **process CPU time**, not wall time, which on a shared machine charges a trial for everything
+else that ran beside it; each trial's two halves are paired, and the median of the paired ratios is the
+result. **A verdict needs the median and two standard errors on one side of 2%.** Anything between is
+no verdict, because a machine too noisy to resolve 2% reports whichever side the noise landed on — and
+a shared development machine measurably does, from one run to the next. The figure of record comes
+from the [reference environment](../product/reference-environment.md), like every other number here.
+
 ## D-34 — Trace output in an established viewer's format
 
 **Chosen:** emit traces and counter series in the protobuf trace format of an established open-source
