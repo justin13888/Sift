@@ -71,7 +71,7 @@ tempted to cross, at the cost of every change touching four manifests.
 ## Unsafe code is confined by the crate graph, not by review
 
 [Overview](../architecture/overview.md) confines unsafe code to four places — the C ABI, the tagging
-global allocator, the page-encryption layer, and the database engine's foreign-function interface — and
+global allocator with the footprint reads beside it, the page-encryption layer, and the database engine's foreign-function interface — and
 says it is *"refused rather than reviewed"* everywhere else, *"because a policy that permits it anywhere
 it seems justified is not a policy"*.
 
