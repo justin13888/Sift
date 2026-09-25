@@ -126,6 +126,9 @@ final class BodyView: NSView {
         let width = max(BodyView.layoutWidth, visible.width)
         column.frame = NSRect(x: 0, y: 0, width: width, height: visible.height)
         // Centred when there is room; flush at the origin, and scrolled to, when there is not.
+        // In the narrow case the web view's own vertical scroll bar sits at x = layoutWidth,
+        // outside the visible pane until scrolled to: a recorded cost of the pin (dark-mode.md),
+        // because no public API exposes the body's scroll position to mirror in a native bar.
         let inset = ((width - BodyView.layoutWidth) / 2).rounded(.down)
         web.frame = NSRect(
             x: inset, y: 0, width: BodyView.layoutWidth, height: visible.height)

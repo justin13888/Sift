@@ -86,7 +86,13 @@ is already [D-50](webview-isolation.md)'s stated retreat for content height, so 
 **What it costs:** a sender who designed for a narrow viewport sees their wide layout in every pane, and
 a reader pane narrower than the pinned width scrolls sideways rather than reflowing. Both are the
 sender's layout shown faithfully at one width rather than a broken one; a reader who wants reflow is
-asking for the recompute answer and its unbounded drag cost. The value of the width is a hypothesis like
+asking for the recompute answer and its unbounded drag cost. A narrow pane also hides the body's own
+vertical scroll bar: the body view owns its vertical scrolling ([D-50](webview-isolation.md)), so that
+bar sits at the pinned column's trailing edge, beyond the visible pane, until the reader scrolls
+sideways to it. Wheel, trackpad, and keyboard scrolling still reach the body anywhere it is visible, and
+the horizontal bar is always reachable; what is lost is a draggable vertical position indicator. A
+native bar that mirrored the body's position would have to read that position, and without script
+nothing public exposes it. The value of the width is a hypothesis like
 every other number here, and the one property that MUST hold is that the body view and the cascade use
 the same one.
 
