@@ -166,7 +166,10 @@ pub use unimplemented::Platform;
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{CredentialStore, Item, KEYCHAIN_SERVICE, StoreError, key_for};
+    use security_framework::os::macos::keychain::SecKeychain;
     use sift_foundation::identity::AccountId;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
 
     /// The platform keychain.
     ///
@@ -183,35 +186,83 @@ mod macos {
         }
     }
 
+    /// `SIFT_KEYCHAIN`: a keychain file to use **instead of** the user's default one.
+    ///
+    /// It exists for Q-12's measurement protocol, which runs the shipping binary against a
+    /// scratch container and must not read or write the credential items of the user's real
+    /// installation. Reading them would also stop the run: an item's access list names the
+    /// build that created it, so a fresh build asks for the login password, and nobody is
+    /// there to type it.
+    ///
+    /// **Still the OS credential store, and never a fallback.** The named file is a keychain
+    /// the platform opens and guards; nothing here writes a secret anywhere else. A name that
+    /// cannot be opened is [`StoreError::Unavailable`] rather than a silent return to the
+    /// default keychain, because that return would write into exactly the store the caller
+    /// asked to keep out of. Read once per process: the store a process uses does not change
+    /// under it.
+    fn named() -> Result<Option<SecKeychain>, StoreError> {
+        static NAMED: OnceLock<Option<PathBuf>> = OnceLock::new();
+        let Some(path) = NAMED
+            .get_or_init(|| {
+                std::env::var_os("SIFT_KEYCHAIN")
+                    .filter(|p| !p.is_empty())
+                    .map(PathBuf::from)
+            })
+            .as_ref()
+        else {
+            return Ok(None);
+        };
+        SecKeychain::open(path)
+            .map(Some)
+            .map_err(|e| StoreError::Unavailable(format!("SIFT_KEYCHAIN: {e}")))
+    }
+
     impl CredentialStore for Platform {
         fn write(&self, account: AccountId, item: Item, secret: &str) -> Result<(), StoreError> {
-            security_framework::passwords::set_generic_password(
-                KEYCHAIN_SERVICE,
-                &key_for(account, item),
-                secret.as_bytes(),
-            )
+            let key = key_for(account, item);
+            match named()? {
+                Some(keychain) => {
+                    keychain.set_generic_password(KEYCHAIN_SERVICE, &key, secret.as_bytes())
+                }
+                None => security_framework::passwords::set_generic_password(
+                    KEYCHAIN_SERVICE,
+                    &key,
+                    secret.as_bytes(),
+                ),
+            }
             .map_err(|e| StoreError::Unavailable(e.to_string()))
         }
 
         fn read(&self, account: AccountId, item: Item) -> Result<String, StoreError> {
-            let bytes = security_framework::passwords::get_generic_password(
-                KEYCHAIN_SERVICE,
-                &key_for(account, item),
-            )
+            let key = key_for(account, item);
+            let bytes = match named()? {
+                Some(keychain) => keychain
+                    .find_generic_password(KEYCHAIN_SERVICE, &key)
+                    .map(|(password, _)| password.to_vec()),
+                None => security_framework::passwords::get_generic_password(KEYCHAIN_SERVICE, &key),
+            }
             .map_err(|_| StoreError::NotFound)?;
             String::from_utf8(bytes)
                 .map_err(|_| StoreError::Unavailable("the stored item was not text".into()))
         }
 
         fn delete(&self, account: AccountId, item: Item) -> Result<(), StoreError> {
-            match security_framework::passwords::delete_generic_password(
-                KEYCHAIN_SERVICE,
-                &key_for(account, item),
-            ) {
-                Ok(()) => Ok(()),
+            let key = key_for(account, item);
+            match named()? {
+                Some(keychain) => {
+                    if let Ok((_, found)) = keychain.find_generic_password(KEYCHAIN_SERVICE, &key) {
+                        found.delete();
+                    }
+                }
                 // Deleting what is not there satisfies the caller's intent.
-                Err(_) => Ok(()),
+                None => {
+                    let _ = security_framework::passwords::delete_generic_password(
+                        KEYCHAIN_SERVICE,
+                        &key,
+                    );
+                }
             }
+            Ok(())
         }
     }
 }
