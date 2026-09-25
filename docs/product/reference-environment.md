@@ -16,6 +16,39 @@ with 8 GB of memory. Targets that hold only on the newest hardware do not descri
 The exact machine specification MUST be recorded here once chosen, and MUST NOT be silently upgraded — a
 target met by changing the rig has not been met.
 
+**That machine has not been chosen.** [Q-10](../open-questions.md) stays open on it.
+
+### Interim rig — provisional
+
+Until the reference rig exists, figures are produced on the developer machine below. It is recorded so
+that a figure can say which machine produced it. It is **not** the reference rig, and it does not satisfy
+the requirement above.
+
+| Property | Value |
+|---|---|
+| Machine | MacBook Pro, 16-inch, November 2023 (Mac15,7) |
+| Chip | Apple M3 Pro: 12 CPU cores (6 performance, 6 efficiency), 18 GPU cores |
+| Architecture | arm64 only; page size 16 KB |
+| Memory | 36 GB |
+| Storage | 512 GB internal solid-state drive, APFS |
+| Display | Built-in 3456 × 2234 Retina |
+| Operating system | macOS 26.6 |
+
+These rules apply to every figure measured on it:
+
+- **Each figure is labelled provisional and names this rig.** It is still a hypothesis, per the rule in
+  the [documentation index](../README.md). It is never a measured fact about the product, and it does not
+  pass or fail any NFR or phase gate.
+- **It is the opposite of unflattering.** It has four and a half times the reference memory, a
+  current-generation chip and a fast drive. A figure that meets its target here is evidence that the code
+  path works, not that the target holds. A figure that misses its target here is still evidence that
+  it misses.
+- **It covers one of D-46's two macOS architectures and none of Linux.** Per [the protocol](#the-protocol),
+  nothing measured here stands in for x86-64 or Linux. Those have no rig of any kind.
+- **Recording the reference rig replaces this machine; it does not upgrade the reference rig.** No target
+  may be accepted on this machine's evidence. When the reference rig is recorded, provisional figures
+  are re-measured on it rather than carried forward.
+
 ## Reference corpus
 
 Three distinct corpora serve three distinct purposes.
