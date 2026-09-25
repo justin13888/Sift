@@ -36,11 +36,29 @@ import WebKit
 /// D-50 removes the obvious route: there is no `evaluateJavaScript` here to ask the document
 /// how tall it is. So the body view **owns its own scrolling** rather than participating in an
 /// outer one, and never needs to know. That is compatible with D-54's native rows above one
-/// body view, and it is the honest answer rather than a workaround — the alternative the
-/// roadmap names is a body pinned to a fixed layout width, which is worse and is what Q-15 is
-/// already weighing for a different reason.
+/// body view.
+///
+/// # The layout width is pinned — Q-15
+///
+/// The sanitized document keeps the sender's media queries, and the engine evaluates them
+/// against its own viewport. The dark transform resolved those same queries once, in the core,
+/// at one width — so a web view that reflowed with the reader pane would apply the sender's
+/// colours for one width underneath overrides computed for another, and step 5's contrast
+/// repair would describe a pair that no longer exists. The web view is therefore **always
+/// exactly `layoutWidth` points wide**, whatever the pane does: centred when the pane is wider,
+/// scrolled sideways when it is narrower. Resizing the reader moves the column; it never
+/// reflows the document.
 final class BodyView: NSView {
+    /// The width every body is laid out at. **This is the cascade's pinned viewport** —
+    /// `sift_css::cascade::Viewport::default()` in the core — and the two must agree, or the
+    /// engine evaluates the sender's media queries at a width the transform never saw.
+    static let layoutWidth: CGFloat = 800
+
     private var web: WKWebView!
+    /// Carries the pinned column sideways when the pane is narrower than it. Vertical
+    /// scrolling stays the web view's own, as it was before the width was pinned.
+    private let scroller = NSScrollView()
+    private let column = NSView()
     private var app: OpaquePointer?
     /// The document currently loaded. Revoked before the next one is opened — D-90.
     private var token: String?
@@ -72,13 +90,45 @@ final class BodyView: NSView {
         web = WKWebView(frame: frame, configuration: configuration)
         web.navigationDelegate = self
         web.uiDelegate = self
-        web.autoresizingMask = [.width, .height]
+        // Q-15: sized by `layout()`, never by autoresizing — its width is a constant.
+        web.autoresizingMask = []
         // No back-forward gestures: there is nothing to go back to, and a swipe that appeared
         // to do something would be a navigation this design does not have.
         web.allowsBackForwardNavigationGestures = false
+        // Magnification scales the rendered page without laying it out again, so it leaves
+        // the viewport — and with it every media query — where Q-15 pinned it.
         web.allowsMagnification = true
         web.setValue(false, forKey: "drawsBackground")
-        addSubview(web)
+
+        column.addSubview(web)
+        scroller.documentView = column
+        scroller.drawsBackground = false
+        scroller.hasHorizontalScroller = true
+        scroller.hasVerticalScroller = false
+        scroller.autohidesScrollers = true
+        // The outer view only ever moves sideways; a vertical bounce here would drag the whole
+        // column away from the chrome above it.
+        scroller.verticalScrollElasticity = .none
+        scroller.frame = bounds
+        scroller.autoresizingMask = [.width, .height]
+        addSubview(scroller)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsLayout = true
+    }
+
+    /// Lay the pinned column out inside whatever the pane currently is.
+    override func layout() {
+        super.layout()
+        let visible = scroller.contentSize
+        let width = max(BodyView.layoutWidth, visible.width)
+        column.frame = NSRect(x: 0, y: 0, width: width, height: visible.height)
+        // Centred when there is room; flush at the origin, and scrolled to, when there is not.
+        let inset = ((width - BodyView.layoutWidth) / 2).rounded(.down)
+        web.frame = NSRect(
+            x: inset, y: 0, width: BodyView.layoutWidth, height: visible.height)
     }
 
     @available(*, unavailable)
