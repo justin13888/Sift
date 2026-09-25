@@ -21,7 +21,7 @@
 //! 7. Provide an escape hatch.
 
 use crate::cascade::Computed;
-use crate::colour::{ACCEPTABLE_CONTRAST, NEAR_NEUTRAL_CHROMA, Oklab, Rgb, contrast_ratio, parse};
+use crate::colour::{NEAR_NEUTRAL_CHROMA, Oklab, Rgb, contrast_ratio, contrast_threshold, parse};
 
 /// Why a message was not transformed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,9 +95,12 @@ pub fn transform_colour(colour: Rgb) -> Rgb {
 /// Nudges the foreground's lightness away from the background until the pair passes, or
 /// until it runs out of room. Moves the **foreground** because the background is more likely
 /// to be a brand colour a reader recognises.
+///
+/// `threshold` is the ratio the pair must reach — [`contrast_threshold`] chooses it, raised
+/// where the system's increased-contrast preference is set.
 #[must_use]
-pub fn repair_contrast(foreground: Rgb, background: Rgb) -> Option<Rgb> {
-    if contrast_ratio(foreground, background) >= ACCEPTABLE_CONTRAST {
+pub fn repair_contrast(foreground: Rgb, background: Rgb, threshold: f64) -> Option<Rgb> {
+    if contrast_ratio(foreground, background) >= threshold {
         return Some(foreground);
     }
     let fg = foreground.to_oklab();
@@ -110,7 +113,7 @@ pub fn repair_contrast(foreground: Rgb, background: Rgb) -> Option<Rgb> {
         let l = (fg.l + direction * f64::from(step) * 0.025).clamp(0.0, 1.0);
         let candidate = Rgb::from_oklab(Oklab::from_lch(l, fg.chroma(), fg.hue()), foreground.a);
         best = candidate;
-        if contrast_ratio(candidate, background) >= ACCEPTABLE_CONTRAST {
+        if contrast_ratio(candidate, background) >= threshold {
             return Some(candidate);
         }
     }
@@ -149,12 +152,22 @@ const COLOUR_PROPERTIES: &[&str] = &[
 
 /// Run steps 2 through 5 over a resolved tree.
 ///
+/// `increased_contrast` is the system's increased-contrast preference. It raises the
+/// threshold step 5 repairs toward, because a user who asked the system for more contrast
+/// has not asked for it everywhere except inside the message.
+///
 /// # Errors
 /// [`Skipped`] where the transform must not run.
-pub fn run(css: &str, enabled: bool, computed: &[Computed]) -> Result<Transformed, Skipped> {
+pub fn run(
+    css: &str,
+    enabled: bool,
+    increased_contrast: bool,
+    computed: &[Computed],
+) -> Result<Transformed, Skipped> {
     if !enabled {
         return Err(Skipped::NotEnabled);
     }
+    let threshold = contrast_threshold(increased_contrast);
     // Step 2, before anything else. Stopping here is the whole of FR-32.
     if sender_declared_dark_mode(css) {
         return Err(Skipped::SenderDeclaredDarkMode);
@@ -193,7 +206,7 @@ pub fn run(css: &str, enabled: bool, computed: &[Computed]) -> Result<Transforme
         // Step 5, over the pair this element actually renders.
         if let (Some(fg), Some(bg)) = (foreground, background) {
             let (tfg, tbg) = (transform_colour(fg), transform_colour(bg));
-            match repair_contrast(tfg, tbg) {
+            match repair_contrast(tfg, tbg, threshold) {
                 Some(repaired) if repaired != tfg => {
                     overrides.retain(|o| !(o.element == index && o.property == "color"));
                     overrides.push(Override {
@@ -247,6 +260,7 @@ impl ImageClass {
 mod tests {
     use super::*;
     use crate::cascade::Computed;
+    use crate::colour::{ACCEPTABLE_CONTRAST, INCREASED_CONTRAST_THRESHOLD};
 
     fn rgb(r: u8, g: u8, b: u8) -> Rgb {
         Rgb {
@@ -274,7 +288,7 @@ mod tests {
         ] {
             assert!(sender_declared_dark_mode(css), "{css}");
             assert_eq!(
-                run(css, true, &[style(&[("color", "black")])]),
+                run(css, true, false, &[style(&[("color", "black")])]),
                 Err(Skipped::SenderDeclaredDarkMode)
             );
         }
@@ -285,7 +299,7 @@ mod tests {
         // FR-31: a mangled brand header is a visible defect, a light message in a dark
         // window is merely unpleasant.
         assert_eq!(
-            run("", false, &[style(&[("color", "black")])]),
+            run("", false, false, &[style(&[("color", "black")])]),
             Err(Skipped::NotEnabled)
         );
     }
@@ -341,14 +355,65 @@ mod tests {
         let background = rgb(30, 30, 30);
         let foreground = rgb(45, 45, 45);
         assert!(contrast_ratio(foreground, background) < ACCEPTABLE_CONTRAST);
-        let repaired = repair_contrast(foreground, background).expect("repairable");
+        let repaired =
+            repair_contrast(foreground, background, ACCEPTABLE_CONTRAST).expect("repairable");
         assert!(contrast_ratio(repaired, background) >= ACCEPTABLE_CONTRAST);
     }
 
     #[test]
     fn a_pair_that_already_passes_is_left_alone() {
         let (fg, bg) = (rgb(255, 255, 255), rgb(0, 0, 0));
-        assert_eq!(repair_contrast(fg, bg), Some(fg));
+        assert_eq!(repair_contrast(fg, bg, ACCEPTABLE_CONTRAST), Some(fg));
+    }
+
+    #[test]
+    fn increased_contrast_repairs_a_pair_the_ordinary_threshold_accepts() {
+        // The UI shell: a user who asked the system for more contrast has not asked for it
+        // everywhere except inside the message. A pair between the two thresholds is the
+        // case that proves the preference reached step 5 rather than stopping at the chrome.
+        let (fg, bg) = (rgb(140, 140, 140), rgb(20, 20, 20));
+        let ratio = contrast_ratio(fg, bg);
+        assert!(
+            (ACCEPTABLE_CONTRAST..INCREASED_CONTRAST_THRESHOLD).contains(&ratio),
+            "the fixture is not between the thresholds: {ratio}"
+        );
+        assert_eq!(repair_contrast(fg, bg, ACCEPTABLE_CONTRAST), Some(fg));
+        let raised = repair_contrast(fg, bg, INCREASED_CONTRAST_THRESHOLD).expect("repairable");
+        assert!(contrast_ratio(raised, bg) >= INCREASED_CONTRAST_THRESHOLD);
+    }
+
+    #[test]
+    fn run_repairs_toward_the_raised_threshold_only_when_the_preference_is_set() {
+        // Through `run`, so the flag is proven to select the threshold rather than merely to
+        // be accepted. `#383838` on `#ffffff` transforms to a pair that clears the ordinary
+        // threshold unaided and does not clear the raised one.
+        let computed = [style(&[
+            ("color", "#383838"),
+            ("background-color", "#ffffff"),
+        ])];
+        let bg = transform_colour(rgb(0xff, 0xff, 0xff));
+        let tfg = transform_colour(rgb(0x38, 0x38, 0x38));
+        let ratio = contrast_ratio(tfg, bg);
+        assert!(
+            (ACCEPTABLE_CONTRAST..INCREASED_CONTRAST_THRESHOLD).contains(&ratio),
+            "the fixture is not between the thresholds after transform: {ratio}"
+        );
+
+        let colour_of = |result: &Transformed| {
+            result
+                .overrides
+                .iter()
+                .find(|o| o.property == "color")
+                .map(|o| o.value.clone())
+        };
+        let ordinary = run("", true, false, &computed).expect("runs");
+        let raised = run("", true, true, &computed).expect("runs");
+        assert_eq!(colour_of(&ordinary), Some(tfg.to_css()));
+        let repaired = colour_of(&raised).expect("a colour override");
+        assert_ne!(Some(repaired.clone()), colour_of(&ordinary));
+        let repaired = parse(&repaired).expect("the override parses");
+        assert!(contrast_ratio(repaired, bg) >= INCREASED_CONTRAST_THRESHOLD - 0.05);
+        assert!(raised.unrepaired.is_empty());
     }
 
     #[test]
@@ -359,7 +424,7 @@ mod tests {
             ("color", "#808080"),
             ("background-color", "#7f7f7f"),
         ])];
-        let result = run("", true, &computed).expect("runs");
+        let result = run("", true, false, &computed).expect("runs");
         // Either it repaired it or it said it could not; what it must never do is neither.
         let repaired = result.overrides.iter().any(|o| o.property == "color");
         assert!(repaired || !result.unrepaired.is_empty());
@@ -386,7 +451,7 @@ mod tests {
     #[test]
     fn an_unrecognised_colour_is_left_alone() {
         let computed = [style(&[("color", "var(--brand)")])];
-        let result = run("", true, &computed).expect("runs");
+        let result = run("", true, false, &computed).expect("runs");
         assert!(
             !result.overrides.iter().any(|o| o.property == "color"),
             "a colour nobody could parse was overridden anyway"
@@ -396,7 +461,7 @@ mod tests {
     #[test]
     fn a_fully_transparent_colour_carries_nothing_to_invert() {
         let computed = [style(&[("background-color", "transparent")])];
-        let result = run("", true, &computed).expect("runs");
+        let result = run("", true, false, &computed).expect("runs");
         assert!(result.overrides.is_empty());
     }
 
@@ -405,7 +470,7 @@ mod tests {
         // The reason the cascade had to be resolved first: a `<td>` with no colour of its own
         // still has one, and a transform working from declarations alone would leave it.
         let computed = [style(&[("color", "black"), ("background-color", "white")])];
-        let result = run("", true, &computed).expect("runs");
+        let result = run("", true, false, &computed).expect("runs");
         assert!(result.overrides.iter().any(|o| o.property == "color"));
         assert!(
             result

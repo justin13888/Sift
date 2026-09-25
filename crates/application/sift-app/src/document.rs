@@ -158,6 +158,10 @@ impl App {
             origin: context_origin.clone(),
             blocker: None,
             dark,
+            // The ordinary threshold until the shell reports the system's increased-contrast
+            // preference across the boundary; nothing carries it here yet. The pipeline and
+            // the transform honour it once it arrives.
+            increased_contrast: false,
             broker: &mut self.resources,
         };
         let rendered = sift_pipeline::render(&selected, &mut context).map_err(|e| e.to_string())?;
