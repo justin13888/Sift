@@ -143,6 +143,39 @@ pub fn total_attributed() -> i64 {
     snapshot().iter().sum()
 }
 
+/// D-16's footprint of this process, where the platform keeps one: `phys_footprint` on macOS.
+///
+/// # Why it is here
+///
+/// The residual is *footprint minus what is accounted for*, and this is its other operand.
+/// On Linux it is PSS, which the kernel publishes as a file and which therefore needs no
+/// unsafe code — `sift_observe::footprint` reads that one. On macOS the figure is only
+/// reachable through a system call, and this crate is the one place in the foundation layer
+/// overview.md permits unsafe code, so the call sits beside the counters it is subtracted
+/// from rather than asking for a fifth exception.
+///
+/// Never resident set size: on macOS it counts pages the process has already returned, and
+/// a slope fitted to it measures the system's reclaim schedule rather than Sift.
+///
+/// `None` where the call fails, which a caller records as a missing sample rather than a
+/// zero — a zero would read as the footprint collapsing.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn phys_footprint() -> Option<u64> {
+    let pid = libc::c_int::try_from(std::process::id()).ok()?;
+    let mut info = core::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+    // SAFETY: flavour V2 writes exactly one `rusage_info_v2` into the buffer, which is that
+    // type and that size; the pointer is valid for the duration of the call.
+    let rc = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V2, info.as_mut_ptr().cast()) };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: the call succeeded, so the structure was written; it was also zeroed, and
+    // every field is a plain integer for which zero is a valid value.
+    let info = unsafe { info.assume_init() };
+    Some(info.ri_phys_footprint)
+}
+
 /// The header word stored immediately before every returned pointer.
 const HEADER: usize = size_of::<usize>();
 
@@ -420,6 +453,26 @@ mod tests {
             "the premise of this test no longer holds"
         );
         assert!(alloc(layout).is_null());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_footprint_is_read_and_moves_with_a_touched_allocation() {
+        // A reader that returned a constant would pass a "some number came back" test, and
+        // the whole soak would then fit a flat line to it and pass forever.
+        let before = phys_footprint().expect("proc_pid_rusage answered");
+        assert!(before > 0);
+        let mut held = vec![0u8; 64 << 20];
+        // Touch every page, or the pages are never faulted in and never counted.
+        for page in held.chunks_mut(4096) {
+            page[0] = 1;
+        }
+        let during = phys_footprint().expect("proc_pid_rusage answered");
+        assert!(
+            during >= before + (32 << 20),
+            "64 MiB touched moved the footprint from {before} to {during}"
+        );
+        drop(core::hint::black_box(held));
     }
 
     #[test]
