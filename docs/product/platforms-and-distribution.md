@@ -88,8 +88,10 @@ under an agreement preserving it.
 
 **It is the only irreversible item in this documentation set.** Every other decision here can be revisited
 by amending a document. This one cannot: a contribution that lands uncovered cannot be covered afterwards
-once its author is unreachable or unwilling. D-33 defers the channel that creates the constraint, so D-113
-does not spend that once; it states when it comes due.
+once its author is unreachable or unwilling. D-33 defers the channel that creates the constraint, and D-113
+accepts that loss for every external contribution merged while it is deferred: each one is a contribution a
+store build can later carry only with its author's consent or by replacing it. What D-113 keeps open is the
+store for the holder's own work, and it states when the question must be answered again.
 
 ## D-113 — AGPL-3.0 only; no contributor agreement while the App Store is deferred
 
