@@ -120,7 +120,7 @@ contestable. A decision without its counter-argument is an assertion.
 **Open questions are not resolved by deletion.** Answering one means writing the answer into its owning
 document and striking the entry in [open questions](open-questions.md) with a pointer.
 
-**The design is settled *pending* ten open questions, three of which are load-bearing. That is a
+**The design is settled *pending* nine open questions, three of which are load-bearing. That is a
 weaker claim than settled, and the distinction between the two groups is the useful part.**
 
 The two that can still move the design: Q-10 leaves every number in this set unfalsifiable until the
