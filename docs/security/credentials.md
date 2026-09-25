@@ -260,7 +260,8 @@ change, and the section is re-read against the provider's pages before an applic
   provider's user-data policy permits, and a mail client whose user reads their own mail is the central
   one. The application states the type and the user-facing feature each scope serves.
 - **Least privilege, argued per scope.** Each requested scope is justified as the narrowest that delivers
-  the feature. D-88's permanent one-scope set is that argument already made.
+  the feature. D-88's one-scope set is that argument, and it is settled before filing, because
+  verification is what makes it permanent.
 - **A demonstration video** showing a user initiating and granting consent, and then the use of the
   granted scope in the product, in detail.
 - **Compliance with the provider's limited-use terms**: no transfer of user data except to deliver the
