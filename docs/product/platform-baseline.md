@@ -16,7 +16,7 @@ consumed by an App Store record is never released, even after the record is dele
 application id cannot be renamed — a new id is a new application, and existing users are not upgraded to
 it. A URI scheme is a first-come namespace with no registry and no arbiter.
 
-[Q-16](../open-questions.md) already observes that licensing is "the only irreversible item in this
+[Q-16](../open-questions.md), now [D-112](platforms-and-distribution.md), observed that licensing is "the only irreversible item in this
 documentation set". That was true of the *decisions*. It was not true of the set as a whole, because the
 set named none of these strings and therefore could not see that it was about to spend them.
 
@@ -52,7 +52,7 @@ installed side by side, which removes a debugging convenience.
 **Contestable because:** it makes the direct-download build pay for the store's constraints, in a project
 whose Linux distribution decision ([D-15](platforms-and-distribution.md)) accepted a narrower install base
 for a similar reason and called it out as a cost. If the App Store channel is ever dropped — which
-[Q-16](../open-questions.md) contemplates — this decision has no remaining argument and should be
+[D-112](platforms-and-distribution.md) keeps possible — this decision has no remaining argument and should be
 reversed rather than kept out of habit.
 
 ## D-46 — macOS 13 or later, universal

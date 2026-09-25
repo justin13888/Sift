@@ -1,6 +1,6 @@
 # Platforms and distribution
 
-**Owns:** D-9, D-15, D-33.
+**Owns:** D-9, D-15, D-33, D-112.
 
 ## D-9 — macOS first, then Linux. Windows is out of scope.
 
@@ -77,17 +77,55 @@ licensed AGPL-3.0, so this is live rather than hypothetical: the copyright holde
 because they hold all of the copyright, and that stays true only for as long as every contribution arrives
 under an agreement preserving it.
 
-**Contributions MUST therefore be accepted under such an agreement.** This sits in a distribution document
-because the App Store channel is what requires it — remove that channel and the requirement goes with it.
-
 **It is the only irreversible item in this documentation set.** Every other decision here can be revisited
 by amending a document. This one cannot: a contribution that lands uncovered cannot be covered afterwards
 once its author is unreachable or unwilling. Everything else the set calls contestable stays contestable.
 This is contestable exactly once, and its deadline is the first external contribution rather than any
-date.
+date. D-112 spends that once.
 
-The alternatives are real and none of them has been argued here, so it is
-[an open question](../open-questions.md) rather than a settled decision.
+## D-112 — AGPL-3.0 publicly, and every contribution under a contributor licence agreement
+
+**Chosen:** the public licence stays AGPL-3.0. Every contribution not authored by the copyright holder is
+accepted only under a contributor licence agreement that grants the copyright holder a perpetual,
+irrevocable licence to the contribution, including the right to sublicense and to relicense it under other
+terms — the App Store's among them. The contributor keeps their copyright; the agreement is a licence, not
+an assignment. Each contribution records its acceptance of a named version of the agreement, and a
+contribution that does not record it MUST NOT be merged. The agreement's text and how acceptance is
+recorded live in the repository's contribution guide, beside the licence.
+**Rejected:** dropping the App Store channel and reaching macOS through Homebrew Cask alone; relicensing
+permissively; a certificate-of-origin sign-off alone; copyright assignment.
+
+**Why.** It is the only one of the options that forecloses none of the others. The agreement keeps the
+copyright holder able to do everything they can do today, so the two alternatives stay available for as
+long as the agreement is honoured: the App Store channel can still be dropped by amending D-33, and the
+code can still be relicensed permissively by the holder alone. Neither alternative returns the favour.
+Dropping the channel while accepting uncovered contributions makes the channel unreachable the moment the
+first one lands, which turns a reversible distribution choice into the irreversible one this section
+describes. Relicensing permissively is irreversible outright: every release made under it stays under it,
+and it gives up the one thing the copyleft licence was chosen for — that nobody ships a modified mail client
+that reads their users' mail without publishing what it changed.
+
+A certificate-of-origin sign-off is not enough on its own terms. It certifies that the contributor had the
+right to submit the work under the project's licence, and grants nothing beyond that licence; a
+contribution submitted under AGPL-3.0 with only a sign-off is exactly the uncovered contribution this
+section warns against. Assignment would achieve the goal too, but it asks more of a contributor than the
+goal needs and deters more of them for no additional right the channel requires.
+
+**What it costs:** some contributors decline any contributor agreement on principle, and the ones who do
+not still carry a formality the first time they contribute. The agreement is asymmetric by construction —
+the holder may ship a contribution under terms the contributor may not — and says so rather than softening
+it. It also makes the holder a single point: were the holder unreachable, nobody could exercise the
+relicensing right at all, and the App Store channel would end with them.
+
+**Contestable because:** it trades contributor goodwill for a distribution channel, in a project whose
+[R-1](../open-questions.md) escape hatch assumes a contributor community. If the App Store channel is ever
+dropped, the agreement has no remaining argument and should stop being required for new contributions —
+which, unlike the other two options, can be done at any time without losing anything already covered.
+
+The agreement governs Sift's own copyright only. It cannot reach the artefacts Sift bundles but does not
+own, nor the dependency tree it vendors; no contributor agreement can relicense somebody else's work, and
+those populations are [Q-17](../open-questions.md) and [Q-21](../open-questions.md), still open against the
+same channel.
 
 The versions, architectures, entitlements and permanently-consumed identifiers those channels commit Sift
 to are in [platform baseline](platform-baseline.md), which owns D-45 and D-46.
