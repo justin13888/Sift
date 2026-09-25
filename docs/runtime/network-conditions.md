@@ -31,15 +31,19 @@ detection is found wanting.
 
 | Tier | Trigger | Behaviour |
 |---|---|---|
-| **Unrestricted** | wired or wifi, definitely unmetered | full body and inline-image prefetch, attachment prefetch under NFR-39's ceiling, filter-list updates |
-| **Conservative** | metered unknown or guessed, or cellular | envelopes only; bodies on demand; no image prefetch; no filter-list updates; mutations flush normally |
+| **Unrestricted** | wired or wifi, definitely unmetered | full body and inline-image prefetch, attachment prefetch under NFR-39's ceiling |
+| **Conservative** | metered unknown or guessed, or cellular | envelopes only; bodies on demand; no image prefetch; mutations flush normally |
 | **Minimal** | metered, or constrained mode | inbox envelopes only; longest poll interval; mutations flush — they are bytes; everything else deferred |
 | **Offline — portal** | captive portal | queue everything; one bounded reattempt per L-28 against the account's own provider — D-96, never a probe to a detection host; no connection churn |
 | **Offline — no path** | offline, airplane mode, or system sleep | queue everything; **zero connection attempts of any kind, including the reattempt above**, until the path returns |
-| **Paused** | the user pausing sync under FR-22, or cumulative usage reaching FR-36's cap | no delta, no push, no prefetch, no list updates; connections torn down under NFR-33; **mutations still flush** |
+| **Paused** | the user pausing sync under FR-22, or cumulative usage reaching FR-36's cap | no delta, no push, no prefetch; connections torn down under NFR-33; **mutations still flush** |
 
 Mutations flush in every tier above offline, **including Paused**. They are tiny, and a triage action that
 does not take effect because the user is on cellular is a broken product.
+
+No tier mentions filter-list updates, which earlier revisions ran only when unrestricted. Under
+[D-111](../rendering/content-blocking.md) every list ships in the binary, so there is no list traffic for a
+tier to allow or defer.
 
 ## D-95 — The tier is per account, pause is per account, and the tray gesture is not a state
 
@@ -86,14 +90,15 @@ every 60 seconds while a portal is present, and its destination was never named 
 [privacy](../security/privacy.md) calls its egress table *"the complete set of permitted outbound
 connections"* and adds *"anything else is a defect"*. A recurring 60-second beacon from a resident
 application is exactly the *"coarse record of when this machine is awake and roughly where"* that document
-spends two paragraphs worrying about for the list-update rows, and it would be worse: those are
-occasional, this is once a minute.
+spends two paragraphs on for the list-update rows it has since struck under
+[D-111](../rendering/content-blocking.md), and it would have been worse: those were occasional, this is
+once a minute.
 
 It is also permanent, for the reason [Q-18](../open-questions.md) gives about the list endpoint —
 [D-33](../product/platforms-and-distribution.md) means a build keeps calling the address it shipped with
 for as long as it stays installed. Q-18 is scoped to the list endpoint and does not reach this one, so
-adding a probe endpoint would have created a second permanent operational commitment without anyone
-noticing it was one.
+adding a probe endpoint would have created a permanent operational commitment without anyone noticing it
+was one.
 
 **Why the provider connection is a better signal anyway.** A portal that intercepts a TLS connection
 cannot present a valid certificate for the provider's name, so interception is *distinguishable from
@@ -189,11 +194,13 @@ so **changing what they count later silently changes when a user's cap fires** �
 fixed here rather than left to the first implementation.
 
 **Traffic that belongs to no account is charged to the installation, never spread across accounts.**
-Filter-list and [D-37](../rendering/sender-origin.md) infrastructure-list updates serve every account and
-none; FR-3's autoconfiguration discovery happens **before the account exists**, so there is nothing to
-charge it to even in principle. All of it is accounted at installation scope, is visible to the user
+FR-3's autoconfiguration discovery happens **before the account exists**, so there is nothing to charge it
+to even in principle. Filter-list and [D-37](../rendering/sender-origin.md) infrastructure-list updates
+were the other such traffic, serving every account and none, until
+[D-111](../rendering/content-blocking.md) moved them into the binary; the rule is stated for the class, not
+for them. All of it is accounted at installation scope, is visible to the user
 alongside the per-account figures, and **does not count toward any account's cap** — a cap is a promise
-about one mailbox's traffic, and letting a list update push an account over it would make the cap fire
+about one mailbox's traffic, and letting installation traffic push an account over it would make the cap fire
 for a reason the user cannot connect to that account. NFR-31's per-account steady-state figure reads the
 same counter and excludes the same traffic, so the two cannot disagree about what they are measuring.
 
@@ -208,7 +215,7 @@ carried the budgets and not the accounting they imply.
 |---|---|
 | **NFR-30** | Detect a path change and re-evaluate the policy tier within 2 seconds. Unknown metered state maps to Conservative, never Unrestricted |
 | **NFR-31** | In Minimal tier, at or under 10 KB per hour per account steady-state, excluding user-initiated fetches |
-| **NFR-32** | **Zero speculative prefetch of any kind** — bodies, images, attachments, filter lists — in Conservative or Minimal |
+| **NFR-32** | **Zero speculative prefetch of any kind** — bodies, images, attachments — in Conservative or Minimal |
 | **NFR-33** | On a path change, all connections torn down within 5 seconds and re-established within 5 seconds **of a usable path being available**: no stuck sockets, no duplicate delivery, no lost mutations. Where the new path is offline, teardown is the whole requirement — re-establishment waits, per NFR-38 |
 | **NFR-34** | Captive portals detected and handled: one probe per 60 seconds, no authentication-failure cascade, no credential re-prompt |
 | **NFR-35** | The override is persisted **by network identity** and takes precedence over detection every time. FR-35 owns the feature; this is the testable property — that a returning network is recognised as the same one, and that detection never overrules a stored answer |

@@ -23,8 +23,8 @@ The complete set of permitted outbound connections is:
 | Destination | Purpose | Discloses |
 |---|---|---|
 | Configured mail providers | sync, fetch, mutation, server-side search | everything they already hold |
-| Filter-list sources | list updates, subject to the network policy tier | that Sift is installed, which lists are subscribed, and the address and time of every fetch — see below |
-| The bundled-list update source | updates to the [sender-infrastructure list](../rendering/sender-origin.md) and the bundled email filter list | the same |
+| ~~Filter-list sources~~ | **removed by [D-111](../rendering/content-blocking.md)** — every list ships in the binary and nothing fetches one | nothing — see below |
+| ~~The bundled-list update source~~ | **removed by [D-111](../rendering/content-blocking.md)** — the [sender-infrastructure list](../rendering/sender-origin.md) and the bundled email filter list update with the binary | nothing |
 | Autoconfiguration discovery | **only** during interactive account setup — see below | **the domain of an address the user is adding**, to a host that is not yet their provider |
 | Remote content hosts | **only** for resources the user has explicitly allowed, and only through the [resource broker](../architecture/resource-broker.md) | that the message was opened, to the host the user allowed |
 | The crash-report endpoint | **only** on an opt-in upload of a report the user has read in full — D-35 | what the report contains, which the user has read |
@@ -41,21 +41,19 @@ names domains explicitly — so it cannot be waved through as configuration traf
 silent and helpful. It is bounded in a way no other row is: it happens during setup, at the user's
 instigation, once per account.
 
-**The two list rows disclose more than a subscription, and a posture stated this plainly should say so.**
-A list fetch carries the network address it is made from and the time it was made, to a host the user did
-not choose. Because Sift is resident by design, those fetches recur on a schedule for as long as it stays
-installed. What accumulates at the other end is a coarse record of when this machine is awake and roughly
-where it is — held by a third party, in a product whose stated posture is that nothing about the mail
-leaves the machine. Sender domains are excluded from telemetry under NFR-22 as correspondence metadata;
-this is a weaker signal than that, but it is not nothing, and it is continuous where the
-autoconfiguration row is once per account.
+**The two list rows are struck rather than deleted, because what they disclosed is the reason they are
+gone.** A list fetch carried the network address it was made from and the time it was made, to a host the
+user did not choose. Because Sift is resident by design, those fetches would have recurred on a schedule
+for as long as it stayed installed, and what accumulated at the other end was a coarse record of when this
+machine is awake and roughly where it is — held by a third party, in a product whose stated posture is
+that nothing about the mail leaves the machine. That disclosure was continuous where the autoconfiguration
+row is once per account.
 
-It is disclosed rather than mitigated here because each alternative is a decision rather than an
-adjustment. Fetching only while a window is open removes the always-on signal and costs staleness, which
-NFR-43 tolerates and this document does not get to trade away alone. Proxying every list through the
-bundled-list source concentrates the same disclosure in the one host Sift does operate, which is a
-different trade rather than a smaller one. The integrity of what arrives over this same channel is a
-separate question and is [tracked as one](../open-questions.md).
+[D-111](../rendering/content-blocking.md) removes it rather than mitigating it: every list ships in the
+binary and arrives through the platform channel with the rest of Sift, so no list traffic exists for a
+table row to describe. The staleness that costs is the one NFR-43 already tolerates, and D-111 records it.
+The same decision answers the integrity question this channel raised, which was
+[tracked separately](../open-questions.md) as Q-11.
 
 **There is no update endpoint.** [D-33](../product/platforms-and-distribution.md) removed self-update
 entirely, so update traffic belongs to the platform's own channel and never to a Sift-initiated
@@ -116,8 +114,8 @@ Recent queries within a session are a convenience and are not durable.
 [D-96](../runtime/network-conditions.md) detects a portal from the behaviour of connections Sift was
 already making to the user's own providers, so there is no detection endpoint and no beacon. A
 conventional 60-second connectivity check would have been a recurring third-party disclosure of when this
-machine is awake and roughly where — the same disclosure this table already worries about for list
-updates, an order of magnitude more often — and permanent, for the reason [Q-18](../open-questions.md)
+machine is awake and roughly where — the disclosure that removed the list-update rows from this table,
+an order of magnitude more often — and permanent, for the reason [Q-18](../open-questions.md)
 gives about addresses a build keeps calling for years.
 
 The [debug panels](../runtime/observability.md) expose a great deal about a message and about Sift's

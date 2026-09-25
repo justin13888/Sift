@@ -48,13 +48,12 @@ Flatpak on Linux — all from the first release. Sift implements no update mecha
 put a bespoke code-delivery path. Platform channels bring signing, transport, rollback and revocation that
 are maintained by people whose job that is, and they are what users already trust for everything else.
 
-**One path survives this reasoning without ever having been measured against it.** Filter lists and the
-sender-infrastructure list update from a source Sift operates, and what arrives becomes CSS injected into
-every message body — see [content blocking](../rendering/content-blocking.md). That is content delivery
-rather than code delivery, but the gap between the two is narrower than the words suggest, and the
-sentence above applies to it more nearly than to anything else Sift does. Whether that endpoint should
-exist is [an open question](../open-questions.md). This decision is about the binary and does not settle
-it.
+**One path once survived this reasoning without ever having been measured against it.** Filter lists and
+the sender-infrastructure list were to update from a source Sift operates, and what arrives becomes CSS
+injected into every message body. That is content delivery rather than code delivery, but the gap between
+the two is narrower than the words suggest, and the sentence above applies to it more nearly than to
+anything else Sift does. [D-111](../rendering/content-blocking.md) measures it against this decision and
+removes it: every list ships in the binary and reaches users through these same channels.
 
 Two macOS channels rather than one because they reach different people, and neither reaches the other's
 audience: Homebrew Cask is how technically-inclined macOS users install software, while the App Store is
