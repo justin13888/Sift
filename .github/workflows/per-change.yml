@@ -2,16 +2,22 @@
 #
 # "Per-change gates run on ordinary hosted runners and block a merge."
 #
-# The other two tiers are deliberately not here. Per-integration gates need dedicated
-# macOS and Linux machines and block a release; continuous gates — the NFR-45 soak above
-# all — run indefinitely on the reference rig, report a series rather than a verdict, and
-# block a phase. Both are waiting on hardware: see issue #21.
+# The other two tiers are deliberately not here. Per-integration gates block a release and
+# run on a cadence in per-integration.yml — for now on hosted Intel and Apple-silicon
+# runners, natively per architecture, which is a scaffold and not the dedicated machines
+# D-63 costs. Continuous gates — the NFR-45 soak above all — run indefinitely on the
+# reference rig, report a series rather than a verdict, and block a phase; they wait on
+# that hardware.
+#
+# The "macos intel" leg below cross-builds on an Apple-silicon runner, so its tests run
+# translated. That is enough to catch a target that does not compile or link; the native
+# Intel run is per-integration.yml's.
 #
 # Three per-change gates that belong in this tier are also absent, because each one
 # "fails silently on the wrong host" and needs a real macOS session rather than a runner
 # image: Keychain behaviour, entitlements and sandbox behaviour on both channels
 # including NFR-49's provenance marking, and login-item residency. They are tracked in
-# #21 and #35 rather than being run here and believed.
+# #81 and #35 rather than being run here and believed.
 #
 # Every step below runs a `mise run <task>` defined in mise.toml. That is deliberate: a gate's
 # flags are written once, and what a contributor runs locally is the same command a runner

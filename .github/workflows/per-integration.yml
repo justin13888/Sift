@@ -1,0 +1,110 @@
+# D-63, tier 2 of 3: per-integration gates — the hosted scaffold.
+#
+# "Per-integration gates run on dedicated macOS and Linux machines on a fixed cadence and
+# block a release."
+#
+# **This is not those machines.** It runs the tier's gates on hosted runners, one Intel and
+# one Apple-silicon, so that the tier exists, runs on its cadence, and fails loudly, while
+# the dedicated hosts D-63 costs are still unowned (#81). What that leaves unanswered is
+# stated here rather than discovered:
+#
+#   - **R-13, compounded.** A hosted image is re-imaged on the provider's schedule, which moves
+#     the macOS version and its engine under every gate with no Sift commit. Each run records
+#     the host it ran on (the step summary below) so a change in a figure can be put beside a
+#     change in the host — but a baseline taken here is a baseline of an image, not of a
+#     machine, and regenerating one is exactly the operation R-13 warns can absorb a regression.
+#   - **No dedicated host.** No soak (NFR-45 needs 72 hours; a hosted job is capped far below
+#     that), no footprint figures (NFR-8, NFR-9, NFR-12 are measured on the reference rig, and a
+#     shared virtual machine is not it), and no Linux leg beyond what per-change already runs.
+#   - **The three real-session gates** — Keychain, entitlements and sandbox on both channels,
+#     login-item residency — still need a signed build in a real macOS session, which a runner
+#     image is not. They stay absent rather than being run here and believed.
+#
+# **What it does do: build and test natively on each architecture.** Per-change builds the Intel
+# target on an Apple-silicon runner, where its tests run translated — D-46 makes page size, and
+# with it allocator granularity and what a purge returns, differ per architecture, and a
+# translated run measures neither. Each leg here asserts it is on the architecture it names and
+# not translated before it runs anything, because a runner label that quietly resolves to the
+# other architecture would pass every step and prove nothing.
+#
+# Every gate is a `mise run <task>`, for the same reason as per-change.yml. No leg sets
+# CARGO_BUILD_TARGET: the native target is the point, and `mise run macos` refuses it.
+
+name: per-integration
+
+on:
+  schedule:
+    # Weekly, off the hour so it does not queue behind every other scheduled workflow.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  native:
+    name: native ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The Intel label is GitHub's last Intel macOS image; when it is retired, this leg has
+          # no hosted replacement and becomes the dedicated Intel host or nothing (#81).
+          - { name: "macos intel",         os: macos-15-intel, arch: x86_64 }
+          - { name: "macos apple silicon", os: macos-15,       arch: arm64 }
+    steps:
+      - name: D-46 — on ${{ matrix.arch }}, natively, or not at all
+        run: |
+          machine="$(uname -m)"
+          translated="$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)"
+          if [ "$machine" != "${{ matrix.arch }}" ] || [ "$translated" != "0" ]; then
+            echo "::error::expected native ${{ matrix.arch }}, got $machine (translated=$translated)"
+            exit 1
+          fi
+
+      # R-13: the host is part of the baseline, so every run says which one it was.
+      - name: R-13 — record the host this run measured
+        run: |
+          {
+            echo "### ${{ matrix.name }}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| runner image | ${ImageOS:-unknown} ${ImageVersion:-unknown} |"
+            echo "| macOS | $(sw_vers -productVersion) ($(sw_vers -buildVersion)) |"
+            echo "| architecture | $(uname -m) |"
+            echo "| page size | $(pagesize) |"
+            echo "| Xcode | $(xcodebuild -version | tr '\n' ' ') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-${{ matrix.arch }}
+      - run: mise run test
+      - name: NFR-16, NFR-17, FR-18 — the store under fault injection
+        run: mise run test-fault
+      - name: D-61 — the shell links this architecture's core
+        run: mise run macos
+
+  # The schema-diff job (docs/build/verification.md): it depends on a third party's document at
+  # a third party's address, so it runs on a cadence rather than per change, and an unreachable
+  # document fails the run rather than passing it.
+  schema:
+    name: D-13 — endpoints against the live discovery document
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - uses: Swatinem/rust-cache@v2
+      - run: mise run gmail-schema
