@@ -111,7 +111,7 @@ here changing. That is the same obligation the entitlement set in
 
 D-33 chooses three channels and stops. A channel is not only a format:
 
-- **The Homebrew Cask** is a definition in a tap. Its uninstall stanza names the on-disk layout and the
+- **The Homebrew Cask** is a definition in a tap. Its zap stanza names the on-disk layout and the
   Keychain service and access-group names, both of which
   [platform baseline](../product/platform-baseline.md) records as effectively permanent *because* they
   are published there. Whether the tap is the project's own or a submission to the central one is a

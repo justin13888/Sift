@@ -120,7 +120,7 @@ impl Staged {
 /// discoverable by anyone holding the file, which is the confirmation attack D-43 closes.
 ///
 /// The fan-out depth is **fixed at first release**, because the on-disk layout is published
-/// in the Cask uninstall stanza and changing it breaks uninstall for existing users.
+/// in the Cask zap stanza and changing it breaks zap cleanup for existing users.
 #[must_use]
 pub fn path_of(address: &ContentAddress) -> String {
     address.path()

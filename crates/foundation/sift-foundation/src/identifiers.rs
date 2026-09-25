@@ -4,7 +4,7 @@
 //! code can reach them. They are here rather than beside each consumer because several
 //! independent things must agree on each one and none of them can be changed afterwards:
 //! the bundle identifier binds the App Store record, the Keychain names are published in
-//! the Cask uninstall stanza, and the Flatpak application id is simultaneously the D-Bus
+//! the Cask zap stanza, and the Flatpak application id is simultaneously the D-Bus
 //! well-known name, the desktop-file name, the portal identity and the data root.
 //!
 //! **Each is consumed once, for the life of the project.** A test cross-checks every value
@@ -91,7 +91,7 @@ pub const FLATPAK_APPLICATION_ID: &str = "net.justinchung.Sift";
 
 /// The Keychain service name credential items are stored under — NFR-23.
 ///
-/// Published in the Cask uninstall stanza, so changing it breaks uninstall for existing
+/// Published in the Cask zap stanza, so changing it breaks zap cleanup for existing
 /// users. Individual items are not permanent; **the naming scheme is**.
 pub const KEYCHAIN_SERVICE: &str = "net.justinchung.sift";
 

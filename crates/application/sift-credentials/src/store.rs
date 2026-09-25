@@ -75,7 +75,7 @@ impl Item {
 /// The key one item is stored under.
 ///
 /// **The naming scheme is permanent**, not the individual items: it is published in the
-/// Cask uninstall stanza, so a change to it breaks uninstall for existing users.
+/// Cask zap stanza, so a change to it breaks zap cleanup for existing users.
 #[must_use]
 pub fn key_for(account: AccountId, item: Item) -> String {
     format!("{account}/{}", item.name())

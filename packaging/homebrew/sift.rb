@@ -7,7 +7,7 @@
 #
 # This file is why two decisions elsewhere are permanent. Its zap stanza publishes the on-disk
 # layout — which is what fixes D-77's blob fan-out depth at first release — and the Keychain
-# service and access-group names, a change to which breaks uninstall for every existing user.
+# service and access-group names, a change to which breaks zap cleanup for every existing user.
 
 cask "sift" do
   version "0.1.0"

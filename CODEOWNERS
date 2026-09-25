@@ -2,7 +2,7 @@
 #
 # docs/build/packaging.md: each channel artefact MUST have a named owner in this repository
 # before the first release, because a channel whose artefact nobody owns has a release path that
-# works until the day it matters (R-11). The Cask's uninstall and zap stanzas publish the on-disk
+# works until the day it matters (R-11). The Cask's zap stanza publishes the on-disk
 # layout and the Keychain names; the Flatpak manifest carries the application id.
 
 /packaging/homebrew/sift.rb           @justin13888

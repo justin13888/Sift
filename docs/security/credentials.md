@@ -38,7 +38,7 @@ correct — both need the user, and Sift does not need to know which.
 **One item per account per credential kind**, named by a stable scheme combining the service name, the
 account's own identity under [D-89](../mail/accounts.md), and the kind. The **scheme** is permanent —
 [platform baseline](../product/platform-baseline.md) records that the service and access-group names are
-*"published in the Cask uninstall stanza, so a change breaks uninstall for existing users"*, and a naming
+*"published in the Cask zap stanza, so a change breaks zap cleanup for existing users"*, and a naming
 scheme that cannot be enumerated cannot be uninstalled. Individual items are not permanent; they come and
 go with accounts.
 
