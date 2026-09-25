@@ -298,6 +298,15 @@ run = "cargo run -p sift-gmail --example reach"
 description = "D-13 — check the committed endpoint list against the live discovery document"
 run = "cargo run -p sift-gmail --example schema-check"
 
+[tasks.relevance-eval]
+description = "#24 — score D-79's ranking against a recorded relevance corpus. Args: --root DIR CORPUS"
+# Not networked, but it reads a real mailbox and a corpus that exists only on the machine of the
+# person who recorded it, so it belongs with these rather than in CI. A figure, never a gate:
+# it exits zero however the ranking does. Quit the application first. Recording the corpus is
+# `mise run harness -- --root DIR "search <q>" "relevance record CORPUS #n <q>"`; the protocol is
+# docs/product/relevance-corpus.md.
+run = "cargo run -q --release -p sift-app --example relevance-eval --"
+
 [tasks.http-probe]
 description = "Probe a host and path over the HTTP client (defaults to the Gmail discovery document)"
 run = "cargo run -p sift-http --example probe --"
