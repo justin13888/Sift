@@ -166,27 +166,68 @@ fn caveats(query: &Query) -> Vec<String> {
 /// by typing two of them.
 fn matches(query: &Query, row: &MessageRow, account: &OpenAccount) -> bool {
     query.terms.iter().all(|term| match term {
-        // Free text and an unknown operator are the same thing here: matched across the
-        // fields this build actually has, rather than dropped.
-        Term::Word(text) | Term::Unknown(text) => {
-            contains(&row.sender, text)
-                || contains(&row.subject, text)
-                || contains(&row.snippet, text)
+        Term::Word(_) | Term::Unknown(_) | Term::Phrase(_) | Term::Sender(_) | Term::Subject(_) => {
+            text_fields(term).is_some_and(|(text, fields)| fields.any(row, text))
         }
-        // Adjacency matters, which is what makes a phrase different from its words — and
-        // over a snippet rather than a body, which is the coverage this reports honestly.
-        Term::Phrase(text) => contains(&row.subject, text) || contains(&row.snippet, text),
-        Term::Sender(text) => contains(&row.sender, text),
         // Recipients are not stored on the row yet. **Never matched rather than always
         // matched**: a filter that silently passes everything is one that returns a mailbox
         // and calls it a result set.
         Term::Recipient(_) => false,
-        Term::Subject(text) => contains(&row.subject, text),
         Term::HasAttachment(want) => row.has_attachments == *want,
         Term::Unread(want) => row.unread == *want,
         Term::Location(name) => in_folder(account, row.id, name),
         Term::Before(millis) => row.received_millis < *millis,
         Term::After(millis) => row.received_millis > *millis,
+    })
+}
+
+/// Which of a row's text fields a text-bearing term is matched against.
+///
+/// The one mapping from a term to the fields it searches: the filter above and D-79's features
+/// in `relevance` both read it, so what a query matched and what ranking credits cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Fields {
+    pub(crate) sender: bool,
+    pub(crate) subject: bool,
+    pub(crate) snippet: bool,
+}
+
+impl Fields {
+    /// Whether `text` is in any of these fields of `row`, stopping at the first.
+    pub(crate) fn any(self, row: &MessageRow, text: &str) -> bool {
+        (self.sender && contains(&row.sender, text))
+            || (self.subject && contains(&row.subject, text))
+            || (self.snippet && contains(&row.snippet, text))
+    }
+
+    /// Which of these fields of `row` hold `text`, each one checked.
+    pub(crate) fn each(self, row: &MessageRow, text: &str) -> Self {
+        Self {
+            sender: self.sender && contains(&row.sender, text),
+            subject: self.subject && contains(&row.subject, text),
+            snippet: self.snippet && contains(&row.snippet, text),
+        }
+    }
+}
+
+/// The text a term matches and the fields it is matched in, or `None` for a term that is not
+/// matched against text.
+pub(crate) fn text_fields(term: &Term) -> Option<(&str, Fields)> {
+    let fields = |sender, subject, snippet| Fields {
+        sender,
+        subject,
+        snippet,
+    };
+    Some(match term {
+        // Free text and an unknown operator are the same thing here: matched across the
+        // fields this build actually has, rather than dropped.
+        Term::Word(text) | Term::Unknown(text) => (text, fields(true, true, true)),
+        // Adjacency matters, which is what makes a phrase different from its words — and
+        // over a snippet rather than a body, which is the coverage this reports honestly.
+        Term::Phrase(text) => (text, fields(false, true, true)),
+        Term::Subject(text) => (text, fields(false, true, false)),
+        Term::Sender(text) => (text, fields(true, false, false)),
+        _ => return None,
     })
 }
 

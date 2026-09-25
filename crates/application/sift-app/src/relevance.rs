@@ -37,8 +37,8 @@ use sift_foundation::identity::LocalId;
 use sift_index::merge::{self, Features, Result_, Source};
 use sift_index::query::{Query, Term};
 
-use crate::App;
 use crate::rows::MessageRow;
+use crate::{App, search};
 
 /// The first line of every corpus file.
 pub const FORMAT: &str = "# sift relevance corpus v1";
@@ -84,13 +84,13 @@ impl Judgement {
         Ok(fields.join("\t"))
     }
 
-    /// Append this judgement to a corpus file, creating it with the format marker if absent.
+    /// Append this judgement to a corpus file, writing the format marker first where the file
+    /// is absent or empty.
     ///
     /// # Errors
     /// The line cannot be formed, or the file cannot be written.
     pub fn append_to(&self, path: &Path) -> Result<(), String> {
         let line = self.line()?;
-        let fresh = !path.exists();
         let mut options = std::fs::OpenOptions::new();
         options.create(true).append(true);
         // The queries are about the user's own mail. NFR-22's reasoning applies to a file on
@@ -104,6 +104,13 @@ impl Judgement {
         let mut file = options
             .open(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
+        // Asked of the opened file rather than of the path, so an empty file someone created
+        // beforehand still gets the marker `parse` requires.
+        let fresh = file
+            .metadata()
+            .map_err(|e| format!("{}: {e}", path.display()))?
+            .len()
+            == 0;
         let mut text = String::new();
         if fresh {
             text.push_str(FORMAT);
@@ -238,30 +245,22 @@ pub fn features(query: &Query, row: &MessageRow) -> Features {
         received_millis: row.received_millis,
         ..Features::default()
     };
+    // The same term-to-field mapping `search` filters with, so a feature is credited exactly
+    // where the query matched.
     for term in &query.terms {
-        let (text, sender, subject, body, phrase) = match term {
-            Term::Word(t) | Term::Unknown(t) => (t, true, true, true, false),
-            Term::Phrase(t) => (t, false, true, true, true),
-            Term::Subject(t) => (t, false, true, false, false),
-            Term::Sender(t) => (t, true, false, false, false),
-            _ => continue,
+        let Some((text, fields)) = search::text_fields(term) else {
+            continue;
         };
+        let hit = fields.each(row, text);
         f.terms_total += 1;
-        let in_sender = sender && contains(&row.sender, text);
-        let in_subject = subject && contains(&row.subject, text);
-        let in_body = body && contains(&row.snippet, text);
-        f.matched_sender |= in_sender;
-        f.matched_subject |= in_subject;
-        f.matched_body |= in_body;
-        let found = in_sender || in_subject || in_body;
-        f.matched_phrase |= phrase && found;
+        f.matched_sender |= hit.sender;
+        f.matched_subject |= hit.subject;
+        f.matched_body |= hit.snippet;
+        let found = hit.sender || hit.subject || hit.snippet;
+        f.matched_phrase |= found && matches!(term, Term::Phrase(_));
         f.terms_present += u32::from(found);
     }
     f
-}
-
-fn contains(haystack: &str, needle: &str) -> bool {
-    needle.is_empty() || haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
 /// Every message a query returns, however many — ranking is measured over the whole set,
@@ -302,7 +301,7 @@ impl App {
             account,
             remote_id,
             internet_message_id,
-            query: query.split_whitespace().collect::<Vec<_>>().join(" "),
+            query: query.to_owned(),
         })
     }
 
@@ -443,20 +442,44 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn appending_to_an_empty_file_writes_the_marker_first() {
+        let dir = std::env::temp_dir().join(format!("sift-relevance-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("corpus.tsv");
+        std::fs::write(&path, "").unwrap();
+        judgement("one").append_to(&path).unwrap();
+        let read = parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(read, vec![judgement("one")]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn insert(app: &mut App, remote: &str, subject: &str, sender: &str, received: u64) -> LocalId {
+        insert_with(app, Some(remote), None, subject, sender, received)
+    }
+
+    fn insert_with(
+        app: &mut App,
+        remote: Option<&str>,
+        internet: Option<&str>,
+        subject: &str,
+        sender: &str,
+        received: u64,
+    ) -> LocalId {
         let account = app.account("work").unwrap();
         let id = account.ids.next();
         account
             .store
             .store
             .execute(
-                "INSERT INTO message (id, remote_id, fallback_digest, digest_rule_version,
-                                      received_at_millis, sender, recipients, subject,
-                                      provenance)
-                 VALUES (?1, ?2, ?3, 1, ?4, ?5, '', ?6, 'Delivered')",
+                "INSERT INTO message (id, remote_id, internet_message_id, fallback_digest,
+                                      digest_rule_version, received_at_millis, sender,
+                                      recipients, subject, provenance)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, '', ?7, 'Delivered')",
                 rusqlite::params![
                     id.to_bytes().to_vec(),
                     remote,
+                    internet,
                     vec![0u8; 32],
                     i64::try_from(received).unwrap(),
                     sender,
@@ -465,6 +488,96 @@ mod tests {
             )
             .unwrap();
         id
+    }
+
+    #[test]
+    fn a_judgement_resolves_by_internet_message_id_when_the_provider_id_does_not() {
+        let mut app = App::new();
+        app.add_account("work", "rich").unwrap();
+        let bare = insert_with(
+            &mut app,
+            None,
+            Some("<a@example.test>"),
+            "Invoice for March",
+            "billing@example.test",
+            100,
+        );
+        let keyed = insert_with(
+            &mut app,
+            Some("r-2"),
+            Some("<b@example.test>"),
+            "Invoice for April",
+            "billing@example.test",
+            200,
+        );
+
+        // No provider identifier at all: recorded on the internet message identifier alone.
+        let absent = app.relevance_judgement("invoice", bare).unwrap();
+        assert_eq!(absent.remote_id, None);
+        assert_eq!(
+            absent.internet_message_id.as_deref(),
+            Some("<a@example.test>")
+        );
+
+        // A provider identifier this container no longer knows falls through to the second.
+        let stale = Judgement {
+            remote_id: Some("reissued".into()),
+            ..app.relevance_judgement("invoice", keyed).unwrap()
+        };
+
+        assert_eq!(app.resolve_judgement(&absent), Some(bare));
+        assert_eq!(app.resolve_judgement(&stale), Some(keyed));
+        let outcomes = app.relevance_evaluate(&[absent, stale]).unwrap();
+        assert!(outcomes.iter().all(|o| o.resolved), "{outcomes:?}");
+        assert_eq!(outcomes[1].listed, Some(1));
+    }
+
+    #[test]
+    fn features_credit_each_operator_only_in_the_fields_it_searches() {
+        let mut app = App::new();
+        app.add_account("work", "rich").unwrap();
+        insert(
+            &mut app,
+            "r-1",
+            "Quarterly report due",
+            "alice@example.test",
+            100,
+        );
+        let row = app.search("from:alice", None, 10).unwrap().hits[0]
+            .row
+            .clone();
+
+        let all = features(
+            &Query::parse("\"quarterly report\" subject:due from:alice lunch"),
+            &row,
+        );
+        assert!(all.matched_phrase && all.matched_subject && all.matched_sender);
+        assert!(!all.matched_body);
+        assert_eq!((all.terms_present, all.terms_total), (3, 4));
+        assert_eq!(all.received_millis, 100);
+
+        // The words of the phrase out of order are not the phrase.
+        let scattered = features(&Query::parse("\"report quarterly\""), &row);
+        assert!(!scattered.matched_phrase);
+        assert_eq!(scattered.terms_present, 0);
+
+        // `from:` looks only at the sender and `subject:` only at the subject.
+        let misplaced = features(&Query::parse("from:quarterly subject:alice"), &row);
+        assert!(!misplaced.matched_sender && !misplaced.matched_subject);
+        assert_eq!((misplaced.terms_present, misplaced.terms_total), (0, 2));
+
+        // A phrase found in the sender field is not credited: a phrase never searches it.
+        let sender_phrase = features(&Query::parse("\"alice@example\""), &row);
+        assert!(!sender_phrase.matched_phrase && !sender_phrase.matched_sender);
+    }
+
+    #[test]
+    fn a_judgement_keeps_the_query_exactly_as_typed() {
+        let mut app = App::new();
+        app.add_account("work", "rich").unwrap();
+        let id = insert(&mut app, "r-1", "Two  spaces", "a@example.test", 1);
+        let typed = "subject:two \"two  spaces\"";
+        assert_eq!(app.relevance_judgement(typed, id).unwrap().query, typed);
     }
 
     #[test]
