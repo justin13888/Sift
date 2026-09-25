@@ -57,6 +57,28 @@ Three distinct corpora serve three distinct purposes.
 total, 50,000 of them in an inbox. Synthetic generation is acceptable; the shape matters more than the
 content.
 
+The generated corpus settles what those three numbers leave open, so that two runs describe the same
+population:
+
+- **The 50,000 are one inbox**, the largest account's. NFR-1's first screen and the unified inbox's merge
+  are both paid against the largest folder a person has, and the same count spread across five inboxes
+  would measure neither. The other four inboxes are small.
+- **The accounts are unequal**, in descending shares, because a person's are: one carries most of their
+  mail, and the merge [search](../storage/search.md) performs on every keystroke is dominated by the
+  largest index.
+- **Every message enters through the path synchronization writes through**, a backfill page at a time,
+  and every folder ends synchronized. Rows written any other way would look like the product's and not
+  be them, and every figure measured against them would describe the difference. That is also what the
+  corpus is for before any figure is taken: it is the first thing to push the ingest path to this
+  population, and doing so found per-message lookups that made a first sync cost the square of the
+  mailbox.
+- **Content is deterministic from a seed**, and shaped like mail where shape matters: threads, a sent
+  folder, read and unread, and a share of subjects in scripts the index trigrams rather than segments.
+  **Bodies are absent**, which is what a first sync of never-read mail produces; the envelope is the unit
+  the default envelope-and-index budget and NFR-5's population are both stated in.
+- **It is written into the application's own container**, under keys in the platform credential store,
+  so the launch after generation is NFR-1's cold start "with the store already populated".
+
 **Fidelity corpus** — for rendering correctness. Real-world messages spanning marketing HTML, transactional
 mail, mailing-list traffic, CJK, RTL, and plain text, plus every published mutation-XSS payload as a
 permanent regression vector. See [sanitizer invariants](../rendering/sanitizer-invariants.md).

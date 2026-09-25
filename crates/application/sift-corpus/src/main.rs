@@ -9,6 +9,11 @@
 //! the next launch NFR-1's cold start "with the store already populated from the scale corpus".
 //! The account keys go to the platform credential store, as adding an account puts them.
 //!
+//! Those items are created by this binary, so the platform attributes them to it: the first
+//! launch afterwards may ask once per item whether the application may read them, which is the
+//! platform's access control working rather than a failure. Answer it before any launch that is
+//! measured: a prompt inside NFR-1's interval would be timing a person.
+//!
 //! `--divide` keeps the proportions and shrinks the population, for a smoke run.
 
 use sift_corpus::{Options, Progress, Shape, generate};

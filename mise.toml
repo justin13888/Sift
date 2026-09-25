@@ -251,6 +251,14 @@ cargo run -q -p sift-harness -- \
     "list mail" "body #1" "select #1" "do message.archive" "flush mail"
 '''
 
+[tasks.corpus]
+description = "NFR-26's scale corpus into an empty container. Args: --root DIR [--seed N] [--divide N] [--accounts N]"
+# Release, because 500,000 messages through the ingest path is minutes optimised and far longer
+# not. `--root` is required and must hold no accounts; the application's own container on macOS
+# is ~/Library/Application Support/net.justinchung.sift. Keys go to the platform credential
+# store, exactly as adding an account puts them there. `--divide 100` is a smoke run.
+run = "cargo run -q --release -p sift-corpus --"
+
 # ── Live probes ───────────────────────────────────────────────────────────────
 #
 # These reach the real network. D-63 puts network-needing gates in the per-integration tier,
