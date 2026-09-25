@@ -216,6 +216,19 @@ are one budget stated at three lifecycle points, and moving any one of them alon
 incoherence the tier targets above were just corrected for. Tracked with NFR-8's placeholder in
 [open questions](../open-questions.md).
 
+**NFR-13 and NFR-46 measure different clocks, and the distinction is normative.** NFR-13 bounds the time
+from the pressure signal to the governor having *issued* every release the tier calls for — caches
+dropped, the body view told to tear down, the allocator asked to collect. NFR-46 bounds the separate,
+slower step of the operating system actually returning the body view's pages, at up to 1 second from
+teardown. Stated as one clock the pair would contradict each other, because L2's largest action is
+precisely the teardown NFR-46 times: a 500 ms budget cannot contain a 1 second reclaim. Stated as two,
+they compose — the governor is prompt, the kernel is not instantaneous, and each is separately testable.
+
+**NFR-12 is the hardest requirement in this documentation set.** It is an allocator, fragmentation, and
+cache-discipline problem that only appears in long-running soak tests. The soak harness that detects it
+MUST exist in **P0**, not P4 — see [observability](observability.md) and
+[roadmap](../product/roadmap.md), which state the same phase.
+
 ### Provisional figures
 
 **This section changes no target.** The figures below come from the interim rig in the
@@ -229,8 +242,7 @@ states the targets name.
 with the recorded fixture corpus loaded. It is driven from outside the process into three states and
 left to settle for 30 seconds in each. The figure is the median of five `phys_footprint` samples under
 D-16. It covers Sift **and every engine process it owns**, found through the application's own launchd
-domain. This is `mise run measure-footprint`, and per-integration runs the same task on both
-architectures.
+domain. The protocol is automated, and the per-integration tier runs it natively on both architectures.
 
 | State | Sift | Content | GPU | Networking | Total |
 |---|---:|---:|---:|---:|---:|
@@ -269,16 +281,3 @@ The figures show four things:
 What remains before the three targets can be re-derived together: the same protocol on Intel; Linux,
 with PSS in place of `phys_footprint`, which has no instrument yet; the scale corpus; and the reference
 rig itself, which [Q-10](../open-questions.md) has not chosen.
-
-**NFR-13 and NFR-46 measure different clocks, and the distinction is normative.** NFR-13 bounds the time
-from the pressure signal to the governor having *issued* every release the tier calls for — caches
-dropped, the body view told to tear down, the allocator asked to collect. NFR-46 bounds the separate,
-slower step of the operating system actually returning the body view's pages, at up to 1 second from
-teardown. Stated as one clock the pair would contradict each other, because L2's largest action is
-precisely the teardown NFR-46 times: a 500 ms budget cannot contain a 1 second reclaim. Stated as two,
-they compose — the governor is prompt, the kernel is not instantaneous, and each is separately testable.
-
-**NFR-12 is the hardest requirement in this documentation set.** It is an allocator, fragmentation, and
-cache-discipline problem that only appears in long-running soak tests. The soak harness that detects it
-MUST exist in **P0**, not P4 — see [observability](observability.md) and
-[roadmap](../product/roadmap.md), which state the same phase.
