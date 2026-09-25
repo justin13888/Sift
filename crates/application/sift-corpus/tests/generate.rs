@@ -176,6 +176,80 @@ fn a_container_that_already_holds_accounts_is_refused_and_left_alone() {
     assert_eq!(before, after, "a refused run still registered accounts");
 }
 
+/// A credential store that refuses to create any account key after the first `allow`.
+struct RefusesAfter {
+    inner: InMemory,
+    allow: usize,
+    written: Mutex<usize>,
+}
+
+impl CredentialStore for RefusesAfter {
+    fn write(&self, account: AccountId, item: Item, secret: &str) -> Result<(), StoreError> {
+        if account.as_u128() != 0 {
+            let mut n = self
+                .written
+                .lock()
+                .map_err(|_| StoreError::Unavailable("poisoned".into()))?;
+            if *n >= self.allow {
+                return Err(StoreError::Unavailable("refused by the test".into()));
+            }
+            *n += 1;
+        }
+        self.inner.write(account, item, secret)
+    }
+
+    fn read(&self, account: AccountId, item: Item) -> Result<String, StoreError> {
+        self.inner.read(account, item)
+    }
+
+    fn delete(&self, account: AccountId, item: Item) -> Result<(), StoreError> {
+        self.inner.delete(account, item)
+    }
+}
+
+#[test]
+fn a_run_that_fails_partway_leaves_the_container_empty_and_a_retry_accepted() {
+    let scratch = Scratch::new("rollback");
+    // Two accounts are written in full, the third is registered and then refused its key.
+    let keys = RefusesAfter {
+        inner: InMemory::default(),
+        allow: 2,
+        written: Mutex::new(0),
+    };
+    let failed = generate(&scratch.0, &keys, &small(), &mut |_| {});
+    assert!(
+        matches!(failed, Err(CorpusError::Container(_))),
+        "{failed:?}"
+    );
+
+    let container = Container::open(&scratch.0, &keys).expect("reopen");
+    assert!(
+        container.accounts().expect("accounts").is_empty(),
+        "a failed run left accounts registered"
+    );
+    assert!(
+        container.orphans().expect("orphans").is_empty(),
+        "a failed run left account files behind"
+    );
+    drop(container);
+    let items = keys.inner.items.lock().expect("items");
+    assert!(
+        items.keys().all(|(account, _)| *account == 0),
+        "a failed run left credential items: {:?}",
+        items.keys().collect::<Vec<_>>()
+    );
+    drop(items);
+
+    // And the next run is not refused as NotEmpty.
+    *keys.written.lock().expect("count") = 0;
+    let keys_ok = RefusesAfter {
+        allow: usize::MAX,
+        ..keys
+    };
+    let report = generate(&scratch.0, &keys_ok, &small(), &mut |_| {}).expect("retry");
+    assert_eq!(report.accounts.len(), 5);
+}
+
 #[test]
 fn one_seed_writes_the_same_mail_twice() {
     let keys_a = InMemory::default();

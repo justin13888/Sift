@@ -94,6 +94,12 @@ pub enum CorpusError {
     Container(String),
     Ingest(sift_sync::ingest::IngestError),
     Store(rusqlite::Error),
+    /// The run failed, and erasing the accounts it had registered failed too. `left` names
+    /// the accounts still in the container, each with its files and credential items.
+    RollBack {
+        cause: Box<CorpusError>,
+        left: Vec<AccountId>,
+    },
 }
 
 impl core::fmt::Display for CorpusError {
@@ -107,6 +113,16 @@ impl core::fmt::Display for CorpusError {
             Self::Container(e) => write!(f, "{e}"),
             Self::Ingest(e) => write!(f, "{e}"),
             Self::Store(e) => write!(f, "{e}"),
+            Self::RollBack { cause, left } => {
+                write!(
+                    f,
+                    "{cause}; erasing what the run had registered also failed, leaving account(s)"
+                )?;
+                for id in left {
+                    write!(f, " {id}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -178,9 +194,14 @@ pub struct AccountReport {
 
 /// Write the corpus into the container at `root`.
 ///
+/// A run that fails partway erases every account it registered before returning, so the
+/// container is left as empty as it was found and the next run is not refused. A run that is
+/// killed cannot; the binary's documentation says how to clear what it leaves.
+///
 /// # Errors
 /// The shape cannot be planned, the container already holds accounts, or the container, the
-/// credential store, or the store refused.
+/// credential store, or the store refused. [`CorpusError::RollBack`] where the erasure after a
+/// failure refused as well.
 pub fn generate<S: CredentialStore>(
     root: &Path,
     credentials: &S,
@@ -200,32 +221,65 @@ pub fn generate<S: CredentialStore>(
         accounts: Vec::with_capacity(plan.len()),
         index_token_bytes: 0,
     };
+    // Every account this run registered, so a failure can take back exactly those. The
+    // container was empty on the way in, and a run that stops partway must leave it empty
+    // again: the next run refuses a container holding accounts, so a half-written corpus left
+    // behind would be one nothing but a person could clear.
+    let mut registered: Vec<AccountId> = Vec::with_capacity(plan.len());
     for account in &plan {
-        let (written, tokens) = write_account(
-            root,
-            &mut container,
-            credentials,
-            options,
-            account,
-            progress,
-        )?;
-        report.index_token_bytes += tokens;
-        report.accounts.push(written);
+        let outcome = container
+            .register(KIND, &account.display_name)
+            .map_err(CorpusError::Container)
+            .and_then(|r| {
+                registered.push(r.id);
+                write_account(root, credentials, options, account, r, progress)
+            });
+        match outcome {
+            Ok((written, tokens)) => {
+                report.index_token_bytes += tokens;
+                report.accounts.push(written);
+            }
+            Err(cause) => return Err(roll_back(&mut container, credentials, &registered, cause)),
+        }
     }
     Ok(report)
 }
 
+/// Erase every account a failed run registered, through the same FR-4 erasure removing an
+/// account uses: credential items, both sealed files, the registry row.
+///
+/// The cause is what the caller is told. Where the erasure itself refuses, both are reported,
+/// with the identities left behind, because those are what a person has to clear by hand.
+fn roll_back<S: CredentialStore>(
+    container: &mut Container,
+    credentials: &S,
+    registered: &[AccountId],
+    cause: CorpusError,
+) -> CorpusError {
+    let left: Vec<AccountId> = registered
+        .iter()
+        .rev()
+        .filter(|id| container.forget(**id, credentials).is_err())
+        .copied()
+        .collect();
+    if left.is_empty() {
+        cause
+    } else {
+        CorpusError::RollBack {
+            cause: Box::new(cause),
+            left,
+        }
+    }
+}
+
 fn write_account<S: CredentialStore>(
     root: &Path,
-    container: &mut Container,
     credentials: &S,
     options: &Options,
     plan: &AccountPlan,
+    registered: container::Registered,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<(AccountReport, u64), CorpusError> {
-    let registered = container
-        .register(KIND, &plan.display_name)
-        .map_err(CorpusError::Container)?;
     let owner =
         container::account_secret(credentials, registered.id).map_err(CorpusError::Container)?;
     let paths = AccountPaths::under(root, registered.id);

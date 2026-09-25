@@ -15,6 +15,29 @@
 //! measured: a prompt inside NFR-1's interval would be timing a person.
 //!
 //! `--divide` keeps the proportions and shrinks the population, for a smoke run.
+//!
+//! # A run that stops partway
+//!
+//! A run that **fails** erases every account it had registered — registry row, both sealed
+//! files, every credential item — before it exits, so the container is as empty as it was and
+//! the next run is accepted. If that erasure fails too, the error names the accounts it left.
+//!
+//! A run that is **killed** (Ctrl-C, a closed terminal, a crash) erases nothing, and the next
+//! run refuses the container as already holding accounts. To clear it by hand:
+//!
+//! 1. Each account is a pair of files in `--root` named after its 32-hex-digit identity, and a
+//!    set of keychain items under service `net.justinchung.sift` whose account field is
+//!    `<identity>/<item>`. List them with `ls DIR`.
+//! 2. For every identity there, delete its items:
+//!    `security delete-generic-password -s net.justinchung.sift -a <identity>/database-key`.
+//!    That is the only item a corpus account holds; deleting a missing one is harmless.
+//! 3. Remove the container: `rm -r DIR` for a scratch root, or, for the application's own
+//!    container where it held nothing before the run, the same directory. The installation's
+//!    own item (`00000000000000000000000000000000/database-key`) is shared with the
+//!    application; leave it.
+//!
+//! Where `--root` was the application's own container, launching Sift and removing each
+//! account does the same erasure without the steps above.
 
 use sift_corpus::{Options, Progress, Shape, generate};
 use std::path::PathBuf;
