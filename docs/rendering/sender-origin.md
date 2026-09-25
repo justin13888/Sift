@@ -37,7 +37,7 @@ both this origin and the [debug view](../runtime/observability.md).
 
 ## D-37 — Known mail infrastructure is first-party when the origin is attested
 
-**Chosen:** a bundled, updatable list of known mail-service infrastructure. A resource host on that list is
+**Chosen:** a bundled list of known mail-service infrastructure, updated with the binary. A resource host on that list is
 treated as first-party when — and only when — the message's synthetic origin was **attested**, meaning it
 resolved at priority 1 or 2 above.
 **Rejected:** accepting the breakage; treating a service provider as first-party regardless of attestation.
@@ -56,10 +56,10 @@ sender is widened to any listed host, not merely to their own provider. The list
 surface in the sense that it encodes which providers Sift knows about, though it is bundled rather than
 queried.
 
-**Updating it is network traffic and is governed as such.** The list ships bundled so that a fresh install
-is correct with no fetch, and updates arrive over the same path and the same policy tier as filter-list
-updates, carried as a row in the [egress table](../security/privacy.md). It inherits NFR-43's rule
-directly: a stale list is acceptable, an absent one is not. The failure direction is the safe one, since a
+**Updating it is not network traffic.** The list ships inside the binary and changes only when the binary
+does, through the platform channels, exactly as the filter lists do under
+[D-111](content-blocking.md) — so it has no row in the [egress table](../security/privacy.md) and no policy
+tier governs it. It inherits NFR-43's rule directly: a stale list is acceptable, an absent one is not. The failure direction is the safe one, since a
 list that is behind widens *less* than it should and the cost is a broken image rather than an unintended
 load — which is the same asymmetry D-11 chose when it made null the fallback origin.
 
