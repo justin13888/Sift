@@ -88,7 +88,7 @@ two homes and one of them would go stale.
 | NFR-13 | L2 shed **issued** within 500 ms of signal, L3 within 1 second; reclaim itself is timed by NFR-46. L3 sheds in-process and terminates nothing | [runtime/memory-pressure](runtime/memory-pressure.md) |
 | NFR-14 | Bodies, attachments and blobs bounded by the configured cache budget, hard-capped | [storage/cache-and-blobs](storage/cache-and-blobs.md) |
 | NFR-15 | Network at idle at or under 1 KB per minute per account | [runtime/scheduling](runtime/scheduling.md) |
-| NFR-42 | Filter engine memory at or under 40 MB with standard lists loaded; bound to window lifetime, dropped at L1 | [rendering/content-blocking](rendering/content-blocking.md) |
+| NFR-42 | Filter engine memory at or under 40 MB with standard lists loaded, in every build whether bundled or imported as custom rules; bound to window lifetime, dropped at L1 | [rendering/content-blocking](rendering/content-blocking.md) |
 | NFR-44 | Allocation-attribution overhead at or under 2% in release | [runtime/observability](runtime/observability.md) |
 | NFR-45 | Soak harness in CI with a slope gate over at least 72 hours | [runtime/observability](runtime/observability.md) |
 | NFR-46 | Body view torn down when unused; footprint returns within 1 second | [rendering/webview-isolation](rendering/webview-isolation.md) |
