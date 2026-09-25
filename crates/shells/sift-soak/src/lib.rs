@@ -100,8 +100,12 @@ impl Load {
 
     /// One round of the synthetic load, across every account.
     ///
-    /// Each step runs under the tag of the subsystem it exercises, as D-65's harness does, so
-    /// the attribution reads the way a shell's gestures would make it read.
+    /// Each step runs under the tag of the subsystem it exercises, re-established at each step
+    /// as D-24 requires. This follows D-65's harness for sync, listing, opening and closing a
+    /// document, and triage, but not everywhere: the harness tags `search` and `account` as
+    /// `Shell`, its catch-all, while this soak tags search as `Index` and adding an account
+    /// as `Adapters`. That puts growth under the subsystem doing the work rather than under
+    /// the shell's own row, which is what NFR-45's breakdown exists to show.
     ///
     /// # Errors
     /// Any step failed. The run stops on it: see the crate documentation.

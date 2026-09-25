@@ -10,8 +10,10 @@
 //!
 //! `run` and `report` exit 0 on NFR-45's pass, 1 on its failure, and 2 where there is no
 //! verdict — a run shorter than 72 hours is recorded and decomposed, and is never a pass.
-//! `overhead` exits 0 within NFR-44's 2%, 1 beyond it, and 2 from a build that is not release,
-//! because NFR-44 is a property of the release build and a debug figure is not evidence of it.
+//! `overhead` exits 0 within NFR-44's 2%, 1 beyond it, and 2 where there is no verdict: from a
+//! build that is not release, because NFR-44 is a property of the release build and a debug
+//! figure is not evidence of it; and where two standard errors straddle the 2%, because the
+//! machine was too noisy to resolve it.
 //!
 //! `--warmup` changes only the per-subsystem decomposition, so a run can be read early. The
 //! verdict always discards the first hour, whatever it says.
