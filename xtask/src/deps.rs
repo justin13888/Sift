@@ -115,8 +115,8 @@ pub(crate) fn run(bless: bool) -> Result<(), String> {
             "\nBefore blessing these, the questions docs/build/workspace.md asks:\n\
              - Is any of them on a hostile-input path? A MIME or CSS dependency that is a thin\n  \
                wrapper over unsafe parsing is held to the unsafe rule, not merely to review.\n\
-             - Does its licence clear the allowlist in deny.toml? A single copyleft crate\n  \
-               defeats the App Store channel (#26).\n\
+             - Does its licence clear the allowlist in deny.toml? A crate whose licence reaches\n  \
+               the whole binary is rejected: docs/build/workspace.md#the-licence-allowlist (#14).\n\
              - Does it raise the toolchain floor? A vendored dependency's floor becomes Sift's\n  \
                on the day it is vendored.\n\
              - Does it start a thread, arm a timer, or open a socket of its own? Those are\n  \
