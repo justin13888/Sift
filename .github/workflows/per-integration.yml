@@ -5,7 +5,7 @@
 #
 # **This is not those machines.** It runs the tier's gates on hosted runners, one Intel and
 # one Apple-silicon, so that the tier exists, runs on its cadence, and fails loudly, while
-# the dedicated hosts D-63 costs are still unowned (#21). What that leaves unanswered is
+# the dedicated hosts D-63 costs are still unowned (#81). What that leaves unanswered is
 # stated here rather than discovered:
 #
 #   - **R-13, compounded.** A hosted image is re-imaged on the provider's schedule, which moves
@@ -58,7 +58,7 @@ jobs:
       matrix:
         include:
           # The Intel label is GitHub's last Intel macOS image; when it is retired, this leg has
-          # no hosted replacement and becomes the dedicated Intel host or nothing (#21).
+          # no hosted replacement and becomes the dedicated Intel host or nothing (#81).
           - { name: "macos intel",         os: macos-15-intel, arch: x86_64 }
           - { name: "macos apple silicon", os: macos-15,       arch: arm64 }
     steps:

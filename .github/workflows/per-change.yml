@@ -17,7 +17,7 @@
 # "fails silently on the wrong host" and needs a real macOS session rather than a runner
 # image: Keychain behaviour, entitlements and sandbox behaviour on both channels
 # including NFR-49's provenance marking, and login-item residency. They are tracked in
-# #21 and #35 rather than being run here and believed.
+# #81 and #35 rather than being run here and believed.
 #
 # Every step below runs a `mise run <task>` defined in mise.toml. That is deliberate: a gate's
 # flags are written once, and what a contributor runs locally is the same command a runner
