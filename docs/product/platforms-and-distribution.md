@@ -1,6 +1,6 @@
 # Platforms and distribution
 
-**Owns:** D-9, D-15, D-33, D-112.
+**Owns:** D-9, D-15, D-33, D-112, D-113.
 
 ## D-9 — macOS first, then Linux. Windows is out of scope.
 
@@ -40,9 +40,12 @@ through the secrets portal rather than the session bus directly. Both are
 
 ## D-33 — Platform channels only; Sift never updates itself
 
-**Chosen:** deliver through each platform's own channels — the Mac App Store and Homebrew Cask on macOS,
-Flatpak on Linux — all from the first release. Sift implements no update mechanism.
-**Rejected:** a signed delta self-updater; a single channel per platform.
+**Chosen:** deliver through each platform's own channels — Homebrew Cask on macOS, Flatpak on Linux — from
+the first release. Sift implements no update mechanism. **The Mac App Store is a deferred channel, not a
+rejected one:** it does not ship with the first release, and it is reconsidered only together with the
+licensing question D-113, below, reopens.
+**Rejected:** a signed delta self-updater; the App Store from the first release, which would require a
+contributor agreement now (see D-113).
 
 **Why.** An application that is resident on a user's machine and reads their mail is the wrong place to
 put a bespoke code-delivery path. Platform channels bring signing, transport, rollback and revocation that
@@ -72,17 +75,21 @@ list address and no list payload. Two obligations stand in its place:
   making a report a file the user sends themselves, and the connectivity probe
   [D-96](../runtime/network-conditions.md) declined, are both permanent for the same reason.
 
-Two macOS channels rather than one because they reach different people, and neither reaches the other's
-audience: Homebrew Cask is how technically-inclined macOS users install software, while the App Store is
-where everyone else looks. They differ only in packaging and entitlements, not in the process model — a
-consequence of [D-2](../architecture/process-model.md), which replaced a background agent with an ordinary
-login item, the sandboxed path the App Store supports. One difference is in what they carry rather than
-how they are packaged: [D-112](#d-112--bundle-only-what-each-channels-licence-can-carry) leaves the
-copyleft filter lists out of the App Store build, because that channel cannot carry their terms.
+The two macOS channels reach different people, and neither reaches the other's audience: Homebrew Cask is
+how technically-inclined macOS users install software, while the App Store is where everyone else looks.
+They differ only in packaging and entitlements, not in the process model — a consequence of
+[D-2](../architecture/process-model.md), which replaced a background agent with an ordinary login item,
+the sandboxed path the App Store supports. That is why deferring the store costs no architecture: the Cask
+build is already sandboxed under one identity ([D-45](platform-baseline.md)), so adding the store later is a
+packaging and review path, not a redesign. One difference is in what they carry rather than how they are
+packaged: [D-112](#d-112--bundle-only-what-each-channels-licence-can-carry) leaves the copyleft filter
+lists out of the App Store build, because that channel cannot carry their terms.
 
-**What it costs:** two macOS build configurations and two review-and-release paths, plus App Review
-latency on one of them with no way to bypass it for an urgent fix. Under Flatpak, updates arrive when the
-user's system decides, so a security fix lands on the platform's schedule rather than Sift's.
+**What it costs:** until the App Store channel is reconsidered, Sift on macOS reaches only the
+technically-inclined half of its audience. Under Flatpak, updates arrive when the user's system decides, so
+a security fix lands on the platform's schedule rather than Sift's. Reconsidering the store later brings
+back what deferring it saves: a second macOS build configuration and review-and-release path, and App
+Review latency with no way to bypass it for an urgent fix.
 
 **Contestable because:** giving up self-update means giving up any ability to push an urgent fix, in a
 product whose primary adversary sends attacker-controlled input by design. If a serious vulnerability ever
@@ -96,17 +103,45 @@ licensed AGPL-3.0, so this is live rather than hypothetical: the copyright holde
 because they hold all of the copyright, and that stays true only for as long as every contribution arrives
 under an agreement preserving it.
 
-**Contributions MUST therefore be accepted under such an agreement.** This sits in a distribution document
-because the App Store channel is what requires it — remove that channel and the requirement goes with it.
-
 **It is the only irreversible item in this documentation set.** Every other decision here can be revisited
 by amending a document. This one cannot: a contribution that lands uncovered cannot be covered afterwards
-once its author is unreachable or unwilling. Everything else the set calls contestable stays contestable.
-This is contestable exactly once, and its deadline is the first external contribution rather than any
-date.
+once its author is unreachable or unwilling. D-33 defers the channel that creates the constraint, and D-113
+accepts that loss for every external contribution merged while it is deferred: each one is a contribution a
+store build can later carry only with its author's consent or by replacing it. What D-113 keeps open is the
+store for the holder's own work, and it states when the question must be answered again.
 
-The alternatives are real and none of them has been argued here, so it is
-[an open question](../open-questions.md) rather than a settled decision.
+## D-113 — AGPL-3.0 only; no contributor agreement while the App Store is deferred
+
+**Chosen:** the public licence stays AGPL-3.0, and contributions are accepted under it, inbound as outbound,
+with no contributor licence agreement, no relicensing right, and no commit trailer. The Mac App Store
+channel that would need more is deferred by D-33. **The agreement question reopens if and when that channel
+is reconsidered, and it MUST be answered before the first external contribution that channel would need**
+— that is, before the store build would contain any contribution not the copyright holder's own.
+**Rejected:** requiring a contributor licence agreement now; relicensing permissively; keeping the App
+Store in the first release.
+
+**Why.** The App Store is the only thing that asks the copyright holder for more than AGPL-3.0 grants
+everyone, and the first release does not use it. An agreement required now would buy a relicensing right
+for a channel that is not shipping, at the price every contributor agreement carries: some contributors
+decline any agreement on principle, and the rest carry a formality the first time they contribute.
+Relicensing permissively is irreversible outright — every release made under it stays under it — and it
+gives up the one thing the copyleft licence was chosen for: that nobody ships a modified mail client that
+reads their users' mail without publishing what it changed.
+
+**What it costs:** the store is deferred, not free. Every external contribution merged under AGPL-3.0 alone
+is one the holder cannot ship under the store's terms without that contributor's later consent. So
+reconsidering the channel after external contributions have landed means obtaining each author's consent
+or replacing their work, and that cost grows with every contribution. While all of the copyright is the
+holder's own, reconsidering costs nothing.
+
+**Contestable because:** it trades the reach D-33 names — the macOS users who look only in the App Store —
+for contributor goodwill that has not yet been tested, in a project whose [R-1](../open-questions.md)
+escape hatch assumes a contributor community. If the store turns out to matter before any external
+contribution lands, the agreement can still be adopted at no loss.
+
+Whatever the answer when it reopens, it governs Sift's own copyright only. No contributor agreement can
+relicense somebody else's work, so the artefacts Sift bundles but does not own and the dependency tree it
+vendors — D-112 below, and [Q-21](../open-questions.md) — stand against the same channel on their own.
 
 The versions, architectures, entitlements and permanently-consumed identifiers those channels commit Sift
 to are in [platform baseline](platform-baseline.md), which owns D-45 and D-46.
@@ -141,9 +176,9 @@ Flatpak builds carry these lists on the same footing as Sift's own code. The App
 the store's usage rules add restrictions that GPL-3.0 forbids a distributor to add, and the share-alike
 option does not escape it, because CC BY-SA forbids applying technological measures that restrict what a
 recipient may do with the material, which the store's delivery does. Dropping the channel to keep one
-list set would decide [Q-16](../open-questions.md) as a side effect of a question about somebody else's
-lists; replacing the public lists everywhere would degrade the two channels that can carry them to match
-the one that cannot.
+list set would have decided [Q-16](../open-questions.md), since answered by D-113, as a side effect of a
+question about somebody else's lists; replacing the public lists everywhere would degrade the two channels
+that can carry them to match the one that cannot.
 
 **The App Store build is not left without the lists; it is left without Sift distributing them.** FR-27's
 custom rules are imported from a file the user chooses, so a user who wants EasyList in that build obtains
@@ -153,8 +188,8 @@ does not carry is kept and shown as inactive, never silently dropped and never s
 
 **Sift writes the other two lists itself.** The email list and the
 [sender-infrastructure list](../rendering/sender-origin.md) are authored in the tree, so they are Sift's
-own copyright and fall under the contributor agreement [Q-16](../open-questions.md) asks about rather than
-under this section. **Neither may be derived from a copyleft list**, since that would import the terms this
+own copyright and fall under D-113 — AGPL-3.0, with the contributor-agreement question deferred with the
+App Store channel — rather than under this section. **Neither may be derived from a copyleft list**, since that would import the terms this
 decision exists to keep out of the App Store build; an entry is justified from the provider's own
 documentation or from observed mail, and records which.
 
@@ -178,8 +213,9 @@ Sift has no install-size budget that says whether that is acceptable.
 
 **Contestable because:** a channel whose blocking is weaker by construction is a product difference the
 user cannot see from the store listing. If a permissively licensed list of comparable coverage appears, or
-EasyList's authors grant an exception, the split should close; if the App Store channel is ever dropped
-under Q-16, it closes by itself.
+EasyList's authors grant an exception, the split should close; if the App Store channel, which D-33 now
+defers, is ever dropped outright, it closes by itself. While the channel is deferred the split is dormant:
+it governs the App Store build if and when that build is reconsidered.
 
 ## Per-platform surface
 

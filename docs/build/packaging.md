@@ -58,9 +58,9 @@ channel's own build counter is a packaging detail and never a version. Support i
 build that is still plausibly installed.
 **Rejected:** per-channel versions; an unbounded migration chain; a time-based support window.
 
-**Why one version.** [D-33](../product/platforms-and-distribution.md) ships three channels *"all from the
-first release"*, with independent review and packaging latency, so at any moment the three carry
-different builds. If each channel also carried its own numbering, no user could answer "what do you have"
+**Why one version.** [D-33](../product/platforms-and-distribution.md) ships two channels from the first
+release and defers a third, the App Store, each with independent review and packaging latency, so at any
+moment they carry different builds. If each channel also carried its own numbering, no user could answer "what do you have"
 and no bug report could be matched to a revision. One version across all three makes the channels differ
 in *when* rather than in *what*. The App Store build number space that
 [platform baseline](../product/platform-baseline.md) already reserves keeps doing its own job underneath

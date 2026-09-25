@@ -1,8 +1,8 @@
 # The Homebrew Cask — D-33, D-45, D-62.
 #
-# **Needs a named owner in this repository before the first release.** D-33 makes this one of
-# two macOS channels from the first release rather than a later convenience: the App Store
-# reaches everyone else, and this reaches the technically-inclined half.
+# **Needs a named owner in this repository before the first release.** D-33 makes this the only
+# macOS channel of the first release: the Mac App Store is deferred, not rejected, and is
+# reconsidered only together with D-113's licensing question.
 #
 # This file is why two decisions elsewhere are permanent. Its uninstall stanza publishes the
 # on-disk layout — which is what fixes D-77's blob fan-out depth at first release — and the
@@ -26,7 +26,7 @@ cask "sift" do
 
   app "Sift.app"
 
-  # D-45 gives this build and the App Store build **one bundle identifier and one team
+  # D-45 gives this build and any later App Store build **one bundle identifier and one team
   # identifier, both sandboxed**. Two identifiers would mean two containers, two
   # per-installation secrets, and under D-43 a channel switch that discards the blob cache and
   # re-authenticates every account. The accepted cost is that the two cannot be installed side
