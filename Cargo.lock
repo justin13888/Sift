@@ -1732,6 +1732,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sift-corpus"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "sift-app",
+ "sift-credentials",
+ "sift-foundation",
+ "sift-index",
+ "sift-provider",
+ "sift-store",
+ "sift-sync",
+]
+
+[[package]]
 name = "sift-credentials"
 version = "0.1.0"
 dependencies = [

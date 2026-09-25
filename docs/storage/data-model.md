@@ -119,6 +119,15 @@ independently versioned files — would produce a store migrated past a journal 
 which is the intent-quarantine case NFR-48 already handles arriving through a door nobody would think to
 guard.
 
+**One disagreement is an interrupted migration, not a refusal.** A migration step is applied journal
+first, store second, like every other write to the pair, and each half records its new version with the
+step itself. A failure or crash between the two — a full disk, an I/O error, a killed process — therefore
+leaves exactly one state: the journal one version ahead of its store. The next open finishes the store's
+half of that step and carries both forward, because refusing it would make an ordinary failure during an
+upgrade cost the account its removal and resync, which D-32 forbids. Every other disagreement — a store
+ahead of its journal, a gap of more than one version, one half never created — is a state no migration
+leaves, and is refused.
+
 **Account removal is still a deletion**, which was D-6's argument, and is now the deletion of two files
 plus the blob refcount decrement [FR-4](../mail/accounts.md) already requires.
 

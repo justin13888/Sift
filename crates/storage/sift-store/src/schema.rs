@@ -17,7 +17,10 @@
 //! left to whoever writes the code.
 //!
 //! **Both files version and migrate together, and a build MUST refuse to open an account
-//! whose two halves disagree about their version.**
+//! whose two halves disagree about their version.** The one disagreement the migration order
+//! itself produces — a journal one version ahead of its store, because the store's half of a
+//! step failed or never ran — is an interrupted migration, and the open finishes it rather than
+//! refusing; see [`admit_pair`].
 //!
 //! # Forward-only (D-32)
 //!
@@ -34,7 +37,9 @@
 use rusqlite::{Connection, Result as SqlResult};
 
 /// The schema version this build writes.
-pub const CURRENT_VERSION: u32 = 1;
+///
+/// Version 2 is [`STORE_MIGRATION_V2`]: the two lookups ingest makes per message, indexed.
+pub const CURRENT_VERSION: u32 = 2;
 
 /// The oldest version this build can migrate forward from — D-62's migration floor.
 ///
@@ -110,11 +115,28 @@ pub enum Migration {
 }
 
 /// The two halves must agree before either is used.
+///
+/// With **one** exception, which [`migrate`]'s own order produces: a journal exactly one version
+/// ahead of its store is a migration interrupted between its two halves — the journal's step
+/// committed, the store's did not (a crash, a full disk, an I/O error). That state is resumed
+/// rather than refused, because refusing it would make an ordinary failure during an upgrade
+/// cost the account a removal and resync, which D-32 forbids. The resumed migration runs the
+/// store's half of the step the journal already took, and carries both on from there.
+///
+/// Every other disagreement is refused, as D-74 requires: a store ahead of its journal, a gap of
+/// more than one version, or a half at zero beside one that is not. None of them is a state
+/// [`migrate`] can leave.
 pub fn admit_pair(store: u32, journal: u32) -> Result<Migration, SchemaError> {
-    if store != journal {
-        return Err(SchemaError::HalvesDisagree { store, journal });
+    if store == journal {
+        return admit(store);
     }
-    admit(store)
+    if store != 0 && store.checked_add(1) == Some(journal) {
+        // Both halves must be versions this build understands: a journal from a newer build
+        // is refused as too new, not resumed.
+        admit(journal)?;
+        return admit(store);
+    }
+    Err(SchemaError::HalvesDisagree { store, journal })
 }
 
 /// The store's schema — everything that may be discarded and refetched.
@@ -328,10 +350,71 @@ CREATE TABLE overlay (
 CREATE INDEX overlay_message ON overlay(message_id);
 ";
 
+/// Version 2 of the store: the lookups ingest makes **once per message**, indexed.
+///
+/// Sync resolves every change in a delta page by provider identifier — is this message held,
+/// which local identity is it — and every threaded envelope by the provider's conversation
+/// identifier. Version 1 indexed neither, so each lookup scanned the whole table beneath the
+/// page-decryption layer, and a first sync cost the square of the mailbox: a backfill of ten
+/// thousand messages took minutes and one of the reference environment's 50,000-message inbox
+/// did not finish. The scale corpus found it, by being written through that path.
+///
+/// Partial, because a message recorded as present before its envelope arrived may have no
+/// conversation identifier, and neither column is ever looked up by its absence. **Not
+/// unique**: that would be a claim about provider identifiers this layer has no standing to
+/// make, and a violation would turn a delta page into a refused transaction.
+pub const STORE_MIGRATION_V2: &str = r"
+CREATE INDEX message_remote ON message(remote_id) WHERE remote_id IS NOT NULL;
+CREATE INDEX thread_remote ON thread(remote_thread_id) WHERE remote_thread_id IS NOT NULL;
+";
+
 /// Apply a schema to a fresh connection.
 pub fn create(conn: &Connection, sql: &str, version: u32) -> SqlResult<()> {
     conn.execute_batch(sql)?;
     conn.pragma_update(None, "user_version", version)?;
+    Ok(())
+}
+
+/// What one version adds to each half, in D-74's order: `(journal, store)`.
+const fn step(version: u32) -> (&'static str, &'static str) {
+    match version {
+        2 => ("", STORE_MIGRATION_V2),
+        _ => ("", ""),
+    }
+}
+
+/// Carry both halves forward from `from` to [`CURRENT_VERSION`], one version at a time.
+///
+/// Each version is one transaction per half, and the half's version is stamped **inside** that
+/// transaction, so a half is never left with a version its contents do not match. **Journal
+/// first, store second** — D-74's order for everything written to the pair.
+///
+/// A failure or crash between the two leaves the journal exactly one version ahead of the
+/// store. [`admit_pair`] admits that one state, and this resumes it: a half already stamped at a
+/// version skips that version's step, so the store takes the step the journal already took and
+/// both carry on together. Nothing runs twice, and no ordinary failure during an upgrade leaves
+/// an account that only removal and resync can recover (D-32).
+///
+/// A fresh account runs this too, from version 1, so there is one path to the current schema
+/// rather than a creation script and a migration chain that could drift apart.
+///
+/// # Errors
+/// The engine refused a statement. The half that failed is left at the version it had, and the
+/// next open resumes from there.
+pub fn migrate(store: &Connection, journal: &Connection, from: u32) -> SqlResult<()> {
+    for version in from.saturating_add(1)..=CURRENT_VERSION {
+        let (journal_sql, store_sql) = step(version);
+        for (conn, sql) in [(journal, journal_sql), (store, store_sql)] {
+            if version_of(conn)? >= version {
+                // This half took the step before an interruption; the other has yet to.
+                continue;
+            }
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(sql)?;
+            tx.pragma_update(None, "user_version", version)?;
+            tx.commit()?;
+        }
+    }
     Ok(())
 }
 
@@ -380,6 +463,30 @@ mod tests {
                 journal: 0
             })
         );
+    }
+
+    #[test]
+    fn a_journal_one_step_ahead_is_an_interrupted_migration_and_resumes() {
+        // Journal first, store second: a store step that fails or never runs leaves exactly
+        // this. Refusing it would cost the account a resync, which D-32 forbids.
+        assert_eq!(admit_pair(1, 2), Ok(Migration::Forward { from: 1 }));
+    }
+
+    #[test]
+    fn every_other_disagreement_is_still_refused() {
+        // None of these is a state `migrate` can leave, so D-74's refusal stands for them.
+        for (store, journal) in [(2, 1), (1, 3), (0, 1)] {
+            assert_eq!(
+                admit_pair(store, journal),
+                Err(SchemaError::HalvesDisagree { store, journal }),
+                "store {store} and journal {journal} opened"
+            );
+        }
+        // A journal one ahead but from a newer build is too new, not resumable.
+        assert!(matches!(
+            admit_pair(CURRENT_VERSION, CURRENT_VERSION + 1),
+            Err(SchemaError::TooNew { .. })
+        ));
     }
 
     #[test]

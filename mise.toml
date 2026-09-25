@@ -251,6 +251,17 @@ cargo run -q -p sift-harness -- \
     "list mail" "body #1" "select #1" "do message.archive" "flush mail"
 '''
 
+[tasks.corpus]
+description = "NFR-26's scale corpus into an empty container. Args: --root DIR [--seed N] [--divide N] [--accounts N]"
+# Release, because 500,000 messages through the ingest path is minutes optimised and far longer
+# not. `--root` is required and must hold no accounts; the application's own container on macOS
+# is ~/Library/Application Support/net.justinchung.sift. Keys go to the platform credential
+# store, exactly as adding an account puts them there. `--divide 100` is a smoke run.
+# A failed run erases the accounts it registered; a killed one leaves them, and the next run
+# refuses the container. Clearing that by hand (keychain items under service
+# net.justinchung.sift, then the directory) is in crates/application/sift-corpus/src/main.rs.
+run = "cargo run -q --release -p sift-corpus --"
+
 # ── The soak (NFR-45) and the attribution overhead (NFR-44) ──────────────────
 #
 # Continuous-tier instruments under D-63, never a per-change check: a 72-hour job cannot gate a

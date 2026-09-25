@@ -54,6 +54,10 @@ members = [
     "crates/application/sift-lifecycle",
     # The assembled application, below the boundary so both shells get the same one.
     "crates/application/sift-app",
+    # NFR-26's scale corpus, written through the ingest path into a container the application
+    # opens. A tool, but placed by the layer table like everything else: it assembles the
+    # application-layer ingest and container, so it sits beside them.
+    "crates/application/sift-corpus",
 
     # Presentation — windowing, selection, formatting, merge and diff.
     "crates/presentation/sift-presentation",
