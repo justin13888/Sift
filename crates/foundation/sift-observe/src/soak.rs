@@ -363,8 +363,12 @@ pub fn report(rows: &[Row], warmup: Duration) -> Report {
     let subsystems = Subsystem::ALL
         .iter()
         .filter_map(|s| {
+            // Only the rows the footprint was fitted over: a share fitted over rows the
+            // footprint skipped is a different regression, and the shares would stop summing
+            // to the footprint's projection.
             let points: Vec<(Duration, f64)> = rows
                 .iter()
+                .filter(|r| r.footprint_bytes.is_some())
                 .map(|r| (r.elapsed, r.attributed[s.index()] as f64))
                 .collect();
             share(s.name(), &points)
@@ -657,6 +661,37 @@ mod tests {
         let r = report(&rows, WARMUP);
         assert!(r.verdict.is_pass(), "{:?}", r.verdict);
         assert_eq!(r.missing_samples, 1);
+    }
+
+    #[test]
+    fn the_shares_still_sum_to_the_footprint_when_a_sample_is_missing() {
+        // A row with no footprint is skipped by the footprint fit; the shares must skip it
+        // too, or they are a regression over different points. Its attributed bytes are an
+        // outlier here, so fitting them would move Sync's share visibly.
+        let mut rows: Vec<Row> = (0..=80)
+            .map(|h| {
+                let h_i = i64::try_from(h).unwrap();
+                row(
+                    h,
+                    90_000_000 + h * 12_000,
+                    1_000 + h_i * 7_000,
+                    500 + h_i * 3_000,
+                )
+            })
+            .collect();
+        rows[70].footprint_bytes = None;
+        rows[70].attributed[Subsystem::Sync.index()] = 50_000_000;
+        let r = report(&rows, WARMUP);
+        assert_eq!(r.missing_samples, 1);
+        let Verdict::Passed { projected_growth } = r.verdict else {
+            panic!("{:?}", r.verdict)
+        };
+        let sum: f64 = r.subsystems.iter().map(|s| s.projected_growth).sum::<f64>()
+            + r.unattributed.unwrap().projected_growth;
+        assert!(
+            (sum - projected_growth).abs() < 1e-9,
+            "{sum} != {projected_growth}"
+        );
     }
 
     #[test]
