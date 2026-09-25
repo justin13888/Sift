@@ -87,7 +87,7 @@ the entire reason the store is shared.
 some filesystems and an operational hazard on all of them. The fan-out is derived from the address so it
 requires no state to compute, and its depth is one more thing that is fixed at first release, because
 [platform baseline](../product/platform-baseline.md) records that the on-disk layout *"is published in
-the Cask uninstall stanza and depended on by every installed copy"*.
+the Cask zap stanza and depended on by every installed copy"*.
 
 **Why the plaintext hash is not re-verified on read.** The authenticated seal already proves the bytes are
 the bytes Sift wrote, under a key an attacker does not hold. Re-hashing proves the same thing again, at

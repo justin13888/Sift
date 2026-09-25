@@ -103,7 +103,7 @@ submission to any channel**, and MUST NOT thereafter be changed.
 | Team identifier | **outstanding** — fixed by the developer account | Prefixes the Keychain access group; fixed by the developer account |
 | OAuth redirect URI scheme | `net.justinchung.sift` | Registered in the bundle's URL types. Derived from the OAuth client where a provider requires it, so it is bound to the bundle identifier and to R-1's verified client — see [credentials](../security/credentials.md) |
 | Flatpak application id | `net.justinchung.Sift` | Must correspond to a namespace the publisher controls. It is also the D-Bus well-known name, the desktop-file name, the portal identity for autostart and permission grants, and the data root. Renaming creates a new application with no upgrade path |
-| Keychain service and access-group names | service `net.justinchung.sift`; access group `<team>.net.justinchung.sift` | Published in the Cask uninstall stanza, so a change breaks uninstall for existing users |
+| Keychain service and access-group names | service `net.justinchung.sift`; access group `<team>.net.justinchung.sift` | Published in the Cask zap stanza, so a change breaks zap cleanup for existing users |
 | App Store build number space | begins at 1 | Monotonically increasing for the life of the app record; a number is never reused or decreased |
 
 Two of the six are **not** free choices once the first is made. The Keychain access group is the team
@@ -201,7 +201,7 @@ refcount rebuild for exactly one situation — after abnormal termination — an
 that; the store would be quietly wrong with nothing scheduled to notice. The blob store is evictable by
 Sift, under NFR-14, and that is not the same property as being evictable by anyone else.
 
-The layout is published in the Cask uninstall stanza and depended on by every installed copy, so it joins
+The layout is published in the Cask zap stanza and depended on by every installed copy, so it joins
 the register above in practice even though it is not a single string.
 
 ## Entitlements, and the requirement that differs between channels

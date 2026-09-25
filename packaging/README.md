@@ -7,12 +7,32 @@ detect that its own bundle has been replaced and surface a restart prompt rather
 continuing against replaced resources.
 
 **Each of these files must have a named owner in this repository before the first release.**
-That is not administrative: each carries values that become permanent on publication.
+That is not administrative: each carries values that become permanent on publication. The
+owner is recorded in [`CODEOWNERS`](../CODEOWNERS), so a change to either file requests their
+review.
 
-| Artefact | What it makes permanent |
-|---|---|
-| [`homebrew/sift.rb`](homebrew/sift.rb) | The on-disk layout — which fixes D-77's blob fan-out depth — and the Keychain service and access-group names |
-| [`flatpak/net.justinchung.Sift.yml`](flatpak/net.justinchung.Sift.yml) | The application id, which is simultaneously the D-Bus well-known name, the desktop-file name, the portal identity, and the data root |
+| Artefact | Owner | What it makes permanent |
+|---|---|---|
+| [`homebrew/sift.rb`](homebrew/sift.rb) | @justin13888 | The on-disk layout — which fixes D-77's blob fan-out depth — and the Keychain service and access-group names |
+| [`flatpak/net.justinchung.Sift.yml`](flatpak/net.justinchung.Sift.yml) | @justin13888 | The application id, which is simultaneously the D-Bus well-known name, the desktop-file name, the portal identity, and the data root |
+
+### What the Cask publishes
+
+`brew uninstall` and `brew upgrade` both run the Cask's **uninstall** stanza, so it removes the
+bundle and nothing else: a stanza that deleted the container there would erase every account,
+the blob store and the installation secret on each upgrade. User data goes only under **zap**
+(`brew uninstall --zap`), which the user asks for explicitly.
+
+| Published name | Value | Where it comes from |
+|---|---|---|
+| Data root, sandboxed build (D-45) | `~/Library/Containers/net.justinchung.sift` — the account databases, the shared blob index, the installation policy store, and the blob store under D-77's two-level, one-byte fan-out all live inside it | The bundle identifier; the platform places a sandboxed app's Application Support there |
+| Data root, unsandboxed build | `~/Library/Application Support/net.justinchung.sift` | Where the same code resolves Application Support outside the sandbox — every build before the team identifier exists |
+| Keychain service | `net.justinchung.sift`, one generic-password item per account and credential kind | `KEYCHAIN_SERVICE` in `sift-foundation` |
+| Keychain access group | `<team>.net.justinchung.sift` | `keychain_access_group` in `sift-foundation`; the team identifier is still outstanding |
+
+The zap removes the trees whole rather than naming anything inside them, so the fan-out depth
+is permanent because every installed copy's store is laid out by it, not because the stanza
+spells it out.
 
 ## One version, every channel
 

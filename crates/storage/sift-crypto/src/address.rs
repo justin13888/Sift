@@ -140,8 +140,8 @@ impl ContentAddress {
     /// The path a blob lives at, relative to the blob store root.
     ///
     /// D-77 places the file in a fan-out derived from its address, and **the depth is fixed
-    /// at first release** because the on-disk layout is published in the Cask uninstall
-    /// stanza — changing it later breaks uninstall for users who already have one.
+    /// at first release** because the on-disk layout is published in the Cask zap
+    /// stanza — changing it later breaks zap cleanup for users who already have one.
     ///
     /// Two levels of one byte each: 256 directories holding 256 directories, which keeps a
     /// directory's entry count reasonable for a store bounded by NFR-14's default of 2 GB
@@ -245,8 +245,8 @@ mod tests {
 
     #[test]
     fn the_fan_out_is_two_levels_of_one_byte() {
-        // Fixed at first release, because the layout is published in the Cask uninstall
-        // stanza and a change breaks uninstall for existing users.
+        // Fixed at first release, because the layout is published in the Cask zap
+        // stanza and a change breaks zap cleanup for existing users.
         let s = secret();
         let a = s.address(b"anything");
         let hex = a.hex();
