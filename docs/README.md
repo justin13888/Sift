@@ -145,16 +145,18 @@ a row in the egress table, and no address, operator, or answer about whether it 
 whether one guarantee survives one sandbox, and Q-22 asks for the metric and threshold
 [D-64](build/verification.md) requires of every gate and this one lacks.
 
-One of the six is bounded in design terms and urgent in every other sense, because it cannot be
-revisited. **Q-21 asks what the vendored dependency tree licenses** — the crates, which neither a
-contributor agreement nor a bundled-artefact audit reaches, and where one copyleft crate defeats the App
-Store channel whenever that channel returns.
+**Q-21 asks what the vendored dependency tree licenses** — the crates, which neither a contributor
+agreement nor a bundled-artefact audit reaches, and where one copyleft crate defeats the App Store channel
+whenever that channel returns. A copyleft crate can be replaced, so the question is bounded like the
+others; what it asks is whether the audit happens before the first release or the channel decision is
+left to whatever gets vendored.
 
 Q-16 — what licence the App Store channel requires of Sift's own code — is now
 [D-113](product/platforms-and-distribution.md): the App Store channel is deferred, AGPL-3.0 is kept, and
 no contributor agreement is required. The question reopens if and when the channel is reconsidered, before
-the first external contribution it would need; until then an external contribution costs nothing, and
-after it each one is a consent that reconsidering the store must obtain.
+the first external contribution it would need. Reconsidering costs nothing only while all of the copyright
+is the holder's own: each external contribution merged meanwhile is one a store build can carry only with
+its author's consent or by replacing it.
 
 Q-17 — the licences of the filter lists, the sender-infrastructure list and the fonts Sift bundles but
 does not own — was Q-16's deadline reached from outside, and is now
