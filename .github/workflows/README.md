@@ -5,8 +5,28 @@ D-63 tiers gates by the machine they need, and only the cheapest tier blocks a c
 | Tier | Machine | Blocks | Where |
 |---|---|---|---|
 | Per-change | ordinary hosted runners | a merge | [`per-change.yml`](per-change.yml) |
-| Per-integration | dedicated macOS and Linux machines, on a fixed cadence | a release | not yet — needs #21 |
-| Continuous | the reference rig, indefinitely, reporting a series rather than a verdict | a phase | not yet — needs #21 and #3 |
+| Per-integration | dedicated macOS and Linux machines, on a fixed cadence | a release | [`per-integration.yml`](per-integration.yml) — a hosted scaffold, weekly; the dedicated machines are not yet owned |
+| Continuous | the reference rig, indefinitely, reporting a series rather than a verdict | a phase | not yet — needs the dedicated hosts and #3 |
+
+## The per-integration scaffold
+
+Until the dedicated hosts exist, [`per-integration.yml`](per-integration.yml) runs the tier on
+hosted runners — one Intel, one Apple silicon — on a weekly schedule and on demand. Each leg
+refuses to run unless it is on the architecture it names and not translated, then runs the
+tests, the fault-injection tests, and the macOS shell build natively. A separate job runs the
+schema-diff gate against the live discovery document.
+
+**What it cannot stand in for**, stated so that its green is not read as more than it is:
+
+- **R-13, compounded.** A hosted image is re-imaged on the provider's schedule, moving the
+  macOS version under every gate with no Sift commit. Each run writes the image, OS build,
+  page size and Xcode it ran on to its summary, so a moved figure can be put beside a moved
+  host — but a baseline taken here is a baseline of an image, not of a machine.
+- **No dedicated host.** No soak, no footprint figures, no Linux leg beyond per-change's.
+- **No real session.** The three gates below still need a signed build in one.
+
+"Blocks a release" is policy rather than mechanism until a release path checks this
+workflow's latest run on the commit it releases.
 
 **Every gate states its metric, its threshold, and how the threshold was derived (D-64),
 and a threshold moves only by amendment — never in the run that is failing it.**

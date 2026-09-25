@@ -33,6 +33,29 @@ machine — each occupied for the length of a soak run, none of which a hosted r
 part of the project's standing cost in the same way the corpora are, and a phase gated on a measurement
 no machine can take is not gated.
 
+**Until the hosts are owned, the per-integration tier runs on hosted runners as a scaffold**, one
+Intel and one Apple-silicon, on the same cadence and blocking the same thing. It exists so the tier
+runs and fails loudly rather than being absent, and it buys exactly one property the per-change tier
+lacks: every build and test runs **natively on each architecture**, where per-change runs one
+architecture's tests translated on the other. Each leg MUST establish that it is on the architecture
+it names, untranslated, before running anything — a runner label that resolves to the other
+architecture would pass every step and prove nothing, which is the silent failure this section keeps
+naming. What the scaffold does **not** supply is stated so its pass is not read as more than it is:
+
+- **It compounds [R-13](../open-questions.md).** A hosted image is re-imaged on the provider's
+  schedule, moving the macOS version and its engine under every gate with no Sift commit. Each run
+  MUST record the host it ran on — image, OS build, architecture, page size, platform toolchain — so
+  a moved figure can be set beside a moved host, but a baseline taken on the scaffold is a baseline of
+  an image rather than of a machine, and is never promoted to a reference baseline.
+- **It is not a dedicated host.** No soak (NFR-45's 72 hours exceed what a hosted job may run), no
+  footprint figures for NFR-8, NFR-9 or NFR-12 (a shared virtual machine is not the
+  [reference environment](../product/reference-environment.md)), and no Linux leg beyond the
+  per-change tier's.
+- **It is not a real session**, so the three gates below remain absent from it.
+
+The dedicated hosts remain this decision's cost; the scaffold defers paying it and does not discharge
+it.
+
 **Three per-change gates need a real macOS session rather than a runner image**, and are called out
 because each fails silently on the wrong host rather than erroring:
 
