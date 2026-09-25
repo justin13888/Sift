@@ -67,9 +67,10 @@ list address and no list payload. Two obligations stand in its place:
   kind MUST carry a version in its address from the outset and serve a payload that states its own
   version, both fixed before the first build that calls it ships. Neither can be added afterwards,
   because the builds already in the field would never request the versioned form.
-- **The same argument applies to every other address a build calls.** The crash-report endpoint is
-  [Q-19](../open-questions.md), and the connectivity probe [D-96](../runtime/network-conditions.md)
-  declined is permanent for the same reason.
+- **The same argument applies to every other address a build calls.** The crash-report endpoint
+  [D-114](../security/privacy.md#d-114--a-crash-report-is-a-file-the-user-sends-themselves) declined, by
+  making a report a file the user sends themselves, and the connectivity probe
+  [D-96](../runtime/network-conditions.md) declined, are both permanent for the same reason.
 
 Two macOS channels rather than one because they reach different people, and neither reaches the other's
 audience: Homebrew Cask is how technically-inclined macOS users install software, while the App Store is
