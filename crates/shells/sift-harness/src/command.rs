@@ -97,7 +97,7 @@ fn help() -> Vec<String> {
         "attachments <id|#n>                              FR-10: what is carried, fetching none of it",
         "search [--in <account>] <query>                  FR-20: operators, and how they were read",
         "relevance record <file> <#n|id> <query>          #24: <query> sought its hit n (unscoped) or <id>",
-        "save <id|#n> <part> <dir> [write]              NFR-53: the final path, shown before the write",
+        "save <id|#n> <part> <dir> [write]                NFR-53: the final path, shown before the write",
         "resource <url|#n>                                answer one load, as the scheme handler does",
         "close <token|#>                                  revoke a document — D-90's navigation",
         "net [account]                                    bytes on the wire (FR-36)",
@@ -1096,11 +1096,22 @@ fn relevance(app: &mut App, args: &[&str]) -> Output {
         None => parse_id(target)?,
     };
     let judgement = app.relevance_judgement(&query, id)?;
-    judgement.append_to(std::path::Path::new(file))?;
+    judgement.append_to(&home_relative(file)?)?;
     Ok(vec![format!(
         "recorded: `{}` sought {id} in {}",
         judgement.query, judgement.account
     )])
+}
+
+/// A leading `~` or `~/` read as the home directory. A whole session is one quoted argument per
+/// command, so the shell that launched the harness never saw the path and expanded nothing.
+fn home_relative(path: &str) -> Result<std::path::PathBuf, String> {
+    let rest = match path.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => rest.trim_start_matches('/'),
+        _ => return Ok(std::path::PathBuf::from(path)),
+    };
+    let home = std::env::var_os("HOME").ok_or_else(|| format!("`{path}`: HOME is not set"))?;
+    Ok(std::path::Path::new(&home).join(rest))
 }
 
 /// FR-10 — what a message carries, without fetching any of it.

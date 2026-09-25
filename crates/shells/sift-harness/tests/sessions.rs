@@ -1466,6 +1466,32 @@ fn a_relevance_judgement_is_recorded_against_the_hit_the_search_numbered() {
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 
+/// #24: the recording recipe quotes each command whole, so no shell expands its `~`; the
+/// harness reads it as the home directory itself.
+#[test]
+fn a_relevance_corpus_under_tilde_is_written_to_the_home_directory() {
+    let home = std::env::temp_dir().join(format!("sift-harness-home-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("scratch");
+    let mut cmds = hostile();
+    cmds.push("relevance record ~/corpus.tsv #1 receipt");
+    let out = Command::new(env!("CARGO_BIN_EXE_sift-harness"))
+        .args(&cmds)
+        .env("HOME", &home)
+        .output()
+        .expect("harness runs");
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        transcript.contains("recorded: `receipt` sought"),
+        "{transcript}"
+    );
+    let written = std::fs::read_to_string(home.join("corpus.tsv")).expect("written under HOME");
+    assert!(
+        written.starts_with("# sift relevance corpus v1\n"),
+        "{written}"
+    );
+    std::fs::remove_dir_all(&home).expect("cleanup");
+}
+
 /// FR-21's label. Nothing delegates yet, and the transcript says so rather than leaving the
 /// absence of server results to imply it.
 #[test]
