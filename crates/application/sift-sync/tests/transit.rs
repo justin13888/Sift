@@ -295,11 +295,13 @@ fn every_collision_is_one_the_corpus_names() {
     }
 }
 
-/// The summary `docs/open-questions.md` records against R-5, under the current rule.
+/// The per-element survival and collision counts this corpus measures, under the current rule.
 ///
-/// A count over a constructed sample is a statement about the transformations the corpus
-/// chose, not a frequency in real mail, and the documents say so. It is asserted so that the
-/// figures they cite cannot drift from the corpus without this test saying so.
+/// This constant is where the figures are recorded: the documents state the result in words
+/// (which elements survive, where the digest diverges, what collides) and cite no count, because
+/// a count over a constructed sample is a statement about the transformations the corpus chose,
+/// not a frequency in real mail. It is asserted so that a change to the rule or the corpus that
+/// moves any figure fails here, and whoever moves it has to re-read the documents' wording.
 const RECORDED: &str = "\
 digest rule version 2
 from survives 14/16 transit groups

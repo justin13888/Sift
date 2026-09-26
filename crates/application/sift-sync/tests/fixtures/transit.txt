@@ -1,8 +1,9 @@
 # R-5's header-transit corpus: D-44's normalization tuple, measured.
 #
 # The fidelity corpus beside the sanitizer holds bodies, and D-44's tuple is taken over
-# headers, so this is its header half, admitted under D-115's rule: every group carries a
-# provenance and a source. `constructed` means written for this corpus after a transformation
+# headers, so this is a separate corpus, not part of the fidelity corpus. It borrows D-115's
+# provenance discipline without being governed by D-115: every group carries a provenance
+# and a source. `constructed` means written for this corpus after a transformation
 # that source documents, with every name, address and host on a reserved example domain.
 #
 # A group is one question. `kind: same` groups are ONE message observed at two or more points

@@ -365,18 +365,20 @@ that cannot be resolved presents as a delete plus an arrival, so local flags and
 message do not survive it. Changing the normalization rules is a reindex of one column, not a resync,
 which is what keeps this inside NFR-48.
 
-**What the measurement found.** The tuple is measured against a header-transit corpus — the header half of
-the fidelity corpus of the [reference environment](../product/reference-environment.md), admitted under
-D-115's provenance rule and checked into the tree beside the digest. Each of its groups is either one
+**What the measurement found.** The tuple is measured against a header-transit corpus checked into the tree
+beside the digest. It is not part of the [reference environment](../product/reference-environment.md)'s
+fidelity corpus, which holds bodies for rendering, but it follows the same provenance discipline D-115 sets
+there: every group records whether it is captured or constructed, and what documents it. Each of its groups is either one
 message observed at several points in transit, or two distinct messages one scope could propose together,
 and each records which elements agree and whether the digest does; the corpus's own test recomputes both
 under the current rule, so the recorded result cannot drift from it. Every group is constructed, so what
 follows is a statement about the transformations the corpus names, not a frequency in real mail.
 
-- **Survival.** Originator address, origination date and reference chain survive every transit group:
-  trace and signature fields added by a relay hop, a refolded chain, a date re-emitted in another zone or
-  with an obsolete zone name, an address whose case a gateway changed, a display name re-encoded or
-  rewritten from the obsolete comment form. The first measurement found the subject was the weak element:
+- **Survival.** Origination date and reference chain survive every transit group, and the originator
+  address survives every one except the list redistributions that rewrite From (below): trace and
+  signature fields added by a relay hop, a refolded chain, a date re-emitted in another zone or with an
+  obsolete zone name, an address whose case a gateway changed, a display name re-encoded or rewritten from
+  the obsolete comment form. The first measurement found the subject was the weak element:
   a relay that folds with a tab, a folder that inserts a space, and a gateway that strips trailing spaces
   each diverged the digest on mail that was otherwise unchanged. The subject's whitespace is therefore
   insignificant — every run is one space and the ends are trimmed — and that change is the digest's second
