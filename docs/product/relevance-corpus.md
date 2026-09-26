@@ -34,6 +34,11 @@ re-adding an account, so a corpus keyed on it would stop resolving silently — 
 because it is unique within an account; the internet message identifier second, because
 [R-5](../open-questions.md) records that it is not. A message carrying neither cannot be recorded.
 
+The account is named by its **display label**, so the owner can read and correct the file by hand. A
+label is not permanent: renaming the account, or a second account of the same name being told apart by a
+numbered suffix, leaves a line naming no account in the container. Such a line reads as unresolved, never
+as a miss, and correcting its account field restores it.
+
 A judgement whose message is no longer in the container — deleted since, or its account not present — is
 **unresolved**, and is reported apart from the ranking figures rather than counted as a miss.
 
