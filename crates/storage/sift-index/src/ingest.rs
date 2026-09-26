@@ -53,42 +53,57 @@ fn needs_trigrams(c: char) -> bool {
 ///   displayed text were different strings that happened to look alike.
 #[must_use]
 pub fn tokenize(text: &str) -> Vec<Token> {
-    let normalized = normalize::for_index(text);
-    let mut tokens = Vec::new();
-    let mut word = String::new();
+    tokenize_spanned(text).into_iter().map(|(t, _)| t).collect()
+}
 
-    let flush = |word: &mut String, tokens: &mut Vec<Token>| {
-        if !word.is_empty() {
-            tokens.push(Token {
-                text: fold(word),
-                trigram: false,
-            });
-            word.clear();
+/// [`tokenize`], with the byte range each token was read from.
+///
+/// This is the one tokenizer the store's full-text table runs, over documents and queries
+/// alike — so what is indexed and what is asked for cannot be two different readings of the
+/// same text. The ranges are into the **normalized** form of `text`; they are exact where
+/// `text` is already in that form, which is how ingest writes it.
+#[must_use]
+pub fn tokenize_spanned(text: &str) -> Vec<(Token, core::ops::Range<usize>)> {
+    let normalized = normalize::for_index(text);
+    let mut out = Vec::new();
+    // Where the word being read began, and the run of unsegmentable characters with the byte
+    // offset of each.
+    let mut word: Option<usize> = None;
+    let mut run: Vec<(usize, char)> = Vec::new();
+
+    let flush_word = |start: Option<usize>, end: usize, out: &mut Vec<_>| {
+        if let Some(start) = start {
+            out.push((
+                Token {
+                    text: fold(&normalized[start..end]),
+                    trigram: false,
+                },
+                start..end,
+            ));
         }
     };
 
-    let mut unsegmentable = String::new();
-    for c in normalized.chars() {
+    for (i, c) in normalized.char_indices() {
         if needs_trigrams(c) {
-            flush(&mut word, &mut tokens);
-            unsegmentable.push(c);
+            flush_word(word.take(), i, &mut out);
+            run.push((i, c));
             continue;
         }
-        if !unsegmentable.is_empty() {
-            tokens.extend(trigrams(&unsegmentable));
-            unsegmentable.clear();
+        if !run.is_empty() {
+            trigrams(&run, i, &mut out);
+            run.clear();
         }
         if c.is_alphanumeric() || c == '\'' || c == '_' {
-            word.push(c);
+            word.get_or_insert(i);
         } else {
-            flush(&mut word, &mut tokens);
+            flush_word(word.take(), i, &mut out);
         }
     }
-    flush(&mut word, &mut tokens);
-    if !unsegmentable.is_empty() {
-        tokens.extend(trigrams(&unsegmentable));
+    flush_word(word.take(), normalized.len(), &mut out);
+    if !run.is_empty() {
+        trigrams(&run, normalized.len(), &mut out);
     }
-    tokens
+    out
 }
 
 /// Overlapping three-character windows, scoped to the text that needs them.
@@ -96,21 +111,32 @@ pub fn tokenize(text: &str) -> Vec<Token> {
 /// D-81 scopes the trigram index to the scripts that need it rather than applying it
 /// everywhere, because trigramming Latin text would multiply the index size for no gain —
 /// and NFR-52's budget has to absorb whatever this produces.
-fn trigrams(text: &str) -> Vec<Token> {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() < 3 {
-        return vec![Token {
-            text: text.to_owned(),
-            trigram: true,
-        }];
+///
+/// `run` is each character with its byte offset, and `end` is where the run stops.
+fn trigrams(run: &[(usize, char)], end: usize, out: &mut Vec<(Token, core::ops::Range<usize>)>) {
+    let Some(&(first, _)) = run.first() else {
+        return;
+    };
+    if run.len() < 3 {
+        out.push((
+            Token {
+                text: run.iter().map(|(_, c)| c).collect(),
+                trigram: true,
+            },
+            first..end,
+        ));
+        return;
     }
-    chars
-        .windows(3)
-        .map(|w| Token {
-            text: w.iter().collect(),
-            trigram: true,
-        })
-        .collect()
+    for (k, window) in run.windows(3).enumerate() {
+        let stop = run.get(k + 3).map_or(end, |(offset, _)| *offset);
+        out.push((
+            Token {
+                text: window.iter().map(|(_, c)| c).collect(),
+                trigram: true,
+            },
+            window[0].0..stop,
+        ));
+    }
 }
 
 /// Fold diacritics and case.
@@ -262,6 +288,27 @@ mod tests {
         assert!(d.has_body());
         d.add_body("the quarterly figures");
         assert!(d.has_body());
+    }
+
+    #[test]
+    fn every_span_names_the_text_its_token_was_read_from() {
+        // The store's table reports these to the engine, so a span that ran past the text or
+        // split a character would be a fault inside the database rather than a wrong answer.
+        let text = "Déjà vu — 日本語のテキスト, don't";
+        let normalized = normalize::for_index(text);
+        let spanned = tokenize_spanned(text);
+        assert_eq!(
+            spanned.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>(),
+            tokenize(text)
+        );
+        for (token, span) in &spanned {
+            let source = &normalized[span.clone()];
+            if token.trigram {
+                assert!(source.starts_with(&token.text), "{token:?} from {source:?}");
+            } else {
+                assert_eq!(fold(source), token.text);
+            }
+        }
     }
 
     #[test]

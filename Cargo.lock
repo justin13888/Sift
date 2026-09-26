@@ -2017,6 +2017,7 @@ dependencies = [
  "rusqlite",
  "sift-crypto",
  "sift-foundation",
+ "sift-index",
 ]
 
 [[package]]

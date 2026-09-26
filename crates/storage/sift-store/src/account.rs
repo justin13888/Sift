@@ -87,6 +87,10 @@ impl Account {
     }
 
     fn finish(store: Connection, journal: Connection, id: AccountId) -> Result<Self, OpenError> {
+        // Before anything reads or writes a message: the full-text table is kept by triggers on
+        // the message row, and it cannot be touched on a connection that does not know its
+        // tokenizer — including by the migration that creates it.
+        crate::text::register(&store)?;
         let store_version = schema::version_of(&store)?;
         let journal_version = schema::version_of(&journal)?;
 
@@ -537,8 +541,9 @@ mod tests {
         let stamp = |f: &std::path::Path| {
             schema::version_of(&Connection::open(f).expect("open")).expect("version")
         };
-        assert_eq!(stamp(&p.journal), schema::CURRENT_VERSION);
-        assert_eq!(stamp(&p.store), schema::CURRENT_VERSION - 1);
+        // Stopped at version 2's step: the journal took it, the store did not.
+        assert_eq!(stamp(&p.journal), 2);
+        assert_eq!(stamp(&p.store), 1);
 
         // The cause clears, as a disk that frees space does. The next open finishes the step.
         Connection::open(&p.store)
@@ -566,6 +571,104 @@ mod tests {
             plan(&a.store, "SELECT id FROM message WHERE remote_id = ?1")
                 .contains("message_remote")
         );
+    }
+
+    /// Messages the full-text index returns for `expression`, by provider identifier.
+    fn found(conn: &Connection, expression: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.remote_id FROM message_text t
+                 JOIN message_text_key k ON k.docid = t.rowid
+                 JOIN message m ON m.id = k.message_id
+                 WHERE message_text MATCH ?1 ORDER BY m.remote_id",
+            )
+            .expect("prepare");
+        stmt.query_map([expression], |r| r.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows")
+    }
+
+    fn insert(conn: &Connection, key: u8, remote: &str, subject: &str, recipients: &str) {
+        conn.execute(
+            "INSERT INTO message (id, remote_id, fallback_digest, digest_rule_version,
+                                  received_at_millis, sender, recipients, subject, provenance)
+             VALUES (?1, ?2, X'00', 1, 0, 'alice@example.test', ?3, ?4, 'Delivered')",
+            rusqlite::params![vec![key; 16], remote, recipients, subject],
+        )
+        .expect("insert");
+    }
+
+    #[test]
+    fn mail_already_held_is_indexed_by_the_migration_that_creates_the_index() {
+        // An account upgraded from a build with no index must not search as if it were empty:
+        // a result list that looks like a mailbox with no such message is the failure FR-19
+        // search exists to avoid.
+        let s = Scratch::new("v2-to-index");
+        let p = s.paths();
+        {
+            let store = Connection::open(&p.store).expect("store");
+            let journal = Connection::open(&p.journal).expect("journal");
+            schema::create(&store, STORE_SCHEMA_V1, 1).expect("v1 store");
+            schema::create(&journal, JOURNAL_SCHEMA_V1, 1).expect("v1 journal");
+            schema::migrate_to(&store, &journal, 1, 2).expect("v2");
+            insert(&store, 1, "old", "Quarterly figures", "bob@example.test");
+        }
+        let a = Account::open(&p, AccountId::from_u128(1)).expect("migrate");
+        assert_eq!(found(&a.store, "\"quarterly\""), vec!["old"]);
+        assert_eq!(found(&a.store, "{recipients} : \"bob\""), vec!["old"]);
+    }
+
+    #[test]
+    fn an_index_entry_lives_and_dies_with_its_message_row() {
+        // D-5's no-drift argument and NFR-52's one unit: whatever writes the row writes the
+        // entry, in the same transaction, and a deleted message takes its text with it.
+        let s = Scratch::new("index-lifecycle");
+        let a = Account::open(&s.paths(), AccountId::from_u128(1)).expect("open");
+        insert(&a.store, 1, "one", "Lunch on Friday", "");
+        insert(&a.store, 2, "two", "Invoice", "");
+        assert_eq!(found(&a.store, "\"lunch\""), vec!["one"]);
+
+        // Body text arrives at first fetch, into the entry the row already has.
+        a.store
+            .execute(
+                "UPDATE message_text SET body = 'the tapas place'
+                 WHERE rowid = (SELECT docid FROM message_text_key WHERE message_id = ?1)",
+                [vec![1u8; 16]],
+            )
+            .expect("body");
+        assert_eq!(found(&a.store, "\"tapas place\""), vec!["one"]);
+
+        // An envelope rewritten by a later sync keeps the body it did not mention.
+        a.store
+            .execute(
+                "UPDATE message SET subject = 'Lunch moved to Monday' WHERE remote_id = 'one'",
+                [],
+            )
+            .expect("update");
+        assert_eq!(found(&a.store, "\"monday\""), vec!["one"]);
+        assert!(
+            found(&a.store, "\"friday\"").is_empty(),
+            "the old subject is still indexed"
+        );
+        assert_eq!(found(&a.store, "\"tapas\""), vec!["one"]);
+
+        a.store
+            .execute("DELETE FROM message WHERE remote_id = 'one'", [])
+            .expect("delete");
+        assert!(
+            found(&a.store, "\"tapas\"").is_empty(),
+            "the deleted message's body is still found"
+        );
+        let orphans: i64 = a
+            .store
+            .query_row(
+                "SELECT (SELECT count(*) FROM message_text) + (SELECT count(*) FROM message_text_key)",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(orphans, 2, "the index holds more than the one message left");
     }
 
     #[test]
