@@ -7,18 +7,29 @@ import WebKit
 /// # N-1, in WebKit terms
 ///
 /// The invariant is that only the internal scheme is registered and every other scheme is
-/// rejected at the engine's policy layer. Four things enforce it here, and each is load-bearing
-/// rather than defence in depth:
+/// rejected at the engine's policy layer. Five things enforce it here:
 ///
 /// 1. A `WKURLSchemeHandler` is registered for `sift-resource` and nothing else. WebKit will
 ///    not let a page load a scheme it has no handler for and no built-in support for.
-/// 2. `decidePolicyFor` cancels **every** navigation whose scheme is not the internal one, and
-///    every navigation at all that is not the initial load. Nothing navigates in place.
-/// 3. The data store is **non-persistent**, so two messages share no cookie jar, no cache and
-///    no local storage — NFR-25's correlation channel, closed.
-/// 4. A `default-src 'none'` content security policy is injected as a backstop. It is a
-///    backstop: N-1 is the guarantee, and a CSP that was the guarantee would be one the
-///    sanitizer's own parser disagreement could undo.
+/// 2. **A content rule list blocks every subresource load whose scheme is not the internal
+///    one**, compiled once per process and installed before the first document is shown
+///    ([`BodyViewIsolation`]). This is the policy layer for http, https, websockets and blob:
+///    WebKit has built-in support for all four, so a missing handler does not stop them, and
+///    the navigation callback in 3 never sees a subresource. A body view whose rule list failed
+///    to compile **renders nothing** rather than rendering without it.
+/// 3. `decidePolicyFor` admits exactly one navigation per document — the main-frame load this
+///    view itself started, at an address minted for that load and consumed by it — and cancels
+///    every other. Subframes, refreshes, reloads, and links never proceed in place.
+/// 4. The data store is **non-persistent** and minted per view, so two views share no cookie
+///    jar, no cache and no local storage — NFR-25's correlation channel, closed.
+/// 5. A `default-src 'none'` content security policy is injected as the first element of the
+///    document. It is a backstop for everything the other four cover, and — measured by the P0
+///    probe (`BodyViewProbe`) rather than assumed — **the only engine layer that refuses a
+///    `data:` or `file:` subresource**: content rule lists do not match `data:`, and WebKit
+///    resolves both schemes internally without consulting a registered handler. A `data:`
+///    resource is bytes the document already carries rather than egress, and the sanitizer
+///    rewrites every fetching position before the document gets here; the probe holds the CSP
+///    to refusing them anyway, because a backstop nobody checks is not one.
 ///
 /// # Script is off at the engine, not at the page — D-50
 ///
@@ -63,16 +74,38 @@ final class BodyView: NSView {
     /// The document currently loaded. Revoked before the next one is opened — D-90.
     private var token: String?
 
+    /// The one navigation this view will admit: the main-frame load it started itself, at an
+    /// address minted for that load. Consumed by the policy decision that admits it, so a
+    /// refresh, a reload, or a subframe naming the same address is cancelled like any other.
+    private var admitted: URL?
+    /// Whether [`BodyViewIsolation`]'s rule list is installed. Nothing is loaded before it is.
+    private var isolated = false
+    /// The document waiting for the rule list, if `show` arrived first. Only the latest is
+    /// kept: an earlier one was superseded before it could be shown.
+    private var pending: String?
+
+    /// The P0 probe's recorder, when this view is being measured rather than read in.
+    /// Always `nil` in the application: see [`BodyViewInstrument`].
+    private let instrument: BodyViewInstrument?
+
     /// Told when a link is activated, so the confirmation sheet can be raised.
     var onLink: ((URL) -> Void)?
 
-    override init(frame: NSRect) {
+    override convenience init(frame: NSRect) {
+        self.init(frame: frame, instrument: nil)
+    }
+
+    /// A body view whose every attempted load, navigation and script execution is reported
+    /// to `instrument`. The configuration is otherwise the application's own, byte for byte,
+    /// which is the point: the probe measures the view that ships, not a copy of it.
+    init(frame: NSRect, instrument: BodyViewInstrument?) {
+        self.instrument = instrument
         super.init(frame: frame)
 
         let configuration = WKWebViewConfiguration()
 
-        // NFR-25: its own store, non-persistent. Two messages cannot correlate through it and
-        // neither can observe application state.
+        // NFR-25: its own store, non-persistent, minted for this view. Two messages cannot
+        // correlate through it and neither can observe application state.
         configuration.websiteDataStore = .nonPersistent()
 
         // D-50, the wide setting. `allowsContentJavaScript` alone would be the narrow one.
@@ -80,12 +113,19 @@ final class BodyView: NSView {
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.preferences.isFraudulentWebsiteWarningEnabled = false
         configuration.preferences.setValue(false, forKey: "javaScriptEnabled")
+        // Nothing in a body plays itself; media that could would be a fetch nobody asked for.
+        configuration.mediaTypesRequiringUserActionForPlayback = .all
 
-        // N-1's one registered scheme. Everything else has no handler and no built-in support.
+        // N-1's one registered scheme. Everything else has no handler here, and whatever the
+        // engine supports natively is refused by the rule list installed below.
         configuration.setURLSchemeHandler(
-            ResourceSchemeHandler { [weak self] url in self?.app },
+            ResourceSchemeHandler(
+                app: { [weak self] _ in self?.app },
+                observe: instrument.map { i in { request in i.attempted(request) } }
+            ),
             forURLScheme: BodyView.internalScheme
         )
+        instrument?.install(on: configuration)
 
         web = WKWebView(frame: frame, configuration: configuration)
         web.navigationDelegate = self
@@ -112,6 +152,19 @@ final class BodyView: NSView {
         scroller.frame = bounds
         scroller.autoresizingMask = [.width, .height]
         addSubview(scroller)
+
+        // The rule list is added to the live controller, so it binds this web view whether it
+        // arrives now or after a first compile. Until it does, `show` holds the document.
+        let controller = configuration.userContentController
+        BodyViewIsolation.whenReady { [weak self] list in
+            guard let self, let list else { return }
+            controller.add(list)
+            self.isolated = true
+            if let html = self.pending {
+                self.pending = nil
+                self.load(BodyView.document(for: html))
+            }
+        }
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -147,11 +200,42 @@ final class BodyView: NSView {
         // is exactly the property D-28 rests on.
         closeCurrent()
         self.token = token
+        present(html)
+    }
 
-        // The CSP backstop, and a base stylesheet. `default-src 'none'` with the internal
-        // scheme permitted for images and fonts, and inline styles allowed because the
-        // sanitizer's output *is* inline style.
-        let document = """
+    /// Put `html` in the body, or hold it until the rule list is installed.
+    ///
+    /// The part of `show` that has nothing to do with tokens, so the probe can drive it with
+    /// no application behind the view.
+    func present(_ html: String) {
+        guard isolated else {
+            // Held rather than loaded without the rule list. If the list never compiles, the
+            // view never renders — N-1 is not a property to trade for a visible body.
+            pending = html
+            return
+        }
+        load(BodyView.document(for: html))
+    }
+
+    /// Load an assembled document at an address minted for this load alone.
+    private func load(_ document: String) {
+        // Unguessable, so a document cannot name the address its successor will be admitted
+        // at; single-use, so it cannot re-enter its own.
+        let address = URL(string: "\(BodyView.internalScheme)://document/\(UUID().uuidString)")!
+        admitted = address
+        // Loaded under the internal scheme so the document's own origin is one nothing else
+        // shares — never `about:blank`, which several origins can end up sharing.
+        web.loadHTMLString(document, baseURL: address)
+    }
+
+    /// The document a body is shown in: the CSP backstop, then a base stylesheet, then `html`.
+    ///
+    /// `default-src 'none'` with the internal scheme permitted for images and fonts, and
+    /// inline styles allowed because the sanitizer's output *is* inline style. The policy is
+    /// the first thing in the head, so nothing the body carries is parsed before it applies —
+    /// and a second policy the body declares can only narrow it, never widen it.
+    static func document(for html: String) -> String {
+        """
             <!doctype html><html><head><meta charset="utf-8">
             <meta http-equiv="Content-Security-Policy" content="\
             default-src 'none'; \
@@ -168,10 +252,10 @@ final class BodyView: NSView {
               table{max-width:100%}
             </style></head><body>\(html)</body></html>
             """
-        // Loaded under the internal scheme so the document's own origin is one nothing else
-        // shares — never `about:blank`, which several origins can end up sharing.
-        web.loadHTMLString(document, baseURL: URL(string: "\(BodyView.internalScheme)://document"))
     }
+
+    /// The web view's own data store — NFR-25's per-view store, for the probe to inspect.
+    var dataStore: WKWebsiteDataStore { web.configuration.websiteDataStore }
 
     /// Revoke the current document's token.
     func closeCurrent() {
@@ -184,9 +268,14 @@ final class BodyView: NSView {
     }
 
     /// Show nothing, and stop answering for whatever was there.
+    ///
+    /// An empty document through the same admission as any other, rather than a bare
+    /// `about:blank`: the policy admits nothing it did not mint, and an exception for the
+    /// blank page would be an exception a document could aim at.
     func clear() {
         closeCurrent()
-        web.loadHTMLString("", baseURL: nil)
+        pending = nil
+        if isolated { load("") }
     }
 
     deinit { closeCurrent() }
@@ -199,10 +288,17 @@ extension BodyView: WKNavigationDelegate, WKUIDelegate {
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
         let url = navigationAction.request.url
-        let scheme = url?.scheme?.lowercased()
 
-        // The initial load of the document Sift assembled. Nothing else is ever allowed.
-        if navigationAction.navigationType == .other, scheme == BodyView.internalScheme {
+        // The load this view started, in the main frame, at the address minted for it —
+        // once. Scheme alone is not enough: a refresh to the internal scheme, a subframe
+        // under it, or a reload of the current document all share the scheme and are all
+        // navigations the document caused rather than the view.
+        if let admitted, let url, url == admitted,
+            navigationAction.navigationType == .other,
+            navigationAction.targetFrame?.isMainFrame == true
+        {
+            self.admitted = nil
+            instrument?.navigated(url, allowed: true)
             decisionHandler(.allow)
             return
         }
@@ -211,6 +307,7 @@ extension BodyView: WKNavigationDelegate, WKUIDelegate {
         // A link activation is handed up so the confirmation sheet can show the real
         // destination; anything else is simply refused and nothing is told about it, because
         // a document that could provoke a message is a document with a channel.
+        instrument?.navigated(url, allowed: false)
         decisionHandler(.cancel)
         if navigationAction.navigationType == .linkActivated, let url {
             onLink?(url)
@@ -235,12 +332,17 @@ extension BodyView: WKNavigationDelegate, WKUIDelegate {
 /// every byte, which is the structural claim the whole content-blocking design rests on.
 private final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler {
     private let app: (URL) -> OpaquePointer?
+    /// Told of **every** attempted load before it is answered — NFR-40's method 2 records
+    /// here, and FR-33 item 5 will read the same stream. `nil` in the application today.
+    private let observe: ((URLRequest) -> Void)?
 
-    init(app: @escaping (URL) -> OpaquePointer?) {
+    init(app: @escaping (URL) -> OpaquePointer?, observe: ((URLRequest) -> Void)?) {
         self.app = app
+        self.observe = observe
     }
 
     func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
+        observe?(task.request)
         guard let url = task.request.url, let app = app(url) else {
             task.didFailWithError(URLError(.badURL))
             return
@@ -267,6 +369,159 @@ private final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler {
         // all be buffered whole. Until the stream is wired, an allowed resource is reported as
         // unavailable rather than fabricated — an empty image drawn as though it had loaded
         // would be a lie told to the person reading.
+        task.didFailWithError(URLError(.resourceUnavailable))
+    }
+
+    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
+}
+
+/// N-1's policy layer for the schemes WebKit supports natively.
+///
+/// A scheme handler only decides what the engine does not already know how to load. http,
+/// https, websockets and blob are built in, so registering nothing for them refuses nothing;
+/// and the navigation callback never sees a subresource. A content rule list is the engine's
+/// own per-load policy, applied in the content process before a request leaves it, so this is
+/// the layer at which those schemes are rejected.
+///
+/// **Block everything, then except the internal scheme.** `ignore-previous-rules` is how a
+/// rule list states an exception, and it overrides only rules before it — so the list denies
+/// by default and a scheme nobody thought of is refused rather than admitted.
+///
+/// Compiled once per process and shared by every body view: the compiled form is immutable
+/// and D-54 keeps at most one view per window anyway. It is recompiled at every launch rather
+/// than looked up, so a list stored by an older build can never be the one in force.
+enum BodyViewIsolation {
+    static let identifier = "net.justinchung.sift.body-view.n1"
+
+    static let rules = """
+        [{"trigger":{"url-filter":".*"},"action":{"type":"block"}},\
+        {"trigger":{"url-filter":"^\(BodyView.internalScheme):"},\
+        "action":{"type":"ignore-previous-rules"}}]
+        """
+
+    private enum State {
+        case idle, compiling, ready(WKContentRuleList), failed
+    }
+    private static var state = State.idle
+    private static var waiting: [(WKContentRuleList?) -> Void] = []
+
+    /// Hand `body` the compiled list — now if it exists, when it does if not, and `nil` if
+    /// compiling failed. A `nil` is final: the view that receives it never renders.
+    static func whenReady(_ body: @escaping (WKContentRuleList?) -> Void) {
+        switch state {
+        case .ready(let list):
+            body(list)
+        case .failed:
+            body(nil)
+        case .compiling:
+            waiting.append(body)
+        case .idle:
+            waiting.append(body)
+            state = .compiling
+            WKContentRuleListStore.default().compileContentRuleList(
+                forIdentifier: identifier, encodedContentRuleList: rules
+            ) { list, error in
+                if let list {
+                    state = .ready(list)
+                } else {
+                    state = .failed
+                    NSLog("sift: the body view's rule list did not compile, so no body will render: %@",
+                          String(describing: error))
+                }
+                let ready = waiting
+                waiting = []
+                for each in ready { each(list) }
+            }
+        }
+    }
+}
+
+/// NFR-40 method 2's recorder: every load a body view attempts, every navigation it is asked
+/// to make, and any script that executes in it.
+///
+/// This is the instrumentation the P0 spike built and the differential test reuses — "a
+/// scheme handler that records **every** attempted load and a bridge that records **any**
+/// execution" — and FR-33 items 5 and 9 read the same stream. It is one class so that the
+/// three consumers cannot come to disagree about what was observed.
+///
+/// **The application never constructs one.** A body view holding a recorder registers a
+/// message handler that only script could reach, and handlers for schemes the engine would
+/// otherwise load itself; neither belongs in a view somebody reads mail in.
+///
+/// What it records is exactly what reached it. A foreign scheme's loads reach it only once the
+/// probe has made the engine willing to hand that scheme to a handler at all (see
+/// `BodyViewProbe`), and `data:` and `file:` never do — WebKit resolves both internally. The
+/// probe detects those two by what they chain to rather than by this.
+final class BodyViewInstrument: NSObject {
+    enum Event: Equatable {
+        /// A load reached a scheme handler: the internal one, or a foreign one the probe
+        /// registered to catch egress the policy layer should have refused.
+        case load(URL?)
+        /// A navigation was put to the policy callback, and whether it was admitted.
+        case navigation(URL?, allowed: Bool)
+        /// Script ran and reached the bridge.
+        case execution(String)
+    }
+
+    /// The message handler name only script can reach.
+    static let bridge = "siftProbe"
+
+    /// The schemes whose loads are recorded as egress when the engine can be made to hand
+    /// them over. `data` and `file` are listed because the attempt is harmless and the day
+    /// WebKit starts consulting a handler for them is a day the probe should see.
+    static let foreignSchemes = ["http", "https", "ws", "wss", "blob", "data", "file"]
+
+    /// Bounded, as every buffer here is: a hostile document can attempt loads without end.
+    /// Past the bound events are counted rather than kept, and the count is a failure in
+    /// itself for anything judging a document by what it did.
+    static let capacity = 4096
+
+    private(set) var events: [Event] = []
+    private(set) var dropped = 0
+
+    /// The events since the last drain, and how many were dropped past the bound.
+    func drain() -> (events: [Event], dropped: Int) {
+        defer {
+            events = []
+            dropped = 0
+        }
+        return (events, dropped)
+    }
+
+    func attempted(_ request: URLRequest) { record(.load(request.url)) }
+
+    func navigated(_ url: URL?, allowed: Bool) { record(.navigation(url, allowed: allowed)) }
+
+    private func record(_ event: Event) {
+        if events.count < BodyViewInstrument.capacity {
+            events.append(event)
+        } else {
+            dropped += 1
+        }
+    }
+
+    /// Register the bridge and every foreign scheme the engine will let a handler take.
+    func install(on configuration: WKWebViewConfiguration) {
+        configuration.userContentController.add(self, name: BodyViewInstrument.bridge)
+        for scheme in BodyViewInstrument.foreignSchemes
+        where !WKWebView.handlesURLScheme(scheme) {
+            configuration.setURLSchemeHandler(self, forURLScheme: scheme)
+        }
+    }
+}
+
+extension BodyViewInstrument: WKScriptMessageHandler {
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        record(.execution(String(describing: message.body)))
+    }
+}
+
+extension BodyViewInstrument: WKURLSchemeHandler {
+    func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
+        attempted(task.request)
         task.didFailWithError(URLError(.resourceUnavailable))
     }
 
