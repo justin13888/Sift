@@ -144,21 +144,10 @@ fn account(app: &mut App, args: &[&str]) -> Output {
         ["authorize", name, client_id] | ["authorize", name, client_id, _] => {
             // The kind is the register's opaque string; with none given, the first one
             // registered, which is what this command did before there were two.
-            let kind = match args {
-                [_, _, _, kind] => sift_app::authorize::kind(kind).ok_or_else(|| {
-                    let known: Vec<&str> = sift_registry::KINDS
-                        .iter()
-                        .map(|d| d.kind.as_str())
-                        .collect();
-                    format!("no such provider kind `{kind}` — try {}", known.join(", "))
-                })?,
-                _ => {
-                    sift_registry::KINDS
-                        .first()
-                        .ok_or("this build has no provider adapters")?
-                        .kind
-                }
-            };
+            let kind = requested_kind(match args {
+                [_, _, _, kind] => Some(kind),
+                _ => None,
+            })?;
             // D-36's registration is checked *before* the flow starts. This shell has not
             // registered the scheme with the system — a bundle does that, and a bundle is
             // what this binary is not — so it says so rather than opening a browser the user
@@ -920,13 +909,15 @@ fn refresh_credential(
     let kind = sift_registry::by_persisted(&recorded)
         .ok_or_else(|| format!("`{name}` is of a kind this build does not have: {recorded}"))?
         .kind;
-    let client_id = app
-        .pending_authorization
-        .get(name)
-        .filter(|(pending, _)| *pending == kind)
-        .map(|(_, client)| client.clone())
-        .or_else(|| std::env::var("SIFT_OAUTH_CLIENT_ID").ok())
-        .ok_or("no client identifier is known for this account, so it cannot be refreshed")?;
+    let client_id = refresh_client(app.pending_authorization.get(name), kind, |var| {
+        std::env::var(var).ok()
+    })
+    .ok_or_else(|| {
+        format!(
+            "no client identifier is known for this account, so it cannot be refreshed — set {}",
+            client_variable(kind)
+        )
+    })?;
     let registration = sift_app::authorize::registration(kind, &client_id)?;
     let mut transport = sift_http::Https::to(&registration.profile.token.host)
         .map_err(|why| format!("the trust store could not be consulted: {why}"))?;
@@ -934,6 +925,59 @@ fn refresh_credential(
         .refresh(&mut transport, &registration, account)
         .map(|pair| pair.access)
         .map_err(|e| e.to_string())
+}
+
+/// The kind `account authorize` begins with: the one named, or — with none named — the first
+/// one registered, which is what the command did before there were two.
+fn requested_kind(named: Option<&str>) -> Result<sift_registry::ProviderKind, String> {
+    match named {
+        Some(kind) => sift_app::authorize::kind(kind).ok_or_else(|| {
+            let known: Vec<&str> = sift_registry::KINDS
+                .iter()
+                .map(|d| d.kind.as_str())
+                .collect();
+            format!("no such provider kind `{kind}` — try {}", known.join(", "))
+        }),
+        None => Ok(sift_registry::KINDS
+            .first()
+            .ok_or("this build has no provider adapters")?
+            .kind),
+    }
+}
+
+/// The environment variable that configures a kind's client: `SIFT_OAUTH_CLIENT_ID_<KIND>`,
+/// the same name `mise run macos` reads, spelled from the register's opaque kind string.
+fn client_variable(kind: sift_registry::ProviderKind) -> String {
+    format!(
+        "SIFT_OAUTH_CLIENT_ID_{}",
+        kind.as_str().to_ascii_uppercase()
+    )
+}
+
+/// Which client refreshes an account of `kind`.
+///
+/// The flow this session began for the account, if it began one for **this** kind; otherwise
+/// the kind's own variable. A client is issued by one provider and is meaningless at another's
+/// token endpoint, so one variable for every kind would refresh a second kind's account with
+/// the first kind's client. The unsuffixed `SIFT_OAUTH_CLIENT_ID` predates the second kind and
+/// still configures the first one, exactly as the macOS build reads it — and no other.
+fn refresh_client(
+    pending: Option<&(sift_registry::ProviderKind, String)>,
+    kind: sift_registry::ProviderKind,
+    env: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let usable = |client: String| (!client.trim().is_empty()).then(|| client.trim().to_owned());
+    pending
+        .filter(|(pending, _)| *pending == kind)
+        .map(|(_, client)| client.clone())
+        .or_else(|| env(&client_variable(kind)).and_then(usable))
+        .or_else(|| {
+            let first = sift_registry::KINDS.first().map(|d| d.kind);
+            (first == Some(kind))
+                .then(|| env("SIFT_OAUTH_CLIENT_ID"))
+                .flatten()
+                .and_then(usable)
+        })
 }
 
 /// Fetch a message's body and run it through the seven stages.
@@ -1422,6 +1466,96 @@ mod tests {
 
         assert!(!file.exists(), "a refused judgement was written");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `account authorize`'s optional kind: an invented one is refused, naming the kinds there
+    /// are; none given is the first one registered; each registered one is itself.
+    #[test]
+    fn authorize_resolves_the_named_kind_defaults_to_the_first_and_refuses_an_invented_one() {
+        let refused = requested_kind(Some("no-such-kind")).unwrap_err();
+        assert!(
+            refused.contains("no such provider kind `no-such-kind`"),
+            "{refused}"
+        );
+        for d in sift_registry::KINDS {
+            assert!(refused.contains(d.kind.as_str()), "{refused}");
+            assert_eq!(requested_kind(Some(d.kind.as_str())), Ok(d.kind));
+        }
+        assert_eq!(requested_kind(None), Ok(sift_registry::KINDS[0].kind));
+
+        // Through the command, too: the refusal comes before any flow begins.
+        let mut session = Session::new(App::new());
+        let out = run(
+            &mut session,
+            "account authorize mail some-client no-such-kind",
+        )
+        .unwrap_err();
+        assert!(out.contains("no such provider kind"), "{out}");
+    }
+
+    /// D1: a refresh uses the client of the account's own kind — the pending flow's only if it
+    /// was begun for that kind, else `SIFT_OAUTH_CLIENT_ID_<KIND>`; the unsuffixed variable
+    /// configures the first kind alone.
+    #[test]
+    fn a_refresh_uses_the_client_of_the_accounts_own_kind() {
+        let [first, second, ..] = sift_registry::KINDS else {
+            panic!("this test needs two kinds");
+        };
+        let (first, second) = (first.kind, second.kind);
+        let env = |vars: &[(String, &str)]| {
+            let vars: std::collections::BTreeMap<String, String> = vars
+                .iter()
+                .map(|(k, v)| (k.clone(), (*v).to_owned()))
+                .collect();
+            move |name: &str| vars.get(name).cloned()
+        };
+        let legacy = "SIFT_OAUTH_CLIENT_ID".to_owned();
+        let first_var = client_variable(first);
+        let second_var = client_variable(second);
+        assert_eq!(
+            second_var,
+            format!(
+                "SIFT_OAUTH_CLIENT_ID_{}",
+                second.as_str().to_ascii_uppercase()
+            )
+        );
+
+        // A flow begun for this kind supplies its client.
+        let pending = (second, "pending-client".to_owned());
+        assert_eq!(
+            refresh_client(Some(&pending), second, env(&[])).as_deref(),
+            Some("pending-client")
+        );
+        // A flow begun for another kind does not, and neither does the unsuffixed variable.
+        let other = (first, "first-client".to_owned());
+        assert_eq!(
+            refresh_client(Some(&other), second, env(&[(legacy.clone(), "legacy")])),
+            None
+        );
+        // The second kind's own variable does.
+        let vars = [
+            (legacy.clone(), "legacy"),
+            (second_var.clone(), "second-client"),
+        ];
+        assert_eq!(
+            refresh_client(Some(&other), second, env(&vars)).as_deref(),
+            Some("second-client")
+        );
+        // The first kind still reads the unsuffixed variable, after its own.
+        assert_eq!(
+            refresh_client(None, first, env(&vars)).as_deref(),
+            Some("legacy")
+        );
+        let both = [(legacy.clone(), "legacy"), (first_var, "first-own")];
+        assert_eq!(
+            refresh_client(None, first, env(&both)).as_deref(),
+            Some("first-own")
+        );
+        // An empty variable is not a client.
+        assert_eq!(
+            refresh_client(None, second, env(&[(second_var, "  ")])),
+            None
+        );
     }
 
     /// `search` reads the whole mailbox, not the newest [`SEARCH_SHOWN`] messages, so a message
