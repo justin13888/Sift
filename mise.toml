@@ -216,6 +216,7 @@ depends = [
 run = '''
 if [ "$(uname -s)" = "Darwin" ]; then
     mise run macos
+    mise run body-view-probe
 else
     echo "ci: skipping the macOS shell leg (D-61 — it needs a macOS host)"
 fi

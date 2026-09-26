@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+#MISE description="P0 spike and NFR-40 method 2 — the hostile-HTML corpus against the macOS body view (N-1, NFR-20)."
+#
+# Builds the macOS shell, then runs the bundle's own `--probe-body-view` mode over
+# `shells/hostile-html/corpus.txt`: every sample loaded raw into the body view the application
+# ships, beside a control view with every defence off. Exits non-zero if any sample executes
+# script, egresses, loads a forbidden scheme or navigates in place, or if any detector never
+# fired in the control. `BodyViewProbe.swift` says what it can and cannot observe.
+#
+# Release, because that is the configuration that ships and the one `mise run macos` builds by
+# default — so CI's macOS leg builds once for both.
+set -euo pipefail
+
+cd "${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
+
+[[ "$(uname -s)" == "Darwin" ]] || {
+    echo "body-view-probe: WKWebView is macOS-only. The WebKitGTK half of the spike is not built yet." >&2
+    exit 1
+}
+
+mise run macos --release
+
+exec shells/macos/.build/xcode/Build/Products/Release/Sift.app/Contents/MacOS/Sift \
+    --probe-body-view shells/hostile-html/corpus.txt

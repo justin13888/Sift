@@ -5,6 +5,14 @@ import AppKit
 // read — which is the whole of how "always running" and "low idle footprint" are both true.
 
 let application = NSApplication.shared
+
+// The P0 body-view spike and NFR-40 method 2: the hostile-HTML corpus against the body view
+// that ships, then exit. Checked before the application shell exists, so the probe runs with
+// no core, no container and no window of Sift's own — only body views it made itself.
+if let flag = CommandLine.arguments.firstIndex(of: "--probe-body-view") {
+    exit(BodyViewProbe.run(arguments: Array(CommandLine.arguments[(flag + 1)...])))
+}
+
 application.delegate = ApplicationShell.shared
 // The application is resident with or without a window, so it is an accessory rather than a
 // regular application until one opens. `LSUIElement` in the bundle states the same thing to
