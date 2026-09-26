@@ -39,6 +39,10 @@ pub type SiftRun = extern "C" fn(ticket: u64);
 ///
 /// **It must not run it inline.** Running it inline would deliver a callback from inside the
 /// call that produced it, which is the reentrancy D-48 forbids outright.
+///
+/// **It is called from any thread**, and that is the point of it: a sync finishes on the
+/// layer's worker, and this is how its completion reaches the main loop. On macOS that is
+/// `DispatchQueue.main.async`, which is safe from anywhere.
 pub type SiftSchedule = extern "C" fn(context: *mut core::ffi::c_void, run: SiftRun, ticket: u64);
 
 /// Arm a coalescing platform timer, and call `run(ticket)` on the main loop when it fires.
@@ -50,6 +54,9 @@ pub type SiftSchedule = extern "C" fn(context: *mut core::ffi::c_void, run: Sift
 ///
 /// On macOS this is a dispatch source timer with an explicit leeway; on Linux, an
 /// absolute-mode timer file descriptor.
+///
+/// **Called from any thread**, like [`SiftSchedule`]: the re-arm after a wheel fire happens
+/// where the fire's work finished, which is the layer's worker.
 pub type SiftArmTimer = extern "C" fn(
     context: *mut core::ffi::c_void,
     run: SiftRun,
@@ -180,6 +187,67 @@ pub(crate) struct Layer {
     /// The last search. Held for the same reason every other table here is: the rows are
     /// borrowed, and something has to own them past the call that returns them.
     pub(crate) search: Mutex<SearchResult>,
+    /// D-19's blocking pool, where a sync and a wheel fire's work run — #49.
+    ///
+    /// Set once, immediately after the layer is shared, because the thread holds a weak
+    /// reference to the layer and there is no layer to refer to until it exists.
+    pub(crate) worker: OnceLock<sift_runtime::worker::Worker<Job>>,
+    /// Whether the shell may still be called from the worker, and the lock that makes that
+    /// question answerable.
+    ///
+    /// **Held across the call it guards.** A worker that checked, released, and then called
+    /// the shell could be overtaken by `sift_shutdown` in between and reach a context the
+    /// shell has already freed. Holding it is bounded, because both calls it guards return
+    /// immediately by contract — they post, they do not run.
+    pub(crate) live: Mutex<bool>,
+}
+
+impl Layer {
+    /// Run `call` — which reaches the shell — only if the layer has not been shut down, and
+    /// keep it from being shut down until `call` returns.
+    ///
+    /// **Only the worker needs this.** Every other caller is on the shell's own loop, the same
+    /// one `sift_shutdown` is called from, so it cannot be overtaken by it.
+    pub(crate) fn while_live(&self, call: impl FnOnce()) {
+        let Ok(live) = self.live.lock() else {
+            return;
+        };
+        if *live {
+            call();
+        }
+    }
+
+    /// Stop the worker reaching the shell, and stop it taking more work. Waits for nothing but
+    /// a post already in progress, which returns immediately by contract — D-70.
+    pub(crate) fn retire(&self) {
+        if let Ok(mut live) = self.live.lock() {
+            *live = false;
+        }
+        if let Some(worker) = self.worker.get() {
+            worker.close();
+        }
+    }
+
+    /// Hand work to the worker. `false` means nothing will run it.
+    pub(crate) fn dispatch(&self, job: Job) -> bool {
+        use sift_runtime::worker::Submitted;
+        self.worker
+            .get()
+            .is_some_and(|w| w.submit(job) != Submitted::Closed)
+    }
+}
+
+/// Work that runs on the layer's worker rather than on the shell's loop.
+///
+/// A closed vocabulary rather than a boxed closure, for the reason [`Task`] is one — and
+/// because the worker coalesces equal jobs, which is what bounds its queue: there is at most
+/// one of each of these waiting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Job {
+    /// A wheel fire came due. Do its work, hop the completion, and re-arm.
+    Fire,
+    /// A shell asked for one account to be synced now.
+    Sync(String),
 }
 
 /// One search's results, and the text they borrow.
@@ -252,6 +320,15 @@ pub(crate) struct Sink {
 unsafe impl Send for Layer {}
 unsafe impl Sync for Layer {}
 
+// **The claim above is checked where it can be.** The session is used from the worker as well
+// as from the shell's loop, one at a time under its mutex, which is sound only if it may move
+// between threads at all. The `unsafe impl` would hide a session that could not, so this is
+// the compiler saying it can.
+const _: fn() = || {
+    fn is_send<T: Send>() {}
+    is_send::<Session>();
+};
+
 /// The scheduled work a ticket names.
 ///
 /// One variant today. It is an enum rather than a boxed closure because a closure would put
@@ -260,7 +337,7 @@ unsafe impl Sync for Layer {}
 pub(crate) enum Task {
     /// Deliver whatever the session has to say.
     Deliver { layer: usize },
-    /// A wheel fire came due. Do its work, then re-arm for the next one.
+    /// A wheel fire came due. Hand its work to the worker, which re-arms when it is done.
     Tick { layer: usize },
 }
 
@@ -380,10 +457,21 @@ pub(crate) fn take(ticket: u64) -> Option<Task> {
 /// Discard every ticket the shell has not run.
 ///
 /// D-70's teardown is bounded and waits for nothing, so a posted delivery that never came
-/// back is reclaimed here rather than waited for.
-pub(crate) fn abandon_all() {
+/// back is reclaimed here rather than waited for. Called after [`Layer::retire`], so the
+/// worker cannot post a ticket behind it.
+///
+/// **Only this layer's.** The slab is the process's, and clearing all of it would drop
+/// another layer's pending fire — whose re-arm happens only when that fire runs, so the
+/// other layer would never poll again.
+pub(crate) fn abandon_all(layer: &Layer) {
+    abandon_for(core::ptr::from_ref(layer) as usize);
+}
+
+fn abandon_for(this: usize) {
     if let Ok(mut slab) = slab().lock() {
-        slab.tasks.clear();
+        slab.tasks.retain(|_, task| match task {
+            Task::Deliver { layer } | Task::Tick { layer } => *layer != this,
+        });
     }
 }
 
@@ -405,6 +493,25 @@ mod tests {
         assert!(
             take(ticket).is_none(),
             "a ticket resolved twice, so a delivery would be handed over twice"
+        );
+    }
+
+    #[test]
+    fn shutting_one_layer_down_leaves_anothers_tickets_alone() {
+        // Two addresses no real layer has, so a test running beside this one cannot own them.
+        let (mine, theirs) = (usize::MAX - 16, usize::MAX - 32);
+        let mut slab = slab().lock().expect("slab");
+        let (a, b) = (slab.next, slab.next + 1);
+        slab.next += 2;
+        slab.tasks.insert(a, Task::Tick { layer: mine });
+        slab.tasks.insert(b, Task::Tick { layer: theirs });
+        drop(slab);
+
+        abandon_for(mine);
+        assert!(take(a).is_none(), "the layer shut down kept its ticket");
+        assert!(
+            take(b).is_some(),
+            "another layer's pending fire was dropped, and its re-arm with it"
         );
     }
 

@@ -1670,6 +1670,7 @@ dependencies = [
  "sift-foundation",
  "sift-governor",
  "sift-presentation",
+ "sift-runtime",
  "sift-session",
  "sift-subsystem",
 ]

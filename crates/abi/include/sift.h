@@ -227,6 +227,10 @@ typedef void (*SiftRun)(uint64_t ticket);
  *
  * **It must not run it inline.** Running it inline would deliver a callback from inside the
  * call that produced it, which is the reentrancy D-48 forbids outright.
+ *
+ * **It is called from any thread**, and that is the point of it: a sync finishes on the
+ * layer's worker, and this is how its completion reaches the main loop. On macOS that is
+ * `DispatchQueue.main.async`, which is safe from anywhere.
  */
 typedef void (*SiftSchedule)(void *context, SiftRun run, uint64_t ticket);
 
@@ -240,6 +244,9 @@ typedef void (*SiftSchedule)(void *context, SiftRun run, uint64_t ticket);
  *
  * On macOS this is a dispatch source timer with an explicit leeway; on Linux, an
  * absolute-mode timer file descriptor.
+ *
+ * **Called from any thread**, like [`SiftSchedule`]: the re-arm after a wheel fire happens
+ * where the fire's work finished, which is the layer's worker.
  */
 typedef void (*SiftArmTimer)(void *context,
                              SiftRun run,
@@ -1154,10 +1161,10 @@ SiftStatus sift_set_writes_enabled(SiftApp *app,
 /**
  * Send what is queued for one account, once.
  *
- * **This blocks the calling thread**, which is a limitation rather than a design, and the same
- * one [`sift_sync_account`] carries: the work belongs on a worker under D-19, and moving it
- * there changes nothing a shell can see because every delivery already arrives through D-48's
- * hop rather than out of this call.
+ * **This blocks the calling thread**, and unlike [`sift_sync_account`] it still does: its
+ * answer is the out-parameter, which FR-34's runtime panel displays, and a worker cannot fill
+ * an out-parameter for a call that has already returned. The flush a person never asked for —
+ * the wheel's, once a minute — runs on the worker (#49); this is the panel's deliberate one.
  *
  * # Safety
  * `app` and `out` must be valid; `label` must point to `label_len` bytes of UTF-8.
@@ -1508,9 +1515,15 @@ SiftStatus sift_add_replayed_account(SiftApp *app,
  * Folders first, because a delta needs somewhere to put what it finds and D-83 assigns local
  * identity on discovery rather than on first use.
  *
- * **This blocks the calling thread**, which is a limitation rather than a design: the work
- * belongs on a worker under D-19, and moving it there changes nothing a shell can see
- * because every delivery already arrives through D-48's hop rather than from this call.
+ * **It returns at once; the walk runs on the layer's worker** — D-19, #49. What it found
+ * arrives the way every delivery does, through D-48's hop, so a shell sees the same thing it
+ * saw when this blocked, without its loop stopping for a provider in the meantime.
+ *
+ * `Ok` means the sync is queued, not that it succeeded. A sync that fails reaches the shell
+ * as a D-49 condition on the delivery that follows it, which is where every other account
+ * fault already arrives. Asking again while one is queued for the same account asks once.
+ *
+ * It does not take the session lock, so it does not wait on a sync already running.
  *
  * # Safety
  * `app` must be valid; `label` must point to `label_len` bytes of UTF-8.

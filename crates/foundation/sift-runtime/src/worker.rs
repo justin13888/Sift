@@ -163,6 +163,12 @@ impl<J> Worker<J> {
         self.shared.changed.notify_all();
     }
 
+    /// Whether a job is running at this moment.
+    #[must_use]
+    pub fn running(&self) -> bool {
+        self.shared.lock().busy
+    }
+
     /// Wait until nothing is queued and nothing is running, for at most `bound`.
     ///
     /// Returns whether it got there. **Not for a shell and not for quit** — D-70 waits for
