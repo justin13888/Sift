@@ -48,9 +48,11 @@ naming. What the scaffold does **not** supply is stated so its pass is not read 
   a moved figure can be set beside a moved host, but a baseline taken on the scaffold is a baseline of
   an image rather than of a machine, and is never promoted to a reference baseline.
 - **It is not a dedicated host.** No soak (NFR-45's 72 hours exceed what a hosted job may run), no
-  footprint figures for NFR-8, NFR-9 or NFR-12 (a shared virtual machine is not the
+  footprint figure that counts for NFR-8, NFR-9 or NFR-12 (a shared virtual machine is not the
   [reference environment](../product/reference-environment.md)), and no Linux leg beyond the
-  per-change tier's.
+  per-change tier's. It does run Q-12's footprint protocol on both architectures, because it is the
+  only Intel machine the project has. That figure is an image's, recorded as evidence and gating
+  nothing, like any other baseline taken here.
 - **It is not a real session**, so the three gates below remain absent from it.
 
 The dedicated hosts remain this decision's cost; the scaffold defers paying it and does not discharge

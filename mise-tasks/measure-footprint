@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+#MISE description="Q-12 — measure NFR-8, NFR-9 and the reading peak on this Mac, for this architecture (D-46)"
+#USAGE flag "--settle <seconds>" help="How long each state is left before it is sampled (default 30)"
+#USAGE flag "--samples <n>" help="Samples per state, one second apart; the median is reported (default 5)"
+#USAGE flag "--out <file>" help="Where the TSV goes (default target/measure/footprint-ARCH.tsv)"
+#USAGE flag "--no-build" help="Measure the Release bundle already built rather than building it"
+#
+# **What this measures, and over which states.** Q-12 needs three figures re-derived together
+# (docs/runtime/memory-pressure.md): NFR-9's window-open state, the reading peak NFR-9 excludes,
+# and NFR-8's window-less floor — which P0 measures as toolkit residue, "window destroyed and
+# allocator collected", i.e. L3. The application is driven between them from outside:
+#
+#   window   the main window open, nothing selected                         (NFR-9's state)
+#   reading  one message selected, so one warm body view under D-54         (the reading peak)
+#   l3       a critical pressure signal: every window destroyed, every cache
+#            at its floor, the allocator collected                          (NFR-8's state)
+#
+# **The metric is D-16's.** `phys_footprint`, read by the platform's own `footprint` tool, for
+# Sift's process **and every engine process it owns** — the body view is out of process, so a
+# figure for Sift alone would omit exactly the allocation L2 exists to reclaim. Ownership is
+# read from the application's launchd domain (`launchctl print pid/N`), which lists the WebKit
+# services started on Sift's behalf; matching process names would also count every other
+# application's.
+#
+# **The binary is the shipping one.** Nothing here is a build configuration: the shell honours
+# four environment variables, each inert unless set —
+#
+#   SIFT_CONTAINER  a scratch container, so no real account is read or touched
+#   SIFT_KEYCHAIN   a scratch keychain this script creates and deletes, so no real credential is
+#                   read or written, and no access prompt waits for a person who is not there
+#   SIFT_FIXTURES   D-65's recorded corpus
+#   SIFT_MEASURE    SIGUSR2 selects the next message; SIGUSR1 is a critical pressure signal
+#
+# **The corpus is the recorded one, not NFR-26's scale corpus**, and that is a stated gap rather
+# than a choice of convenience. `sift-corpus` writes each account's key as its own binary, and
+# the keychain attributes an item to the code that created it — so the application reading that
+# key raises an access prompt, which is a person, which an unattended run does not have. What
+# the fixture corpus measures is what Q-12 is about: toolkit residue and a warm body view. What
+# it does not measure is the resident floor's growth with the index, which every cache budget
+# bounds and which the soak (NFR-45) watches over time.
+#
+# **Every figure this prints is a measurement of one machine**, and D-46 makes it an answer for
+# one architecture. It is recorded against the reference environment by amendment, never cited
+# as a target on its own: see docs/product/reference-environment.md for what the rig is, and
+# per-integration.yml for why a hosted runner's figure is an image's rather than a machine's.
+set -euo pipefail
+
+cd "${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
+
+[[ "$(uname -s)" == "Darwin" ]] || {
+    echo "measure-footprint: macOS only. The Linux half of Q-12 (PSS, GTK4) is not built yet." >&2
+    exit 1
+}
+
+settle=30
+samples=5
+out=""
+build=true
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --settle) settle="$2"; shift ;;
+        --samples) samples="$2"; shift ;;
+        --out) out="$2"; shift ;;
+        --no-build) build=false ;;
+        *) echo "measure-footprint: unknown argument '$1'" >&2; exit 1 ;;
+    esac
+    shift
+done
+
+arch="$(uname -m)"
+translated="$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)"
+# D-46: a translated run measures neither architecture, and would pass for one.
+[[ "$translated" == "0" ]] || {
+    echo "measure-footprint: running translated; D-46 needs each architecture natively." >&2
+    exit 1
+}
+
+bundle_id="net.justinchung.sift"
+# One Sift at a time: the states are driven by signal to one pid, and a second instance of the
+# same identifier would share nothing with this one except the confusion.
+if [[ -n "$(lsappinfo info -only pid -app "$bundle_id" 2>/dev/null)" ]] || pgrep -x Sift >/dev/null; then
+    echo "measure-footprint: a Sift is already running. Quit it first — this run launches its own." >&2
+    exit 1
+fi
+
+if [[ "$build" == true ]]; then
+    mise run macos    # Release is its default: the targets are properties of release
+fi
+app="shells/macos/.build/xcode/Build/Products/Release/Sift.app"
+binary="$app/Contents/MacOS/Sift"
+[[ -x "$binary" ]] || { echo "measure-footprint: $binary is missing; drop --no-build." >&2; exit 1; }
+
+scratch="$PWD/target/measure/$arch-$(date +%Y%m%d-%H%M%S)"
+container="$scratch/container"
+keychain="$scratch/measure.keychain-db"
+
+# Installed before anything is created under $scratch, so a failure at any later step, the keychain
+# commands included, still removes the keychain and the scratch directory.
+pid=""
+cleanup() {
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill -TERM "$pid" 2>/dev/null || true
+        for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    security delete-keychain "$keychain" 2>/dev/null || true
+    rm -rf "$scratch"
+}
+trap cleanup EXIT
+
+mkdir -p "$container"
+out="${out:-$PWD/target/measure/footprint-$arch.tsv}"
+mkdir -p "$(dirname "$out")"
+
+# The scratch keychain. `create-keychain` does not add it to the search list, so nothing else on
+# the machine can find it, and deleting it at the end removes every item this run created.
+password="$(openssl rand -hex 24)"
+security create-keychain -p "$password" "$keychain"
+security set-keychain-settings "$keychain"          # no idle lock mid-run
+security unlock-keychain -p "$password" "$keychain"
+
+export SIFT_CONTAINER="$container" SIFT_KEYCHAIN="$keychain" SIFT_MEASURE=1 SIFT_FIXTURES=1
+
+"$binary" >"$scratch/sift.log" 2>&1 &
+pid=$!
+
+# Every engine process Sift's launchd domain lists with a live pid, plus Sift itself.
+owned() {
+    echo "$pid"
+    launchctl print "pid/$pid" 2>/dev/null \
+        | awk '$3 ~ /^com\.apple\.WebKit\./ && $1 ~ /^[1-9][0-9]*$/ { print $1 }'
+}
+
+# One reading: `component<TAB>bytes` per owned process, from `phys_footprint`.
+read_once() {
+    local args=()
+    local p
+    for p in $(owned); do args+=(-p "$p"); done
+    footprint -f bytes --noCategories "${args[@]}" 2>/dev/null | awk '
+        /^[^ ].* \[[0-9]+\]:/ {
+            name = $1
+            sub(/^com\.apple\.WebKit\./, "", name)
+            if (name == "Sift") name = "sift"
+            else name = tolower(name)
+        }
+        /^ *phys_footprint:/ { print name "\t" $2 }'
+}
+
+median() { sort -n | awk '{ v[NR] = $1 } END { if (NR) print v[int((NR + 1) / 2)] }'; }
+
+sample() {
+    local state="$1"
+    local readings
+    readings="$(for _ in $(seq 1 "$samples"); do read_once; sleep 1; done)"
+    local component
+    for component in $(cut -f1 <<<"$readings" | sort -u); do
+        printf '%s\t%s\t%s\t%s\n' "$arch" "$state" "$component" \
+            "$(awk -F'\t' -v c="$component" '$1 == c { print $2 }' <<<"$readings" | median)"
+    done
+}
+
+alive() {
+    kill -0 "$pid" 2>/dev/null || {
+        echo "measure-footprint: Sift exited during the run. Its log:" >&2
+        cat "$scratch/sift.log" >&2
+        exit 1
+    }
+}
+
+{
+    printf 'arch\tstate\tcomponent\tbytes\n'
+    sleep "$settle"; alive; sample window
+    kill -USR2 "$pid"; sleep "$settle"; alive; sample reading
+    # NFR-13 issues L3 within a second and NFR-46 gives the kernel a second more; `settle`
+    # is far longer than both, so what is sampled is the state rather than the transition.
+    kill -USR1 "$pid"; sleep "$settle"; alive; sample l3
+} >"$out"
+
+# A reading figure with no content process is not the reading peak: the list was empty or the
+# selection never landed, and printing it would put a number beside the wrong state.
+if ! awk -F'\t' '$2 == "reading" && $3 == "webcontent"' "$out" | grep -q .; then
+    echo "measure-footprint: no content process in the reading state, so no message was shown." >&2
+    exit 1
+fi
+
+# The host is part of the figure (R-13), so it is recorded beside it rather than recalled.
+{
+    echo "### Q-12 footprint — $arch"
+    echo
+    echo "| | |"
+    echo "|---|---|"
+    echo "| machine | $(sysctl -n hw.model) · $(( $(sysctl -n hw.memsize) / 1073741824 )) GB |"
+    if [[ -n "${ImageOS:-}" ]]; then
+        echo "| runner image | $ImageOS ${ImageVersion:-unknown} — an image's figure, not the rig's |"
+    fi
+    echo "| Xcode | $(xcodebuild -version 2>/dev/null | tr '\n' ' ') |"
+    echo "| macOS | $(sw_vers -productVersion) ($(sw_vers -buildVersion)) |"
+    echo "| architecture | $arch · page size $(pagesize) |"
+    echo "| corpus | D-65's recorded fixtures |"
+    echo "| method | phys_footprint, median of $samples, $settle s settle per state |"
+    echo
+    echo "| state | component | MiB |"
+    echo "|---|---|---:|"
+    awk -F'\t' 'NR > 1 { printf "| %s | %s | %.1f |\n", $2, $3, $4 / 1048576 }' "$out"
+    for state in window reading l3; do
+        awk -F'\t' -v s="$state" 'NR > 1 && $2 == s { t += $4 } END {
+            if (t) printf "| **%s** | **total** | **%.1f** |\n", s, t / 1048576 }' "$out"
+    done
+} | tee "$scratch/summary.md"
+
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    cat "$scratch/summary.md" >>"$GITHUB_STEP_SUMMARY"
+fi
+echo
+echo "measure-footprint: wrote $out"

@@ -30,11 +30,22 @@ toolkit residue rather than by a process that never linked a toolkit — see
 [memory pressure](../runtime/memory-pressure.md). A crash in shell code now takes sync down with it,
 bounded by NFR-16 in [mutations](../mail/mutations.md).
 
-**Contestable because:** the toolkit-residue figure is unmeasured, and the Linux figure is the weakest
-number in this documentation set — GTK4's renderer loads a graphics driver stack with no clean
-in-process release path. If P0 measurement shows Linux residue far above the macOS figure, the
-two-process design returns as the answer for that platform, and a per-platform process model would be
-worse than either uniform answer. See [roadmap](../product/roadmap.md).
+**Contestable because:** the toolkit-residue figure is measured on one of the four platform and
+architecture pairs P0 owes, and only provisionally. The Linux figure is still the weakest number in this
+documentation set — GTK4's renderer loads a graphics driver stack with no clean in-process release path.
+If P0 measurement shows Linux residue far above the macOS figure, the two-process design returns as the
+answer for that platform, and a per-platform process model would be worse than either uniform answer. See
+[roadmap](../product/roadmap.md).
+
+The first figure is macOS on Apple silicon, from the provisional interim rig in the
+[reference environment](../product/reference-environment.md), and so it passes no gate. At L3, when the body view
+was released, the whole process held about 32 MB and the one engine process that outlived every window
+held about 13 MB. That L3 does not reliably release the view is a defect in the shell, not residue. See
+[memory pressure](../runtime/memory-pressure.md#provisional-figures). The whole process is an upper
+bound on toolkit residue, because it contains the core's own floor as well. Even read as that bound,
+**what a second process could have returned is about 45 MB. That is on the order of 30 MB and not
+150 MB**, so this decision's revisit trigger is not met on that platform. Intel and Linux are
+unmeasured, and Linux is still the platform that decides whether this decision stands.
 
 ## Lifecycle
 

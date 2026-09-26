@@ -285,6 +285,13 @@ cargo build -q --release -p sift-soak --bins
 "${CARGO_TARGET_DIR:-target}/release/sift-soak" overhead "$@"
 '''
 
+# ── The footprint protocol (Q-12) ────────────────────────────────────────────
+#
+# `measure-footprint` is a script in mise-tasks/: it builds the Release bundle, runs it against a
+# scratch container and a scratch keychain, drives it through NFR-9's state, the reading peak and
+# L3 by signal, and reports D-16's `phys_footprint` for Sift and every engine process it owns.
+# macOS only, and one architecture per run (D-46). Launches a window, so it is never a hook.
+
 # ── Live probes ───────────────────────────────────────────────────────────────
 #
 # These reach the real network. D-63 puts network-needing gates in the per-integration tier,
