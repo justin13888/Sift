@@ -197,7 +197,7 @@ description = "The fast local sweep: formatting, lints, tests, and the architect
 depends = ["fmt-check", "clippy", "test", "gates"]
 
 [tasks.ci]
-description = "Everything per-change.yml runs, locally"
+description = "Everything per-change.yml runs, locally, plus the body-view probe on a macOS host"
 depends = [
   "fmt-check",
   "clippy",
