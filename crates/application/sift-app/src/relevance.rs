@@ -50,6 +50,12 @@ const ABSENT: &str = "-";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Judgement {
     /// The account's display label in the container the judgement was recorded against.
+    ///
+    /// The label, not a container-internal account identifier, so a person reading or editing
+    /// the file by hand can tell which account a line is about. Renaming the account, or a
+    /// second account of the same name taking the ` (n)` suffix `open_container` gives it,
+    /// leaves the line naming no open account: it reads back as unresolved, never as a miss,
+    /// and editing the first field repairs it.
     pub account: String,
     pub remote_id: Option<String>,
     pub internet_message_id: Option<String>,
@@ -625,6 +631,43 @@ mod tests {
         assert_eq!(summary.ranked.first, 1);
         assert!((summary.ranked.mean_reciprocal_rank - 1.0).abs() < f64::EPSILON);
         assert!((summary.listed.mean_reciprocal_rank - 0.5).abs() < f64::EPSILON);
+    }
+
+    /// A resolved judgement the query did not return is a miss: counted as not returned under
+    /// both orderings, zero in the mean reciprocal rank, and nothing in the rank buckets. It is
+    /// not unresolved — the message is still there; the query simply did not find it.
+    #[test]
+    fn a_resolved_judgement_the_query_did_not_return_is_a_miss_that_counts_zero() {
+        let mut app = App::new();
+        app.add_account("work", "rich").unwrap();
+        let sought = insert(
+            &mut app,
+            "r-1",
+            "Invoice for March",
+            "billing@example.test",
+            100,
+        );
+        let found = app.relevance_judgement("invoice", sought).unwrap();
+        let missed = app.relevance_judgement("lunch", sought).unwrap();
+
+        let outcomes = app.relevance_evaluate(&[found, missed]).unwrap();
+        assert!(outcomes[1].resolved, "{outcomes:?}");
+        assert_eq!(
+            (outcomes[1].ranked, outcomes[1].listed, outcomes[1].returned),
+            (None, None, 0)
+        );
+
+        let summary = summarize(&outcomes);
+        assert_eq!(summary.unresolved, 0);
+        for figures in [summary.ranked, summary.listed] {
+            assert_eq!(figures.missed, 1);
+            assert_eq!(
+                (figures.first, figures.top_three, figures.top_ten),
+                (1, 1, 1)
+            );
+            // (1/1 + 0) / 2: the miss is in the denominator and adds nothing to the sum.
+            assert!((figures.mean_reciprocal_rank - 0.5).abs() < f64::EPSILON);
+        }
     }
 
     #[test]
