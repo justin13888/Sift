@@ -198,10 +198,7 @@ where
     for _ in 0..max_pages {
         match sync_one_page(adapter, account, folder, remote, ids)? {
             Turn::Applied { report, more } => {
-                total.inserted += report.inserted;
-                total.updated += report.updated;
-                total.removed += report.removed;
-                total.delivered += report.delivered;
+                total.absorb(&report);
                 if !more {
                     break;
                 }
@@ -254,10 +251,7 @@ where
     let mut total = PageReport::default();
     for (folder, remote) in watched {
         let report = sync_folder(adapter, account, folder, &remote, ids, max_pages_per_folder)?;
-        total.inserted += report.inserted;
-        total.updated += report.updated;
-        total.removed += report.removed;
-        total.delivered += report.delivered;
+        total.absorb(&report);
     }
     Ok(total)
 }

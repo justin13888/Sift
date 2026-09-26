@@ -15,7 +15,7 @@ pub enum ApplicationShellOwns {
     TrayItem,
     ApplicationMenu,
     NotificationDelivery,
-    /// D-67's six, registered once at initialization and unregistered only at shutdown.
+    /// D-67's seven, registered once at initialization and unregistered only at shutdown.
     HostCallbacks,
 }
 
