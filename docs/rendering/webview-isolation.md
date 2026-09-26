@@ -2,7 +2,7 @@
 
 The containment boundary around message rendering.
 
-**Owns:** D-3, D-28, D-50, D-54, D-90, D-116, N-1, NFR-20, NFR-21, NFR-25, NFR-46, NFR-50.
+**Owns:** D-3, D-28, D-50, D-54, D-90, D-116, D-117, N-1, NFR-20, NFR-21, NFR-25, NFR-46, NFR-50.
 
 ## D-3 — Bodies render in a separate, hardened document
 
@@ -293,7 +293,21 @@ cosmetic one.
 Verification belongs in the fidelity corpus gate rather than in manual spot checks — see
 [reference environment](../product/reference-environment.md).
 
-**The tree crosses, demonstrated on WKWebView — R-14's P0 spike.** Sift writes no bridge of its own. The
+## D-117 — The accessibility tree crosses through the engine, with no bridge of Sift's own
+
+**Chosen:** the body view's accessibility tree reaches the reader's hierarchy only through the engine's own
+remote accessibility; Sift writes no bridge of its own.
+**Rejected:** a native mirror of the body's structure — Sift building its own accessibility elements for
+the body view in the host.
+
+**Why.** A mirror is a new interface into the body view, and N-1 would have to police it as it polices
+every other; adding no channel is the strongest posture that rule allows. It would also add nothing: the
+engine's tree already crosses under all five properties, as demonstrated below.
+
+**What it costs:** what an assistive client hears from the body is whatever the engine exposes, so a gap in
+the engine's remote accessibility is a gap Sift cannot fill from the host without reopening this decision.
+
+**The tree crosses, demonstrated on WKWebView — R-14's P0 spike.** The
 engine already carries the content process's accessibility tree into the host's hierarchy as a remote
 subtree, so the body's web area is a descendant of the reader's window and a screen reader walks into it as
 it walks into any other view. None of the five properties stands in the way: the tree is a separate
