@@ -1028,44 +1028,74 @@ fn search(app: &mut App, args: &[&str]) -> Output {
     if terms.is_empty() {
         return Err("search [--in <account>] <query>".to_owned());
     }
-    let report = app.search(&terms.join(" "), account, SEARCH_LIMIT)?;
+    let report = whole_mailbox_search(app, &terms.join(" "), account)?;
 
     let mut out = vec![format!("read as: {}", report.interpretation.join("; "))];
     out.extend(report.caveats.iter().map(|c| format!("-- {c}")));
     out.push(format!(
-        "{} result(s){}",
+        "{} result(s){}{}",
         report.hits.len(),
         if report.delegable_accounts == 0 {
             ", all from this machine — nothing was asked of a provider"
         } else {
             ""
+        },
+        if report.hits.len() > SEARCH_SHOWN {
+            format!(", the newest {SEARCH_SHOWN} shown")
+        } else {
+            String::new()
         }
     ));
     // Numbered, so that `relevance record` can name the hit the person was looking for by the
     // position they saw it at.
-    out.extend(report.hits.iter().enumerate().map(|(n, h)| {
-        format!(
-            "  #{} [{}] {}  {}  {}",
-            n + 1,
-            match h.source {
-                sift_app::search::Source::Local => "local",
-                sift_app::search::Source::Server => "server",
-            },
-            h.row.id,
-            h.row.sender,
-            h.row.subject
-        )
-    }));
+    out.extend(
+        report
+            .hits
+            .iter()
+            .take(SEARCH_SHOWN)
+            .enumerate()
+            .map(|(n, h)| {
+                format!(
+                    "  #{} [{}] {}  {}  {}",
+                    n + 1,
+                    match h.source {
+                        sift_app::search::Source::Local => "local",
+                        sift_app::search::Source::Server => "server",
+                    },
+                    h.row.id,
+                    h.row.sender,
+                    h.row.subject
+                )
+            }),
+    );
     Ok(out)
 }
 
-/// How many results `search` shows, and so how far `relevance record`'s `#n` can reach.
-const SEARCH_LIMIT: u32 = 50;
+/// How many results `search` prints, and so how far `relevance record`'s `#n` can reach.
+///
+/// A display cap only. `App::search`'s limit also bounds how many of each account's newest
+/// messages it reads before filtering, so passing this number to it would make everything older
+/// than an account's newest 50 unfindable here — and a relevance corpus recorded through that
+/// window could only ever name recent mail.
+const SEARCH_SHOWN: usize = 50;
+
+/// `search`, reading every message of every account searched rather than a recent window, so
+/// the harness can find — and `relevance record` can name — a message of any age. The ranking
+/// report reads the same whole set, so what is recorded and what is scored agree.
+fn whole_mailbox_search(
+    app: &mut App,
+    query: &str,
+    account: Option<&str>,
+) -> Result<sift_app::search::Report, String> {
+    app.search(query, account, u32::MAX)
+}
 
 /// #24 — record one relevance judgement: this query was issued, and this was the message sought.
 ///
-/// `#n` is position n of `search <query>`'s results — the same query, the same limit, so the
-/// number a person read off the transcript names the message they meant. The judgement is keyed
+/// `#n` is position n of `search <query>`'s results — the same query over the same whole
+/// mailbox, in the same order, so the number a person read off the transcript names the
+/// message they meant. A message past the shown results is named by the identity `search`
+/// prints for it under a narrower query, with the original query recorded. The judgement is keyed
 /// on the provider's identifiers rather than the local identity, so it survives a resync; see
 /// `sift_app::relevance`. Nothing is ranked here: `mise run relevance-eval` does that.
 fn relevance(app: &mut App, args: &[&str]) -> Output {
@@ -1081,14 +1111,16 @@ fn relevance(app: &mut App, args: &[&str]) -> Output {
             let n: usize = n
                 .parse()
                 .map_err(|_| format!("`{target}` is not a result number"))?;
-            let report = app.search(&query, None, SEARCH_LIMIT)?;
+            let report = whole_mailbox_search(app, &query, None)?;
             report
                 .hits
                 .get(n.checked_sub(1).ok_or("results are numbered from 1")?)
+                .filter(|_| n <= SEARCH_SHOWN)
                 .map(|h| h.row.id)
                 .ok_or_else(|| {
                     format!(
-                        "`{query}` has no result {n}; it returned {}",
+                        "`{query}` has no result {n}; it returned {}, and `search` numbers \
+                         at most {SEARCH_SHOWN} — name a message past them by its identity",
                         report.hits.len()
                     )
                 })?
@@ -1266,4 +1298,148 @@ fn net(app: &mut App, args: &[&str]) -> Output {
             .to_owned(),
     );
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A session over the replayed account, synced. Identities are minted per run, so a test
+    /// that names one by its identity has to read it off this session's own output.
+    fn synced() -> Session {
+        let mut session = Session::new(App::new());
+        run(&mut session, "account add-replayed mail").unwrap();
+        run(&mut session, "sync mail").unwrap();
+        session
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sift-harness-relevance-{tag}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// #24: the protocol's failed search — the sought message found some other way and named by
+    /// the identity `search` printed for it, not by a position in the failed query's results.
+    #[test]
+    fn a_judgement_can_name_the_sought_message_by_its_identity() {
+        let mut session = synced();
+        let hits = run(&mut session, "search receipt").unwrap();
+        let line = hits
+            .iter()
+            .find(|l| l.trim_start().starts_with("#1 "))
+            .unwrap_or_else(|| panic!("{hits:?}"));
+        let id = line.split_whitespace().nth(2).unwrap().to_owned();
+
+        let dir = scratch("id");
+        let file = dir.join("corpus.tsv");
+        // A query that does not return the message: exactly the judgement that path is for.
+        let out = run(
+            &mut session,
+            &format!(
+                "relevance record {} {id} where is that thing",
+                file.display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            vec![format!(
+                "recorded: `where is that thing` sought {id} in mail"
+            )]
+        );
+
+        let written = std::fs::read_to_string(&file).unwrap();
+        let recorded = sift_app::relevance::parse(&written).unwrap();
+        assert_eq!(recorded.len(), 1, "{written}");
+        assert_eq!(recorded[0].query, "where is that thing");
+        assert!(recorded[0].remote_id.is_some(), "{written}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn result_zero_and_a_result_past_the_end_are_refused_and_nothing_is_written() {
+        let mut session = synced();
+        let dir = scratch("range");
+        let file = dir.join("corpus.tsv");
+
+        let zero = run(
+            &mut session,
+            &format!("relevance record {} #0 receipt", file.display()),
+        )
+        .unwrap_err();
+        assert_eq!(zero, "results are numbered from 1");
+
+        let past = run(
+            &mut session,
+            &format!("relevance record {} #999 receipt", file.display()),
+        )
+        .unwrap_err();
+        assert!(past.starts_with("`receipt` has no result 999;"), "{past}");
+
+        let word = run(
+            &mut session,
+            &format!("relevance record {} #one receipt", file.display()),
+        )
+        .unwrap_err();
+        assert!(word.contains("is not a result number"), "{word}");
+
+        assert!(!file.exists(), "a refused judgement was written");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `search` reads the whole mailbox, not the newest [`SEARCH_SHOWN`] messages, so a message
+    /// older than that is still found — and so still recordable.
+    #[test]
+    fn search_finds_a_message_older_than_the_shown_results() {
+        let mut session = Session::new(App::new());
+        run(&mut session, "account add work rich").unwrap();
+        run(&mut session, "ingest work Needle in the stack").unwrap();
+        for _ in 0..SEARCH_SHOWN + 10 {
+            run(&mut session, "ingest work Hay").unwrap();
+        }
+
+        let needle = run(&mut session, "search needle").unwrap();
+        assert!(
+            needle.iter().any(|l| l.starts_with("1 result(s)")),
+            "{needle:?}"
+        );
+        assert!(
+            needle
+                .iter()
+                .any(|l| l.starts_with("  #1 ") && l.contains("Needle in the stack")),
+            "{needle:?}"
+        );
+
+        let hay = run(&mut session, "search hay").unwrap();
+        let total = SEARCH_SHOWN + 10;
+        assert!(
+            hay.iter()
+                .any(|l| l.starts_with(&format!("{total} result(s)"))
+                    && l.ends_with(&format!("the newest {SEARCH_SHOWN} shown"))),
+            "{hay:?}"
+        );
+        let numbered = hay
+            .iter()
+            .filter(|l| l.trim_start().starts_with('#'))
+            .count();
+        assert_eq!(numbered, SEARCH_SHOWN);
+
+        // A position past the numbered results names nothing the person saw.
+        let past = run(
+            &mut session,
+            &format!(
+                "relevance record /nonexistent/corpus.tsv #{} hay",
+                SEARCH_SHOWN + 1
+            ),
+        )
+        .unwrap_err();
+        assert!(
+            past.contains(&format!("numbers at most {SEARCH_SHOWN}")),
+            "{past}"
+        );
+    }
 }
