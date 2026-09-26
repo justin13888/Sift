@@ -30,6 +30,11 @@ final class StandaloneReader: NSWindowController {
         reader.show(row, app: app)
     }
 
+    /// `read.find-in-message` — FR-24, in this window's own reader (D-116).
+    func findInMessage() {
+        reader.beginFind()
+    }
+
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 }

@@ -292,6 +292,15 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         reader.toggleDarkTransform(app: app)
     }
 
+    /// `read.find-in-message` — FR-24, in this window's reader (D-116).
+    func findInMessage() {
+        reader.beginFind()
+    }
+
+    /// Whether this is the window the keyboard is in, so a reader action reaches the reader
+    /// the user is looking at.
+    var isKey: Bool { window?.isKeyWindow == true }
+
     /// `search.narrow-to-account`: search the account this window is looking at.
     ///
     /// **A scope, not a query term.** The boundary takes the same anchor the list observation

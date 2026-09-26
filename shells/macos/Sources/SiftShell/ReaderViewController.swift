@@ -21,6 +21,12 @@ final class ReaderViewController: NSViewController {
     private let attachments = AttachmentBar(frame: .zero)
     private let empty = NSTextField(labelWithString: "No message selected")
     private let body = BodyView(frame: .zero)
+    /// FR-24's find-in-message, as native chrome above the body — D-116. Hidden until asked
+    /// for, and hidden again with every new message: a find is about one message.
+    private let findField = NSSearchField()
+    private let findReport = NSTextField(labelWithString: "")
+    private let findDone = NSButton()
+    private lazy var findBar = NSStackView(views: [findField, findReport, findDone])
     /// This document's links, copied out of the layer while the document is open.
     ///
     /// Copied rather than read at click time because the rows borrow from the document, and
@@ -67,6 +73,27 @@ final class ReaderViewController: NSViewController {
         header.translatesAutoresizingMaskIntoConstraints = false
         header.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
 
+        // Find is a native field, never markup: a find control drawn inside the body would be
+        // one a sender could counterfeit. Return finds the next match and Shift-Return the
+        // previous one; Escape closes the bar and hands the keyboard back to the reader.
+        findField.placeholderString = "Find in Message"
+        findField.sendsWholeSearchString = true
+        findField.delegate = self
+        findField.setAccessibilityLabel("Find in message")
+        findField.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+        findReport.font = .preferredFont(forTextStyle: .caption1)
+        findReport.textColor = .secondaryLabelColor
+        findDone.title = "Done"
+        findDone.bezelStyle = .rounded
+        findDone.controlSize = .small
+        findDone.target = self
+        findDone.action = #selector(endFind)
+        findBar.orientation = .horizontal
+        findBar.spacing = 8
+        findBar.edgeInsets = NSEdgeInsets(top: 6, left: 24, bottom: 6, right: 24)
+        findBar.translatesAutoresizingMaskIntoConstraints = false
+        findBar.isHidden = true
+
         // The order is the security argument made visible: chrome, then what was withheld,
         // then the body, then what is attached. Everything a sender wrote is in the one band
         // in the middle, and every control is outside it.
@@ -74,7 +101,7 @@ final class ReaderViewController: NSViewController {
         attachments.translatesAutoresizingMaskIntoConstraints = false
         body.translatesAutoresizingMaskIntoConstraints = false
 
-        let column = NSStackView(views: [header, blockedBar, body, attachments])
+        let column = NSStackView(views: [header, blockedBar, findBar, body, attachments])
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 0
@@ -95,6 +122,7 @@ final class ReaderViewController: NSViewController {
             column.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             header.widthAnchor.constraint(equalTo: column.widthAnchor),
             blockedBar.widthAnchor.constraint(equalTo: column.widthAnchor),
+            findBar.widthAnchor.constraint(equalTo: column.widthAnchor),
             attachments.widthAnchor.constraint(equalTo: column.widthAnchor),
             body.widthAnchor.constraint(equalTo: column.widthAnchor),
             empty.centerXAnchor.constraint(equalTo: container.centerXAnchor),
@@ -127,6 +155,54 @@ final class ReaderViewController: NSViewController {
         body.isHidden = true
         empty.isHidden = false
         links = []
+        closeFindBar()
+    }
+
+    /// `read.find-in-message` — FR-24's keyboard route to finding text in the open message.
+    ///
+    /// Shows the bar and gives it the keyboard. Invoked again while the bar is open, it selects
+    /// the query so a new one can be typed over it, which is what the platform's own find does.
+    func beginFind() {
+        _ = view
+        guard showing != nil, !body.isHidden else {
+            NSSound.beep()
+            return
+        }
+        findBar.isHidden = false
+        view.window?.makeFirstResponder(findField)
+        findField.currentEditor()?.selectAll(nil)
+    }
+
+    /// Find the query again, forwards or backwards, reporting only whether there was a match —
+    /// the engine's find answers that and not a count.
+    private func findAgain(backwards: Bool) {
+        let query = findField.stringValue
+        guard !query.isEmpty else {
+            findReport.stringValue = ""
+            return
+        }
+        body.find(query, backwards: backwards) { [weak self] found in
+            // A later query may have been typed while this one was answered; the report is
+            // about what the field says now or it is about nothing.
+            guard let self, self.findField.stringValue == query else { return }
+            self.findReport.stringValue = found ? "" : "Not found"
+            if !found {
+                NSAccessibility.post(
+                    element: self.findReport, notification: .announcementRequested,
+                    userInfo: [.announcement: "Not found", .priority: NSAccessibilityPriorityLevel.high.rawValue])
+            }
+        }
+    }
+
+    @objc private func endFind() {
+        closeFindBar()
+        // The keyboard goes back to the reader rather than nowhere.
+        view.window?.makeFirstResponder(view)
+    }
+
+    private func closeFindBar() {
+        findBar.isHidden = true
+        findReport.stringValue = ""
     }
 
     /// FR-31's transform, per message. **Off by default and per message**, because a transform
@@ -182,7 +258,11 @@ final class ReaderViewController: NSViewController {
         }
         // A different message starts from the shipped default: the transform is a decision
         // about one message, and carrying it into the next one silently would make it a mode.
-        if showing?.id.same(as: row.id) != true { dark = false }
+        // A find is about one message too, so the bar closes with it.
+        if showing?.id.same(as: row.id) != true {
+            dark = false
+            closeFindBar()
+        }
         showing = row
         empty.isHidden = true
         subject.isHidden = false
@@ -371,5 +451,31 @@ final class ReaderViewController: NSViewController {
 
     private static func absolute(_ millis: UInt64) -> String {
         formatter.string(from: Date(timeIntervalSince1970: TimeInterval(millis) / 1000))
+    }
+}
+
+extension ReaderViewController: NSSearchFieldDelegate {
+    /// Return and Shift-Return step through matches; Escape closes the bar.
+    func control(
+        _ control: NSControl, textView: NSTextView, doCommandBy selector: Selector
+    ) -> Bool {
+        guard control === findField else { return false }
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            let shift = NSApp.currentEvent?.modifierFlags.contains(.shift) == true
+            findAgain(backwards: shift)
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            endFind()
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// A query that changed is a query nothing has been found for yet.
+    func controlTextDidChange(_ notification: Notification) {
+        guard (notification.object as? NSSearchField) === findField else { return }
+        findReport.stringValue = ""
     }
 }
