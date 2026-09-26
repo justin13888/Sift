@@ -21,6 +21,7 @@ pub mod attachment;
 pub mod authorize;
 pub mod container;
 pub mod document;
+pub mod relevance;
 pub mod rows;
 pub mod search;
 pub mod settings;

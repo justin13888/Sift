@@ -33,8 +33,28 @@ static ALLOC: sift_alloc::Tagging<std::alloc::System> = sift_alloc::Tagging(std:
 use std::io::{self, BufRead, Write};
 
 fn main() -> io::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut app = sift_session::Session::new(sift_app::App::new());
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+
+    // `--root <dir>` opens an installation container — the application's own, holding a
+    // mailbox a person actually synced — instead of the scratch directory nothing outlives.
+    // That is what recording the relevance corpus needs: real queries against a known mailbox.
+    // Quit the application first; two processes writing one container is not a supported shape.
+    let mut app = sift_app::App::new();
+    if args.first().map(String::as_str) == Some("--root") {
+        let Some(root) = args.get(1).cloned() else {
+            println!("error: --root <dir>");
+            std::process::exit(2);
+        };
+        args.drain(..2);
+        match app.open_container(std::path::Path::new(&root)) {
+            Ok(n) => println!("opened {root}: {n} account(s)"),
+            Err(e) => {
+                println!("error: {root}: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    let mut app = sift_session::Session::new(app);
 
     if args.is_empty() {
         return repl(&mut app);
