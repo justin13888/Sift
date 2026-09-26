@@ -34,12 +34,14 @@ All stages run in the core, in Rust. Nothing reaches a web engine until the last
       │
   7.  render               isolated body view: no JS, no network
       │
-  content height reported back to size the container
+  container sized by the reader pane; the body scrolls itself
 ```
 
-The height report at the bottom of that diagram is not free, and
-[D-50](webview-isolation.md) is why: script is disabled engine-wide in the body view, so the mechanism
-MUST be a non-script platform interface and is a P0 spike rather than an assumption.
+The last line of that diagram used to be a content height reported back to size the container, and
+[D-50](webview-isolation.md) is why it is not: script is disabled engine-wide in the body view, so any
+such mechanism had to be a non-script platform interface, and the P0 spike found none needed.
+[D-116](webview-isolation.md) records the answer — the body view scrolls itself inside the pane, at
+Q-15's pinned layout width, so no height ever crosses back.
 
 Stage ordering is normative. Sanitization precedes cosmetic filtering so the filter operates on a
 structure it can trust; rewriting happens *inside* sanitization so that no absolute external URL survives
