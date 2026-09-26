@@ -33,16 +33,54 @@ pub const DIGEST_RULE_VERSION: u32 = 1;
 /// content address, which is the same primitive over the same store.
 const CONTEXT: &str = "sift 2026 message join digest v1";
 
+/// D-44's normalization tuple: the four inputs to [`digest`], exactly as it hashes them.
+///
+/// Public so that R-5's measurement compares the **same** normalized values the digest
+/// is taken over, element by element. A measurement that re-derived them would be
+/// measuring its own copy of the rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tuple {
+    /// The originator address, as the adapter recovered it.
+    pub from: Option<String>,
+    /// The sender's `Date` header, in milliseconds. Second precision is all the header has.
+    pub origination_date_millis: Option<u64>,
+    /// The subject, normalized under NFR-54.
+    pub subject: Option<String>,
+    /// `References` then `In-Reply-To`, in order.
+    pub references: Vec<String>,
+}
+
+/// The normalized tuple for one envelope, under [`DIGEST_RULE_VERSION`].
+#[must_use]
+pub fn tuple(envelope: &Envelope) -> Tuple {
+    Tuple {
+        from: envelope.from.clone(),
+        origination_date_millis: envelope.origination_date_millis,
+        // Normalized under NFR-54, so that two spellings of one subject agree — which is
+        // the whole reason the normalizer lives in the foundation rather than in the
+        // presentation layer.
+        subject: envelope
+            .subject
+            .as_deref()
+            .map(|s| normalize::for_index(s).as_str().to_owned()),
+        references: envelope.references.clone(),
+    }
+}
+
 /// D-44's corroborating digest.
 ///
 /// Over the originator address, the origination date, the **normalized** subject and the
-/// reference chain — the four things `docs/mail/identity.md` names.
+/// reference chain — the four things `docs/mail/identity.md` names. See [`tuple`].
 ///
 /// A field that is absent contributes its absence rather than an empty string, because
 /// "no subject" and "a subject that is empty" are different messages and a digest that
 /// could not tell them apart would corroborate a join between them.
 #[must_use]
 pub fn digest(envelope: &Envelope) -> [u8; 32] {
+    digest_of(&tuple(envelope))
+}
+
+fn digest_of(tuple: &Tuple) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new_derive_key(CONTEXT);
     let mut field = |tag: u8, value: Option<&str>| {
         hasher.update(&[tag]);
@@ -57,23 +95,16 @@ pub fn digest(envelope: &Envelope) -> [u8; 32] {
             }
         }
     };
-    field(1, envelope.from.as_deref());
+    field(1, tuple.from.as_deref());
     field(
         2,
-        envelope
+        tuple
             .origination_date_millis
             .map(|m| m.to_string())
             .as_deref(),
     );
-    // Normalized under NFR-54, so that two spellings of one subject agree — which is the
-    // whole reason the normalizer lives in the foundation rather than in the presentation
-    // layer.
-    let subject = envelope
-        .subject
-        .as_deref()
-        .map(|s| normalize::for_index(s).as_str().to_owned());
-    field(3, subject.as_deref());
-    for reference in &envelope.references {
+    field(3, tuple.subject.as_deref());
+    for reference in &tuple.references {
         field(4, Some(reference));
     }
     *hasher.finalize().as_bytes()
