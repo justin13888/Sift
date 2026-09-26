@@ -75,7 +75,7 @@ final class ReaderViewController: NSViewController {
 
         // Find is a native field, never markup: a find control drawn inside the body would be
         // one a sender could counterfeit. Return finds the next match and Shift-Return the
-        // previous one; Escape closes the bar and hands the keyboard back to the reader.
+        // previous one; Escape closes the bar and hands the keyboard back to where it was.
         findField.placeholderString = "Find in Message"
         findField.sendsWholeSearchString = true
         findField.delegate = self
@@ -168,9 +168,39 @@ final class ReaderViewController: NSViewController {
             NSSound.beep()
             return
         }
+        // Remembered only when the bar opens: a second ⌘F while it is open would otherwise
+        // remember the find field itself, and closing would hand the keyboard straight back
+        // to the bar it just hid.
+        if findBar.isHidden {
+            findReturn = ReaderViewController.owner(of: view.window?.firstResponder)
+        }
         findBar.isHidden = false
         view.window?.makeFirstResponder(findField)
         findField.currentEditor()?.selectAll(nil)
+    }
+
+    /// Where the keyboard was before the find bar took it, so closing the bar returns it there.
+    /// Weak, because a find is not a reason to keep a view alive.
+    private weak var findReturn: NSResponder?
+
+    /// The view that takes the keyboard when the reader is focused — the body, which accepts
+    /// it, rather than this controller's container, which refuses it. `nil` while no message
+    /// is shown: there is nothing in the reader to put the keyboard on.
+    var focusTarget: NSView? {
+        _ = view
+        return body.isHidden ? nil : body.keyboardTarget
+    }
+
+    /// The responder a first responder stands for. A text field being edited is first
+    /// responder through the window's shared field editor, and the field editor belongs to
+    /// whichever field is edited next — the field is what has to be given the keyboard back.
+    private static func owner(of responder: NSResponder?) -> NSResponder? {
+        if let editor = responder as? NSTextView, editor.isFieldEditor,
+            let field = editor.delegate as? NSResponder
+        {
+            return field
+        }
+        return responder
     }
 
     /// Find the query again, forwards or backwards, reporting only whether there was a match —
@@ -196,13 +226,40 @@ final class ReaderViewController: NSViewController {
 
     @objc private func endFind() {
         closeFindBar()
-        // The keyboard goes back to the reader rather than nowhere.
-        view.window?.makeFirstResponder(view)
     }
 
+    /// Hide the bar, and where it had the keyboard, hand the keyboard back rather than leave
+    /// it in a hidden field or with the window (FR-24).
+    ///
+    /// It goes to whatever had it before the bar opened, where that is still an on-screen view
+    /// that takes it; otherwise to the body. **Not to this controller's view**, a plain
+    /// container that refuses first responder, so the window would take the keyboard and
+    /// nothing a person could see would have it. A bar closed while the keyboard is elsewhere —
+    /// Done clicked after focusing the list, or the message changing under a list selection —
+    /// leaves the keyboard where it is.
     private func closeFindBar() {
+        let hadKeyboard = !findBar.isHidden && findBarHasKeyboard
         findBar.isHidden = true
         findReport.stringValue = ""
+        let back = findReturn
+        findReturn = nil
+        guard hadKeyboard, let window = view.window else { return }
+        if let back = back as? NSView, back.window === window, !back.isHiddenOrHasHiddenAncestor,
+            back.acceptsFirstResponder, window.makeFirstResponder(back)
+        {
+            return
+        }
+        // With no message there is nothing to give it to, and the window holding it is still
+        // better than a hidden field that would go on taking keystrokes.
+        window.makeFirstResponder(focusTarget)
+    }
+
+    /// Whether the keyboard is in the find bar — in the field, through the field editor, or on
+    /// Done under full keyboard access.
+    private var findBarHasKeyboard: Bool {
+        guard let view = ReaderViewController.owner(of: view.window?.firstResponder) as? NSView
+        else { return false }
+        return view.isDescendant(of: findBar)
     }
 
     /// FR-31's transform, per message. **Off by default and per message**, because a transform

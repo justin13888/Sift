@@ -271,7 +271,11 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         switch pane {
         case .sidebar: window?.makeFirstResponder(sidebar.focusTarget)
         case .list: window?.makeFirstResponder(list.focusTarget)
-        case .reader: window?.makeFirstResponder(reader.view)
+        // The body, not the reader's container: the container refuses first responder, so the
+        // window would take the keyboard and nothing visible would have it. With no message
+        // open there is nothing to focus, and the keyboard stays where it was.
+        case .reader:
+            if let target = reader.focusTarget { window?.makeFirstResponder(target) }
         }
     }
 

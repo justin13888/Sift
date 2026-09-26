@@ -279,6 +279,12 @@ final class BodyView: NSView {
     /// document never sizes its container (D-116).
     var documentFrame: NSRect { web.frame }
 
+    /// The view that takes the keyboard when the reader is focused: the web view, which
+    /// accepts first responder and scrolls the body from the keyboard with script off. This
+    /// container is a plain `NSView` and refuses it, so handing it the keyboard would leave
+    /// the window holding it instead (FR-24).
+    var keyboardTarget: NSView { web }
+
     /// Find `text` in the document on screen, selecting and scrolling to the next match —
     /// or the previous one when `backwards` — and wrapping at either end. `found` is told
     /// whether there was a match at all.
