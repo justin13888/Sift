@@ -892,9 +892,8 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             sift_add_replayed_account(UnsafeMutablePointer(app), p.baseAddress, p.count, &id)
         }
         guard added == Ok else { return }
-        // Blocking, and on the main thread, which is a limitation stated where it happens:
-        // the walk belongs on a worker under D-19. Against the recorded corpus it returns
-        // immediately, which is why it is tolerable here and would not be against a socket.
+        // Returns at once: the walk runs on the layer's worker (D-19, #49), and the rows it
+        // brings in arrive through D-48's hop.
         _ = bytes.withUnsafeBufferPointer { p in
             sift_sync_account(UnsafeMutablePointer(app), p.baseAddress, p.count)
         }
