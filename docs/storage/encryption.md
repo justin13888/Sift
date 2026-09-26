@@ -218,9 +218,9 @@ platforms can only disagree inside that call.
 
 - **macOS: the platform's cipher.** The authenticated cipher is the platform's own framework. That
   framework has no C interface, unlike the credential store, so it is reached through a bridge in the
-  platform's own language compiled by the platform's own toolchain — which D-61 already requires of
-  every macOS build — and the bridge is kept to that one call, so a reviewer can confirm by reading it
-  that it adds nothing to the construction.
+  platform's own language compiled by the platform's own toolchain into the core's own archive — the
+  one case [D-61](../build/packaging.md)'s bridge exception exists for — and the bridge is kept to that
+  one call, so a reviewer can confirm by reading it that it adds nothing to the construction.
 - **Linux: the vendored construction, for now.** The Linux platform library is not yet wired. Until it
   is, Linux uses the vendored implementation of the same construction, which is the fallback this
   decision already permits, not a different construction. Wiring the platform library waits for the

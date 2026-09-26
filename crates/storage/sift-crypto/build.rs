@@ -4,8 +4,9 @@
 //! compiles that file into a static archive `page.rs` links on macOS. Every other target
 //! does nothing here and uses the vendored implementation of the same construction.
 //!
-//! The platform's own toolchain compiles it (`xcrun swiftc`), which D-61 already makes a
-//! requirement of any macOS build. The object carries Swift's autolink entries for
+//! The platform's own toolchain compiles it (`xcrun swiftc`) into this crate's own archive,
+//! which is the bridge exception D-61 records: it builds object code and never assembles,
+//! bundles or signs anything. The object carries Swift's autolink entries for
 //! CryptoKit, Foundation and the Swift runtime, so a binary that links this crate — a test,
 //! the harness, or the shell's `libsift_abi.a` inside Xcode — needs nothing further on its
 //! link line. The runtime compatibility shims are turned off: the shim uses nothing they
@@ -15,7 +16,8 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// D-46's floor, used when the build does not state one.
+/// D-46's floor, used when the build does not state one. One of the places the floor is
+/// stated; `docs/build/workspace.md` lists them all, and they change together.
 const DEFAULT_DEPLOYMENT_TARGET: &str = "13.0";
 
 fn main() {
@@ -75,7 +77,7 @@ fn main() {
 fn run(cmd: &mut Command) {
     let status = cmd.status().unwrap_or_else(|e| {
         panic!(
-            "sift-crypto: {cmd:?} did not start ({e}). D-61 requires the Xcode toolchain on macOS."
+            "sift-crypto: {cmd:?} did not start ({e}). D-61's bridge exception needs the Xcode toolchain on macOS."
         )
     });
     assert!(
