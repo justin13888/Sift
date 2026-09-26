@@ -164,7 +164,9 @@ default than the other two, and two lists that fall under D-113 with the rest of
 
 Q-8 — the fallback join when the internet message identifier is absent or duplicated — was the fourth, and
 is now [D-44](storage/data-model.md). What it leaves behind is a risk rather than a question: R-5, that
-the headers D-44 corroborates against are assumed rather than measured to survive transit.
+the headers D-44 corroborates against survive transit. It has since been measured against a constructed
+header-transit corpus, which supports the tuple for every transformation it catalogues; what stays open
+is how often the cases it does not survive occur in real mail.
 
 Q-11 — filter-list integrity, an unclosed injection path into every message body — was the first of the
 load-bearing group, and is now [D-111](rendering/content-blocking.md): every list ships in the binary and

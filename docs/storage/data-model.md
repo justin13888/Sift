@@ -340,9 +340,10 @@ discover a join by scanning a store for identifier equality. Scoping is what doe
 only orders the candidates within a scope that was already small.
 
 **The digest corroborates a candidate; it does not key one.** The digest is taken at ingest over a
-normalized tuple — originator address, origination date, normalized subject, and the message's own
-reference chain — chosen because those are what a compliant relay carries unchanged. It MUST be used only
-to confirm or reject a candidate the scope already proposed. Promoted to a key, it would join a
+normalized tuple — originator address, origination date, normalized subject with its whitespace made
+insignificant, and the message's own reference chain — chosen because those are what a compliant relay
+carries unchanged, which the measurement below now supports for the transformations it names. It MUST be
+used only to confirm or reject a candidate the scope already proposed. Promoted to a key, it would join a
 mailing-list copy to a direct copy of the same mail, which is right for deduplication and wrong for the
 move join, where the two are separate objects the user can move independently.
 
@@ -364,12 +365,41 @@ that cannot be resolved presents as a delete plus an arrival, so local flags and
 message do not survive it. Changing the normalization rules is a reindex of one column, not a resync,
 which is what keeps this inside NFR-48.
 
-**Contestable because:** the normalization tuple is a hypothesis about which headers survive transit, and
-no corpus stands behind it — it belongs in the fidelity corpus of the
-[reference environment](../product/reference-environment.md), and [R-5](../open-questions.md) stays open
-against it. If measurement shows the tuple collides materially, or diverges across an ordinary relay hop,
-the retreat is the rejected third option: never join. That costs duplicate display and the Graph move, and
-nothing else, which is why it is a retreat rather than a redesign.
+**What the measurement found.** The tuple is measured against a header-transit corpus — the header half of
+the fidelity corpus of the [reference environment](../product/reference-environment.md), admitted under
+D-115's provenance rule and checked into the tree beside the digest. Each of its groups is either one
+message observed at several points in transit, or two distinct messages one scope could propose together,
+and each records which elements agree and whether the digest does; the corpus's own test recomputes both
+under the current rule, so the recorded result cannot drift from it. Every group is constructed, so what
+follows is a statement about the transformations the corpus names, not a frequency in real mail.
+
+- **Survival.** Originator address, origination date and reference chain survive every transit group:
+  trace and signature fields added by a relay hop, a refolded chain, a date re-emitted in another zone or
+  with an obsolete zone name, an address whose case a gateway changed, a display name re-encoded or
+  rewritten from the obsolete comment form. The first measurement found the subject was the weak element:
+  a relay that folds with a tab, a folder that inserts a space, and a gateway that strips trailing spaces
+  each diverged the digest on mail that was otherwise unchanged. The subject's whitespace is therefore
+  insignificant — every run is one space and the ends are trimmed — and that change is the digest's second
+  rule version under D-104.
+- **Where it still diverges.** Only across list redistribution: a subject prefix, a From rewritten so the
+  list's copy passes the sender's DMARC policy, or both. The sender's own copy and the list's copy then stay
+  distinct, which is the recoverable direction and the one this decision already names as its cost.
+- **Collision.** Distinct messages collide only when sender, subject and chain agree and the date either
+  agrees to the second or is absent from both — automated mail: an appliance that reuses one message
+  identifier and sends twice in one second, or a sender that omits the date. A collision becomes a wrong
+  join only where the two also share an identifier within one scope and are the only agreeing candidate,
+  which the first case does and the second may.
+
+Neither retreat condition is met: nothing diverges across an ordinary relay hop, and the collisions are
+confined to senders whose messages carry no discriminator the tuple could use. Encoded-word decoding is
+outside the measurement — the tuple is taken over the values an adapter hands over, and decoding is the
+adapter's — and so is the Microsoft Graph move join, whose adapter does not yet construct an envelope.
+
+**Contestable because:** the corpus that supports the tuple is constructed, so it proves only the
+transformations its author catalogued, and [R-5](../open-questions.md) stays open against the frequencies
+until captured mail measures them. If captured mail shows the tuple collides materially, or diverges across
+an ordinary relay hop, the retreat is the rejected third option: never join. That costs duplicate display
+and the Graph move, and nothing else, which is why it is a retreat rather than a redesign.
 
 ## D-32 — Migrations are versioned, forward-only, and never resync
 
