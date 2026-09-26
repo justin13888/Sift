@@ -616,6 +616,32 @@ fn a_throttled_element_fails_the_page_with_its_own_delay_rather_than_leaving_a_h
 }
 
 #[test]
+fn an_element_left_unanswered_or_failing_on_the_server_fails_the_page_as_transient() {
+    let mut r = Replay::new();
+    // Element 1 is not answered at all.
+    r.on(
+        "POST",
+        BATCH,
+        &batch_answer(&[(0, 200, serde_json::json!({"id":"AAMk-m1"}))]),
+    );
+    r.on(
+        "POST",
+        BATCH,
+        &batch_answer(&[
+            (0, 200, serde_json::json!({"id":"AAMk-m1"})),
+            (1, 503, serde_json::json!({})),
+        ]),
+    );
+    let g = graph(r);
+    for _ in 0..2 {
+        let error = g
+            .fetch_envelopes(&[id("AAMk-m1"), id("AAMk-m2")])
+            .unwrap_err();
+        assert_eq!(g.classify(&error), Failure::Transient);
+    }
+}
+
+#[test]
 fn an_envelope_nobody_asked_for_is_not_believed() {
     let mut r = Replay::new();
     r.on(
@@ -723,6 +749,79 @@ fn the_body_is_fetched_alone_in_the_representation_stage_2_chose() {
     assert_eq!(
         g.transport().header_of(1, "prefer"),
         Some("outlook.body-content-type=\"text\"")
+    );
+}
+
+#[test]
+fn a_body_past_l1_is_refused_rather_than_handed_to_the_sanitizer() {
+    let limit = usize::try_from(sift_foundation::limits::L1_BODY_PART_BYTES).unwrap();
+    let at = |len: usize| {
+        serde_json::to_vec(&serde_json::json!({
+            "body": { "contentType": "html", "content": "x".repeat(len) }
+        }))
+        .unwrap()
+    };
+    let target = wire::rooted(&wire::body_target(&id("AAMk-m1")));
+    let mut r = Replay::new();
+    r.on("GET", &target, &at(limit));
+    r.on("GET", &target, &at(limit + 1));
+    let g = graph(r);
+    // Exactly at the bound is within it.
+    assert_eq!(
+        g.fetch_part(&id("AAMk-m1"), wire::BODY_HTML).unwrap().len(),
+        limit
+    );
+    // One byte past it is refused whole, and refused as settled: asking again returns the
+    // same body.
+    let error = g.fetch_part(&id("AAMk-m1"), wire::BODY_HTML).unwrap_err();
+    assert_eq!(
+        error,
+        sift_graph::adapter::GraphError::Transport(TransportError::TooLarge {
+            limit_bytes: sift_foundation::limits::L1_BODY_PART_BYTES
+        })
+    );
+    assert_eq!(g.classify(&error), Failure::Permanent);
+}
+
+#[test]
+fn a_message_with_more_parts_than_l2_allows_is_refused_rather_than_truncated() {
+    let bound = usize::try_from(sift_foundation::limits::L2_MIME_PARTS).unwrap();
+    // The two body representations count toward the bound, so this many attachments fills
+    // it exactly, and one more exceeds it.
+    let listing = |count: usize| {
+        let value: Vec<serde_json::Value> = (0..count)
+            .map(|i| {
+                serde_json::json!({
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "id": format!("AAMk-att-{i}"),
+                    "name": format!("{i}.bin"),
+                    "contentType": "application/octet-stream",
+                    "size": 1,
+                })
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::json!({ "value": value })).unwrap()
+    };
+    let mut r = Replay::new();
+    r.on(
+        "GET",
+        &wire::rooted(&wire::attachments_target(&id("AAMk-m1"))),
+        &listing(bound - 2),
+    );
+    r.on(
+        "GET",
+        &wire::rooted(&wire::attachments_target(&id("AAMk-m2"))),
+        &listing(bound - 1),
+    );
+    let g = graph(r);
+    assert_eq!(g.structure(&id("AAMk-m1")).unwrap().len(), bound);
+    let error = g.structure(&id("AAMk-m2")).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            sift_graph::adapter::GraphError::Refusal(wire::Refusal::Malformed(_))
+        ),
+        "{error:?}"
     );
 }
 
@@ -936,6 +1035,42 @@ fn a_tag_already_in_the_state_asked_for_succeeds_without_a_write() {
         [MutationOutcome::Applied, MutationOutcome::Applied]
     );
     assert_eq!(batches_sent(&g).len(), 1, "a no-op was written");
+}
+
+#[test]
+fn a_tag_whose_categories_could_not_be_read_is_settled_without_a_write() {
+    let mut r = Replay::new();
+    r.on(
+        "POST",
+        BATCH,
+        &batch_answer(&[
+            (
+                0,
+                404,
+                serde_json::json!({"error":{"code":"ErrorItemNotFound","message":"x"}}),
+            ),
+            (1, 503, serde_json::json!({})),
+            // Element 2 is not answered at all.
+        ]),
+    );
+    let g = graph(r);
+    let outcomes = g
+        .apply(&[
+            mutation("m1", Operation::AddTag("Travel".into())),
+            mutation("m2", Operation::RemoveTag("Receipts".into())),
+            mutation("m3", Operation::AddTag("Travel".into())),
+        ])
+        .unwrap();
+    assert_eq!(
+        outcomes,
+        [
+            MutationOutcome::Refused,
+            MutationOutcome::Transient,
+            MutationOutcome::Transient,
+        ]
+    );
+    // Restating a category list that was never read would overwrite what is there.
+    assert_eq!(batches_sent(&g).len(), 1, "a tag was written unread");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! The adapter itself: six responsibilities over one transport.
 
 use core::cell::RefCell;
-use sift_foundation::limits::{L2_MIME_PARTS, L26_BACKFILL_PAGE};
+use sift_foundation::limits::{L1_BODY_PART_BYTES, L2_MIME_PARTS, L26_BACKFILL_PAGE};
 use sift_provider::adapter::{
     Adapter, Cursor, Delta, Envelope, Failure, MutationOutcome, Operation, PartDescriptor,
     RemoteFolder, RemoteFolderId, RemoteMessageId, SpecialUse, WireMutation,
@@ -577,7 +577,17 @@ impl<T: Transport> Adapter for Graph<T> {
     fn fetch_part(&self, id: &RemoteMessageId, part: &str) -> Result<Vec<u8>, Self::Error> {
         if let Some(prefer) = wire::body_preference(part) {
             let body = self.get(&wire::rooted(&wire::body_target(id)), Some(prefer))?;
-            return Ok(wire::parse_body(&body)?);
+            let body = wire::parse_body(&body)?;
+            // L-1, refused rather than truncated. The structure could not state a body's
+            // size — the provider has none to give — so stage 2 had nothing to fall back on,
+            // and this is the one place the bound can hold before the sanitizer is handed it.
+            if u64::try_from(body.len()).unwrap_or(u64::MAX) > L1_BODY_PART_BYTES {
+                return Err(TransportError::TooLarge {
+                    limit_bytes: L1_BODY_PART_BYTES,
+                }
+                .into());
+            }
+            return Ok(body);
         }
         if let Some(attachment) = part.strip_prefix(wire::ATTACHMENT_PART) {
             return self.get(
