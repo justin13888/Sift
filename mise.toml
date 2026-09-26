@@ -197,7 +197,7 @@ description = "The fast local sweep: formatting, lints, tests, and the architect
 depends = ["fmt-check", "clippy", "test", "gates"]
 
 [tasks.ci]
-description = "Everything per-change.yml runs, locally"
+description = "Everything per-change.yml runs, locally, plus the body-view probe on a macOS host"
 depends = [
   "fmt-check",
   "clippy",
@@ -216,6 +216,7 @@ depends = [
 run = '''
 if [ "$(uname -s)" = "Darwin" ]; then
     mise run macos
+    mise run body-view-probe
 else
     echo "ci: skipping the macOS shell leg (D-61 — it needs a macOS host)"
 fi

@@ -28,8 +28,34 @@ its own fetch path rather than an interception of someone else's. See
 [resource broker](../architecture/resource-broker.md) for the component, and
 [content blocking](content-blocking.md) for the decisions.
 
-It is enforceable at the engine level on both target platforms: register a custom scheme handler, reject
-every other scheme in the navigation policy callback, and use a dedicated non-persistent data store.
+It is enforceable at the engine level on both target platforms: register a custom scheme handler, refuse
+every other scheme in the engine's own per-load policy, admit only the one navigation the view itself
+started, and use a dedicated non-persistent data store.
+
+**What the P0 spike established on WKWebView, and the GTK half must re-establish on its own engine.** Three
+parts of the original sketch were wrong, and the design above is the corrected one:
+
+- **Registering only the internal scheme refuses nothing the engine loads natively.** http, https and blob
+  are built in, so a missing handler does not stop them. They are refused by a per-load block policy that
+  denies every scheme and excepts only the internal one, installed before the first document is shown; a
+  view whose policy failed to install renders nothing rather than rendering without it. One exception
+  passes it: blob addresses the engine mints for its own use — a media element with no source and no
+  script makes it load several — are not refused by that policy. They resolve in the engine's in-process
+  blob registry, so they are not egress, and a document cannot mint one without script, which is off. A
+  blob address the document itself names is refused like any other scheme.
+- **The navigation policy callback never sees a subresource.** It is where navigations are refused, and
+  only there.
+- **For `data:` and `file:` subresources the content security policy below is the only engine layer that
+  refuses them.** The per-load policy does not match `data:`, and the engine resolves both schemes without
+  consulting any handler. Neither is egress — a `data:` resource is bytes the document already carries — so
+  N-1's guarantee is intact, but for those two schemes the CSP is load-bearing rather than a backstop, and
+  it is held to that by the probe.
+
+The spike's verdict on WKWebView: the hostile-HTML corpus, loaded unsanitized into the view that ships, with
+every detector first shown to fire in a view with no defences, produces no script execution, no egress, no
+forbidden-scheme load, no navigation in place, and no storage shared between two views. Socket-level hints
+(preconnect, dns-prefetch) and websocket connections reach no observable layer on this engine, so the
+engine is **not** shown to close them; the sanitizer's allowlist and the script detector do.
 
 ## D-28 — The internal scheme addresses per-view capabilities
 
@@ -128,7 +154,9 @@ cookies, cache, or local storage shared with anything else. Two messages MUST NO
 through shared storage, and neither MUST be able to observe application state.
 
 A content security policy of `default-src 'none'`, permitting only the internal scheme for images and
-fonts and inline styles, is applied as an additional layer. It is a backstop; N-1 is the guarantee.
+fonts and inline styles, is applied as an additional layer. It is a backstop; N-1 is the guarantee —
+except for `data:` and `file:` subresources on WebKit, where it is the only engine layer that refuses them
+(see N-1 above).
 
 **Sift's own bundled fonts are not addressed through the internal scheme**, and stating that avoids a
 collision between two decisions that were made separately.

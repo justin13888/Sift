@@ -29,7 +29,7 @@ named decision, so each has an answer that decides it:
 
 | Spike | Passes when |
 |---|---|
-| Hardened body webview against the hostile-HTML corpus | No sample achieves script execution, network egress, or storage shared with another view, on both engines. Any single failure fails the spike, because N-1 and NFR-20 are absolutes rather than rates |
+| Hardened body webview against the hostile-HTML corpus | No sample achieves script execution, network egress, or storage shared with another view, on both engines. Any single failure fails the spike, because N-1 and NFR-20 are absolutes rather than rates. **Passed on WKWebView:** [webview isolation](../rendering/webview-isolation.md) records the verdict and what it corrected; the WebKitGTK half is deferred with the Linux shell |
 | Memory soak harness with allocation attribution | The harness runs 72 hours unattended, produces a per-subsystem series, and D-24's attribution measures at or under NFR-44's 2% |
 | Toolkit residue, and a warm body view alongside it | Figures exist for both architectures and both platforms, separately, and NFR-8 and NFR-9 have been re-derived from them together with the reading peak — see D-105 below, which is what "passes" means for a spike whose output is a number |
 | Sandboxed login-item residency on macOS | A sandboxed build registered as a login item stays resident with no window, syncs, and posts a notification. **If it cannot, the App Store is not a channel** and [D-33](platforms-and-distribution.md) and [D-45](platform-baseline.md) both reopen — which is why this is the spike whose failure is most expensive |
