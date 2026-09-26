@@ -61,7 +61,8 @@ entirely.
 message, while a report **trains the provider's classifier** so that similar mail is caught before it is
 ever delivered. Those are different operations with different durable effects, and every provider Sift
 targets exposes the second as something other than a folder change — a system label on Gmail, a report
-call alongside the move on Graph, `$junk` and `$notjunk` keywords in JMAP, junk keywords or a special-use
+call alongside the move in Graph's preview surface (not its stable one, so a Graph account declares
+*folder move only* — see [Microsoft Graph](providers/microsoft-graph.md#junk)), `$junk` and `$notjunk` keywords in JMAP, junk keywords or a special-use
 move on IMAP. A client that quietly downgrades a report to a move gives the user a worse mailbox forever
 and reports success while doing it.
 

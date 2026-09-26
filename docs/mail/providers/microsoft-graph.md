@@ -15,7 +15,7 @@ Consumer and organizational accounts share one code path.
 | Trash semantics | move to deleted items |
 | Permanent delete | supported |
 | Thread operations | native conversation identifier |
-| Junk reporting | native report — a report call distinct from the move to the junk folder |
+| Junk reporting | folder move only — the published API has no report call; see [Junk](#junk) |
 | Delta mechanism | delta link, per folder |
 | Push mechanism | poll only |
 | ID stability | **unstable on move** |
@@ -50,7 +50,18 @@ delete plus an arrival rather than joined on a guess.
 ## Special-use folders
 
 Resolved through stable well-known folder identifiers, never through localized display names. See FR-5 in
-[provider model](../provider-model.md).
+[provider model](../provider-model.md). The stable API's folder resource carries no well-known-name
+property, so the adapter resolves each well-known name by asking for the folder it denotes; a name the
+account does not have resolves to nothing, and FR-5's prompt-once applies.
+
+## Junk
+
+This row was first written as *native report*. Building the wire protocol found that the stable API binds
+no report action to a message: the report call exists only in the provider's preview surface, which is not
+supported for production use. So the declared value is **folder move only**, and per
+[D-40](../mutations.md) the account is offered a move to the junk folder labelled as a move, never a
+report that is secretly one. If the report call reaches the stable API, this row returns to *native
+report* by amendment.
 
 ## Client
 
