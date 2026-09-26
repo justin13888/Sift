@@ -1,2 +1,10 @@
 [alias]
 xtask = "run --quiet --package xtask --"
+
+[env]
+# D-46's floor, stated to the linker as well as to Xcode. Without it rustc links macOS
+# binaries against its own default (10.12 on Intel), and the Swift runtime's link stubs
+# resolve to an `@rpath` install name that no Rust binary carries an rpath for — which is how
+# sift-crypto's CryptoKit shim (D-75) failed to load on x86_64 while working on Apple silicon.
+# An explicit MACOSX_DEPLOYMENT_TARGET in the environment still wins.
+MACOSX_DEPLOYMENT_TARGET = "13.0"
