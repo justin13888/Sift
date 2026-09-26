@@ -228,7 +228,7 @@ reach a toolkit directly.
 
 **Why anything is needed at all.** The protocol as previously stated is entirely shell-initiated: the
 shells *"send intents and requests and receive prepared view models"*, and every callback answers an
-observation the shell registered. Six things in this design are core-initiated and answer no observation,
+observation the shell registered. Seven things in this design are core-initiated and answer no observation,
 and each of them is a requirement rather than a convenience:
 
 | Event | Requirement | Why no observation can carry it |
@@ -239,6 +239,18 @@ and each of them is a requirement rather than a convenience:
 | A notification was activated | [FR-23](ui-shell.md) | *"May mean opening a window on a process that has none"* |
 | The account condition changed | [D-49](../runtime/failure-model.md) | The annunciator must reach the user with no window open, by that decision's own rule |
 | An authorization callback arrived | [D-36](../security/credentials.md) | The platform delivers it to the process, not to a view |
+| New mail arrived | [FR-23](ui-shell.md) | The scheduler's tick brings it in with nobody looking, and a notification exists for exactly the state in which no window is open |
+
+**The seventh entry was added by amendment**, as this section requires. FR-23's notification had an
+activation half from the start and no delivery half: nothing could tell a shell that an account had
+received mail outside an observation, and an observation belongs to a window. The entry carries the
+account, FR-23's count of delivered-and-unread arrivals, and the newest of them, and it is called once
+per account per scheduler tick that brought any in — the coalescing FR-23 already specifies. Because
+"delivered and unread at that moment" cannot be reconstructed afterwards, the layer holds what a tick
+found until the main-loop hop announces it, merged per account so that what it holds is bounded by the
+number of accounts rather than by how long the shell's loop was away. Activation arrives at the shell
+from the platform carrying only identifiers, so the boundary also answers a message's list row by
+identity alone, which is what makes the reader addressable from a cold start.
 
 **Why a closed registered set rather than a general channel.** Every one of these is a case where the
 core must reach the *application*, not a view, so the natural implementation is for the core to hold
@@ -248,7 +260,7 @@ two-shell economics rests on. Registering callbacks inverts it: the shell hands 
 pointers, the layer knows nothing about what they do, and the toolkit stays entirely above the boundary.
 
 Keeping the set **closed and enumerated here** is what stops it becoming the general escape hatch that
-dissolves the command-and-view-model shape. A seventh host callback is an amendment to this table, which
+dissolves the command-and-view-model shape. An eighth host callback is an amendment to this table, which
 is the same discipline [mutations](../mail/mutations.md) applies to FR-13's intent set.
 
 **They are delivered under D-48's rules like everything else** — on the main loop, non-reentrant — with
@@ -260,10 +272,10 @@ shutdown. This is why they are not cancellable, and why cancellability would be 
 **What it costs:** a second shape on a boundary D-17 wants narrow, and a set that will be under pressure
 to grow every time something in the core wants to tell somebody.
 
-**Contestable because:** six entries is enough that a general event channel with an identified payload
-would be a smaller surface than six signatures, and would fold neatly into the
+**Contestable because:** seven entries is enough that a general event channel with an identified payload
+would be a smaller surface than seven signatures, and would fold neatly into the
 [state register](state-register.md)'s identified-and-parameterized shape. That design is
-better if the set grows and worse while it is small, because it replaces six checked signatures with one
+better if the set grows and worse while it is small, because it replaces seven checked signatures with one
 that carries a discriminant — reintroducing exactly the runtime dispatch D-66 refused.
 
 ## Ownership

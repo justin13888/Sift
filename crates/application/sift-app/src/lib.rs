@@ -686,6 +686,22 @@ impl App {
         })
     }
 
+    /// One message's list row, by identity alone — FR-23's activation, which may arrive on a
+    /// process that has no window and therefore no list to find the row in.
+    ///
+    /// # Errors
+    /// The owning store could not be read. A message no account holds, or one the overlay
+    /// hides, is `Ok(None)`.
+    pub fn message_row(&self, message: LocalId) -> Result<Option<rows::MessageRow>, String> {
+        let Some(owner) = self.owner_of_stored(message) else {
+            return Ok(None);
+        };
+        let Some(account) = self.accounts.get(&owner) else {
+            return Ok(None);
+        };
+        rows::message_row(account, message)
+    }
+
     /// The account a message belongs to, by local identity.
     #[must_use]
     pub fn owner_of(&self, message: LocalId) -> Option<&String> {
@@ -1002,6 +1018,7 @@ impl App {
                     updated: page.updated,
                     removed: page.removed,
                     delivered: page.delivered,
+                    newest: page.newest.map(|a| a.id),
                 })
             },
         );
@@ -1381,6 +1398,18 @@ impl App {
             Due::Sync(_) => match self.sync(&name, 1) {
                 Ok(outcome) => {
                     report.inserted += outcome.inserted;
+                    if outcome.delivered > 0 {
+                        // Read now, while the fire holds the account, so that what is
+                        // announced is the row as it stood the moment it arrived.
+                        let newest = outcome
+                            .newest
+                            .and_then(|m| self.message_row(m).ok().flatten());
+                        report.new_mail.push(NewMail {
+                            account: id,
+                            delivered: outcome.delivered,
+                            newest,
+                        });
+                    }
                     report.synced.push(name);
                 }
                 Err(why) => report.failures.push((name, why)),
@@ -1457,8 +1486,8 @@ impl App {
     /// window. The boundary issues that one as a host callback.
     fn shed(&mut self, transition: &sift_governor::Transition) {
         // **Tokens are revoked only where the views holding them are actually destroyed**,
-        // which today is L3 and only L3. D-67's callback set is closed at six and contains
-        // nothing that can destroy a body view, so at L2 the window and the reader stay on
+        // which today is L3 and only L3. D-67's callback set is closed and contains nothing
+        // that can destroy a body view, so at L2 the window and the reader stay on
         // screen — and revoking there would leave a live document whose every resource
         // request answers `Revoked`, whose "Load images" button fails, and whose reason the
         // shell has no way to state. FR-33 requires the reason be given; a dead view that
@@ -1564,6 +1593,9 @@ pub struct SyncReport {
     pub removed: usize,
     /// FR-23's new mail: delivered-and-unread at this moment, and not reconstructable later.
     pub delivered: usize,
+    /// The most recently received of those — what FR-23's notification names and opens.
+    /// `None` exactly when `delivered` is zero.
+    pub newest: Option<LocalId>,
 }
 
 /// D-49's annunciator, resolved per account.
@@ -1763,4 +1795,24 @@ pub struct TickReport {
     /// Accounts the wheel reached and did not poll, because the user paused them.
     pub paused: Vec<String>,
     pub failures: Vec<(String, String)>,
+    /// FR-23's new mail, **one entry per account** — coalesced on the tick rather than posted
+    /// per message, which costs no wakeup beyond the fire already being taken.
+    ///
+    /// Carried out of the fire rather than recomputed later, because it cannot be: "delivered
+    /// and unread at that moment" is a fact about this turn, and a fire whose announcement is
+    /// dropped has nothing afterwards to recover it from.
+    pub new_mail: Vec<NewMail>,
+}
+
+/// One account's new mail from one wheel fire — FR-23.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewMail {
+    pub account: AccountId,
+    /// Delivered-and-unread arrivals in this fire. Never zero: an account that received
+    /// nothing has no entry.
+    pub delivered: usize,
+    /// The most recently received of them, read through the overlay as the list reads it.
+    /// `None` where it is no longer visible — archived by a rule, or by a gesture, between
+    /// the arrival and this read — and then there is nothing a notification could open.
+    pub newest: Option<rows::MessageRow>,
 }

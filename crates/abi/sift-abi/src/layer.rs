@@ -8,7 +8,7 @@
 //! so a completion lands on an arbitrary worker. If the layer does not hop, both shells grow
 //! a hand-rolled marshal and the two will not be the same marshal.
 //!
-//! Nothing implemented it. `SiftHostCallbacks` carries six callbacks and none of them is a
+//! Nothing implemented it. `SiftHostCallbacks` carries seven callbacks and none of them is a
 //! main-loop post, and there was no `pump`, `tick` or `drain` anywhere. A layer cannot hop
 //! onto a loop it has no handle to, so the shell supplies one — **once, at initialization**,
 //! beside the host callbacks it already supplies once.
@@ -112,7 +112,7 @@ pub struct SiftInit {
 /// The layer, as one process holds it.
 pub(crate) struct Layer {
     pub(crate) session: Mutex<Session>,
-    /// D-67's six, registered **once** and unregistered only at shutdown.
+    /// D-67's seven, registered **once** and unregistered only at shutdown.
     ///
     /// Held from initialization rather than at first use because a host callback has no
     /// observation and therefore no generation to discard by — there is nothing to register
@@ -181,6 +181,17 @@ pub(crate) struct Layer {
     /// it last said and calls the host callback on a change, which is also what keeps the
     /// callback from firing on every delivery with the same answer.
     pub(crate) conditions: Mutex<BTreeMap<u128, u32>>,
+    /// FR-23's new mail, computed on the worker and waiting for the main-loop hop that
+    /// announces it — by account, so that two fires landing before one hop merge into one
+    /// announcement rather than two.
+    ///
+    /// **Bounded by the number of accounts**, because an entry is merged rather than
+    /// appended: a main loop that stalled for an hour holds one entry per account, not sixty.
+    /// And it is not dropped when a hop finds nothing else to do, because "delivered and unread
+    /// at that moment" cannot be recomputed afterwards — an announcement lost here is lost.
+    pub(crate) new_mail: Mutex<BTreeMap<u128, sift_app::NewMail>>,
+    /// The row `sift_message_row` last handed out, and the text it borrows.
+    pub(crate) looked_up: Mutex<Option<sift_app::rows::MessageRow>>,
     /// The text the setting rows borrow. Held separately because the rows are `repr(C)` and
     /// cannot own a `String`.
     pub(crate) setting_values: Mutex<Vec<String>>,

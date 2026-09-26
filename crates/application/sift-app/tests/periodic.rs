@@ -145,6 +145,69 @@ fn a_fire_splits_into_a_cheap_half_and_the_work() {
 }
 
 #[test]
+fn a_fire_that_brings_new_mail_says_which_account_and_which_message() {
+    // FR-23, and #53: the wheel is what brings mail in with nobody watching, so it is the one
+    // place a notification can come from. The backfill — a page per fire — discovers and
+    // announces nothing; the delta after it carries one arrival, which is new mail.
+    let hand = std::sync::Arc::new(Hand::new());
+    let mut app = App::with_clock(Box::new(Shared(std::sync::Arc::clone(&hand))));
+    let id = app.add_replayed_account("mail").expect("added");
+    app.arm_periodic();
+
+    let mut delta = None;
+    let mut backfilled = 0;
+    for _ in 0..6 {
+        advance(&hand, Duration::from_secs(65));
+        let report = app.tick();
+        if !report.new_mail.is_empty() {
+            delta = Some(report);
+            break;
+        }
+        backfilled += report.inserted;
+    }
+    assert!(
+        backfilled > 0,
+        "nothing was discovered before the arrival, so the backfill was never tested"
+    );
+    let delta = delta.expect("no fire announced the delta's arrival");
+    assert_eq!(delta.new_mail.len(), 1, "one account, one entry: {delta:?}");
+    let new = &delta.new_mail[0];
+    assert_eq!(new.account, id);
+    assert_eq!(new.delivered, 1);
+    let row = new.newest.as_ref().expect("the arrival has no row to open");
+    // Contained rather than equal: NFR-54 isolates display text before it is stored.
+    assert!(row.subject.contains("Something new"), "{row:?}");
+    assert!(row.unread);
+
+    // **The row the notification names is the row activation finds**, by identity alone —
+    // which is all a notification can carry across a relaunch.
+    assert_eq!(
+        app.message_row(row.id).expect("read").as_ref(),
+        Some(row),
+        "activation would open something other than what was announced"
+    );
+}
+
+#[test]
+fn a_message_is_found_by_identity_alone_and_an_unknown_one_is_not() {
+    // Activation may arrive on a relaunched process with no window and no list, carrying only
+    // an identity. One that names nothing — a message since removed by the server — must come
+    // back as absent rather than as an error the shell would have to explain.
+    let mut app = App::new();
+    app.add_replayed_account("mail").expect("added");
+    app.sync("mail", 1).expect("sync");
+    let listed = sift_app::list_messages(app.account("mail").expect("open")).expect("list");
+    let id = listed.first().expect("a message").0;
+    assert!(app.message_row(id).expect("read").is_some());
+    assert_eq!(
+        app.message_row(sift_foundation::identity::LocalId::from_u128(u128::MAX))
+            .expect("read"),
+        None,
+        "a message no account holds was found"
+    );
+}
+
+#[test]
 fn a_second_account_costs_no_extra_fire() {
     // D-94: NFR-11's budget is the application's, not each account's, and the defence of
     // that is the wheel — an additional account joins a fire that already exists. Two
@@ -317,7 +380,7 @@ fn the_filter_engine_returns_once_pressure_has_been_clear_with_a_window_open() {
 #[test]
 fn a_warning_tier_does_not_revoke_the_open_documents_token() {
     // Only L3 destroys the views that hold a capability token, and D-67's callback set is
-    // closed at six with nothing that can destroy a body view. Revoking at L2 would leave the
+    // closed, and nothing in it can destroy a body view. Revoking at L2 would leave the
     // reader on screen with a document whose every resource request answers `Revoked` and
     // whose consent buttons fail — with no way for the shell to say why. FR-33 requires the
     // reason be stated, and a dead view that says nothing is worse than an unreleased cache.

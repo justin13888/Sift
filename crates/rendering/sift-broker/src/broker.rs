@@ -221,8 +221,8 @@ impl Broker {
     ///
     /// That qualification is the correction of an earlier premise. This used to say "L2
     /// destroys the body view and L3 destroys every window", and the first half was not true
-    /// of anything that exists: D-67's callback set is closed at six and contains nothing that
-    /// can destroy a body view, so revoking at L2 left a reader on screen whose every resource
+    /// of anything that exists: D-67's callback set is closed and contains nothing that can
+    /// destroy a body view, so revoking at L2 left a reader on screen whose every resource
     /// request answered `Revoked` and whose reason no shell could state.
     ///
     /// Durable per-sender allowances are **kept**. They are the user's decisions rather than a

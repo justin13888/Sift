@@ -209,6 +209,8 @@ pub unsafe extern "C" fn sift_initialize(
                 account_names: std::sync::Mutex::new(Vec::new()),
                 account_setting_value: std::sync::Mutex::new(String::new()),
                 conditions: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                new_mail: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                looked_up: std::sync::Mutex::new(None),
                 search: std::sync::Mutex::new(crate::layer::SearchResult::default()),
                 worker: std::sync::OnceLock::new(),
                 live: std::sync::Mutex::new(true),
@@ -1718,11 +1720,11 @@ fn fire(layer: &Layer) {
         };
         session.app_mut().begin_fire()
     };
-    // The report is dropped: FR-34's panel reads the queue and the conditions directly, and
-    // a fire that reported into nothing would be a second source of truth. A wheel fire
-    // cannot deepen a tier — it re-ticks the governor against the last level the platform
-    // reported, and the tier already satisfies that — so there is no L3 to issue from here
-    // either.
+    // The rest of the report is dropped: FR-34's panel reads the queue and the conditions
+    // directly, and a fire that reported into nothing would be a second source of truth. A
+    // wheel fire cannot deepen a tier — it re-ticks the governor against the last level the
+    // platform reported, and the tier already satisfies that — so there is no L3 to issue from
+    // here either.
     let mut report = sift_app::TickReport::default();
     for item in &due {
         let Ok(mut session) = layer.session.lock() else {
@@ -1730,6 +1732,10 @@ fn fire(layer: &Layer) {
         };
         session.app_mut().perform(item, &mut report);
     }
+    // **FR-23's new mail is the one part that is kept**, because it is the one part nothing
+    // can recompute: "delivered and unread at that moment" is a fact about this fire. Held for
+    // the hop below, which is where D-48 lets a host callback be called.
+    hold_new_mail(layer, report.new_mail);
     // **Only the completion hops.** The delivery is computed and handed over on the shell's
     // loop, which is where D-48 requires every callback to arrive — never from here.
     complete(layer);
@@ -1816,9 +1822,64 @@ fn announce_conditions(layer: &Layer) {
     }
 }
 
+/// Keep a fire's new mail until the next main-loop hop announces it — FR-23.
+///
+/// Merged per account rather than appended, so that two fires landing before one hop are one
+/// announcement, and so that what is held is bounded by the number of accounts however long
+/// the main loop is away.
+fn hold_new_mail(layer: &Layer, arrived: Vec<sift_app::NewMail>) {
+    if arrived.is_empty() {
+        return;
+    }
+    let Ok(mut held) = layer.new_mail.lock() else {
+        return;
+    };
+    for new in arrived {
+        match held.entry(new.account.as_u128()) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(new);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let kept = slot.get_mut();
+                kept.delivered = kept.delivered.saturating_add(new.delivered);
+                let received = |m: &Option<sift_app::rows::MessageRow>| {
+                    m.as_ref().map(|r| (r.received_millis, r.id.as_u128()))
+                };
+                if received(&new.newest) > received(&kept.newest) {
+                    kept.newest = new.newest;
+                }
+            }
+        }
+    }
+}
+
+/// Tell the shell about the new mail the wheel brought in since it was last told — FR-23.
+///
+/// Taken whole and the lock released before any call, for the reason [`announce_conditions`]
+/// gives: a shell may call back into the layer from its handler.
+fn announce_new_mail(layer: &Layer) {
+    let arrived = {
+        let Ok(mut held) = layer.new_mail.lock() else {
+            return;
+        };
+        core::mem::take(&mut *held)
+    };
+    for new in arrived.into_values() {
+        let row = new.newest.as_ref().map(row_of);
+        let rows: &[SiftMessageRow<'_>] = row.as_slice();
+        (layer.host.new_mail)(
+            layer.host.context,
+            SiftId::from_u128(new.account.as_u128()),
+            u32::try_from(new.delivered).unwrap_or(u32::MAX),
+            SiftRows::new(rows),
+        );
+    }
+}
+
 /// Compute what changed and hand each batch to the observation that asked for it.
 fn deliver(layer: &Layer) {
     announce_conditions(layer);
+    announce_new_mail(layer);
     let Ok(mut session) = layer.session.lock() else {
         return;
     };
@@ -2133,6 +2194,43 @@ impl SiftAttachment<'static> {
                 warning: warning_bits(a.warning),
             }
         }
+    }
+}
+
+/// One message's list row, by identity alone — FR-23's activation.
+///
+/// **What makes a message addressable from a cold start.** A notification carries identifiers
+/// and nothing else across a relaunch, and a reader needs the row a list would have handed it:
+/// subject and sender to title the window, attachments to show. With no window there is no
+/// list to find it in, so the shell asks here.
+///
+/// The row is read through D-51's overlay like the list's, so a message put away since the
+/// notification was posted — or removed by the server — is `Failed`, and the shell opens
+/// Sift rather than a reader over something the list no longer shows. The strings are held by
+/// the layer until the next call.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_message_row(
+    app: *mut SiftApp,
+    message: SiftId,
+    out: *mut SiftMessageRow<'static>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let id = sift_foundation::identity::LocalId::from_u128(message.to_u128());
+            let row = {
+                let session = layer.session.lock().map_err(|_| ())?;
+                session.app().message_row(id).map_err(|_| ())?.ok_or(())?
+            };
+            let mut held = layer.looked_up.lock().map_err(|_| ())?;
+            let row = held.insert(row);
+            // SAFETY: the row borrows from `looked_up`, which only the next call to this
+            // function replaces — the lifetime the documentation above gives the shell.
+            Ok(extend_row(row_of(row)))
+        })
     }
 }
 
@@ -2768,6 +2866,13 @@ mod tests {
     extern "C" fn noop_notification(_: *mut c_void, _: SiftId, _: SiftId) {}
     extern "C" fn noop_condition(_: *mut c_void, _: SiftId, _: u32) {}
     extern "C" fn noop_url(_: *mut c_void, _: SiftStr<'_>) {}
+    extern "C" fn noop_new_mail(
+        _: *mut c_void,
+        _: SiftId,
+        _: u32,
+        _: SiftRows<'_, SiftMessageRow<'_>>,
+    ) {
+    }
     extern "C" fn noop_rows(
         _: *mut c_void,
         _: SiftObservation,
@@ -2785,6 +2890,7 @@ mod tests {
             notification_activated: noop_notification,
             account_condition_changed: noop_condition,
             authorization_callback: noop_url,
+            new_mail: noop_new_mail,
         }
     }
 
@@ -4339,6 +4445,149 @@ mod tests {
             SEEN.load(Ordering::Relaxed),
             before,
             "the same condition was announced twice"
+        );
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    /// What one `new_mail` call carried, copied out inside the call as D-66 requires.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Announced {
+        account: u128,
+        delivered: u32,
+        newest: Option<(u128, String)>,
+    }
+
+    extern "C" fn record_new_mail(
+        context: *mut c_void,
+        account: SiftId,
+        delivered: u32,
+        newest: SiftRows<'_, SiftMessageRow<'_>>,
+    ) {
+        // SAFETY: the context is the `Mutex` the test leaked for exactly this.
+        let seen = unsafe { &*context.cast::<std::sync::Mutex<Vec<Announced>>>() };
+        let row = unsafe { newest.as_slice() }.first().map(|r| {
+            (
+                r.id.to_u128(),
+                unsafe { r.subject.as_str() }.unwrap_or("").to_owned(),
+            )
+        });
+        seen.lock().expect("seen").push(Announced {
+            account: account.to_u128(),
+            delivered,
+            newest: row,
+        });
+    }
+
+    /// FR-23, #53 — the seventh host callback, and the merge that keeps what it is owed
+    /// bounded.
+    ///
+    /// The wheel's own timing is `sift-app`'s to test with a hand-moved clock; what is tested
+    /// here is the boundary's half — that a fire's new mail is held for the hop, merged per
+    /// account, announced once with the newest row, and then forgotten.
+    #[test]
+    fn new_mail_is_held_merged_per_account_and_announced_once() {
+        ephemeral();
+        let seen: &'static std::sync::Mutex<Vec<Announced>> =
+            Box::leak(Box::new(std::sync::Mutex::new(Vec::new())));
+        let mut callbacks = callbacks();
+        callbacks.context = core::ptr::from_ref(seen).cast_mut().cast::<c_void>();
+        callbacks.new_mail = record_new_mail;
+        let mut app: *mut SiftApp = core::ptr::null_mut();
+        let init = SiftInit {
+            container_root: SiftStr::new(scratch_str()),
+            schedule: run_inline,
+            schedule_context: core::ptr::null_mut(),
+            arm_timer: never_fires,
+            oauth_client_id: SiftStr::new(""),
+            registered_schemes: SiftStr::new(""),
+        };
+        assert_eq!(
+            unsafe { sift_initialize(callbacks, init, &raw mut app) },
+            SiftStatus::Ok
+        );
+        let message = hostile_message(app);
+        assert!(
+            seen.lock().expect("seen").is_empty(),
+            "a sync a person asked for is not the wheel, and a backfill is not new mail"
+        );
+
+        let layer = unsafe { layer(app) }.expect("a live layer");
+        let (older, newer) = {
+            let session = layer.session.lock().expect("session");
+            let mut rows = sift_app::list_messages(session.app().accounts().next().expect("one").1)
+                .expect("list")
+                .into_iter()
+                .map(|(id, _)| session.app().message_row(id).expect("read").expect("row"))
+                .collect::<Vec<_>>();
+            rows.sort_by_key(|r| r.received_millis);
+            (rows[0].clone(), rows[rows.len() - 1].clone())
+        };
+        assert!(newer.received_millis > older.received_millis);
+        let account = newer.account;
+
+        // Two fires before one hop, the newer arrival reported first: one announcement, the
+        // counts summed, and the newest row whichever order they came in.
+        hold_new_mail(
+            layer,
+            vec![sift_app::NewMail {
+                account,
+                delivered: 2,
+                newest: Some(newer.clone()),
+            }],
+        );
+        hold_new_mail(
+            layer,
+            vec![sift_app::NewMail {
+                account,
+                delivered: 1,
+                newest: Some(older),
+            }],
+        );
+        assert_eq!(
+            layer.new_mail.lock().expect("held").len(),
+            1,
+            "two fires for one account were held as two announcements"
+        );
+        deliver(layer);
+        let announced = core::mem::take(&mut *seen.lock().expect("seen"));
+        assert_eq!(
+            announced,
+            vec![Announced {
+                account: account.as_u128(),
+                delivered: 3,
+                newest: Some((newer.id.as_u128(), newer.subject.clone())),
+            }]
+        );
+
+        // Announced is forgotten: the next hop has nothing to say.
+        deliver(layer);
+        assert!(
+            seen.lock().expect("seen").is_empty(),
+            "the same new mail was announced twice"
+        );
+
+        // And the row it named is the row activation finds, by identity alone.
+        let placeholder: &'static sift_app::rows::MessageRow = Box::leak(Box::new(newer.clone()));
+        let mut row = row_of(placeholder);
+        assert_eq!(
+            unsafe { sift_message_row(app, SiftId::from_u128(newer.id.as_u128()), &raw mut row) },
+            SiftStatus::Ok
+        );
+        assert_eq!(row.id.to_u128(), newer.id.as_u128());
+        assert_eq!(
+            unsafe { row.subject.as_str() },
+            Some(newer.subject.as_str())
+        );
+        assert_eq!(
+            unsafe { sift_message_row(app, message, &raw mut row) },
+            SiftStatus::Ok,
+            "a message the list holds could not be found by identity"
+        );
+        assert_eq!(
+            unsafe { sift_message_row(app, SiftId::from_u128(u128::MAX), &raw mut row) },
+            SiftStatus::Failed,
+            "a message nobody holds was found"
         );
 
         assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);

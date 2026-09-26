@@ -144,7 +144,67 @@ typedef struct {
 } SiftStr;
 
 /**
- * The six callbacks the shell registers, once, at initialization.
+ * A message row, as the list receives it.
+ *
+ * **Fixed layout, and the text fields are pointers into layer-owned storage valid for the
+ * duration of the delivery.** A shell that needs a value beyond the callback copies it.
+ *
+ * D-66 excluded the alternative arithmetically: FR-6's ten fields against NFR-6's
+ * 10,000-row fling is a hundred thousand boundary crossings per fling, versus one delivery.
+ */
+typedef struct {
+  /**
+   * D-78's local identity. Stable for as long as the message exists in that account, and
+   * therefore usable as a key for selection, undo rendering and notification
+   * click-through.
+   */
+  SiftId id;
+  SiftId account;
+  /**
+   * Server-assigned received time — what D-55 orders on.
+   */
+  uint64_t received_millis;
+  /**
+   * The sender's `Date` header. **Displayed only.**
+   */
+  uint64_t origination_millis;
+  /**
+   * Normalized under NFR-54 before it got here. Validity is established once, where
+   * normalization happens, and is **not re-checked by the shell**.
+   */
+  SiftStr sender;
+  SiftStr subject;
+  SiftStr snippet;
+  uint8_t unread;
+  uint8_t flagged;
+  uint8_t has_attachments;
+  /**
+   * Marked rather than joined — D-4.
+   */
+  uint8_t duplicate_across_accounts;
+  uint32_t thread_count;
+} SiftMessageRow;
+
+/**
+ * A contiguous, borrowed array of fixed-layout records.
+ *
+ * The alternative — an opaque row handle with a per-field accessor — was excluded
+ * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
+ * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
+ * hundred thousand boundary crossings per fling, against one delivery.
+ *
+ * # Safety
+ *
+ * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
+ * pointing into layer-owned storage with the same lifetime.
+ */
+typedef struct {
+  const SiftMessageRow *ptr;
+  size_t len;
+} SiftRows_SiftMessageRow;
+
+/**
+ * The seven callbacks the shell registers, once, at initialization.
  *
  * Every field is required. There is no "optional callback": a shell that cannot destroy
  * its windows cannot honour L3, and a shell that cannot raise re-authentication has an
@@ -189,7 +249,9 @@ typedef struct {
    * **A notification was activated** — FR-23.
    *
    * Opens that message, which under FR-25 may mean opening a window on a process that
-   * has none.
+   * has none. The identifiers are the ones [`Self::new_mail`] carried; a shell reads the
+   * row back with `sift_message_row`, because an activation may arrive on a relaunched
+   * process that holds nothing else about it.
    */
   void (*notification_activated)(HostContext, SiftId account, SiftId message);
   /**
@@ -215,6 +277,23 @@ typedef struct {
    * comment**.
    */
   void (*authorization_callback)(HostContext, SiftStr url);
+  /**
+   * **New mail arrived** — FR-23.
+   *
+   * One call per account per wheel fire that brought any in — coalesced on the tick the
+   * scheduler was already taking rather than posted per message, so it costs no wakeup of
+   * its own. `delivered` is FR-23's count: delivered by a delta and unread at that moment,
+   * never anything a backfill or a recovery merely discovered.
+   *
+   * `newest` holds the most recently received of them, or no row where it is no longer
+   * visible — put away between the arrival and the announcement — and then there is nothing
+   * for a notification to open. Its strings are borrowed for the call, under D-66's rule.
+   *
+   * Why this is not an observation: FR-23 exists for when there is no window, and an
+   * observation belongs to one. The authorization a platform may require before the first
+   * notification is the shell's to ask for.
+   */
+  void (*new_mail)(HostContext, SiftId account, uint32_t delivered, SiftRows_SiftMessageRow newest);
 } SiftHostCallbacks;
 
 /**
@@ -508,66 +587,6 @@ typedef struct {
    */
   uint8_t failed;
 } SiftFlush;
-
-/**
- * A message row, as the list receives it.
- *
- * **Fixed layout, and the text fields are pointers into layer-owned storage valid for the
- * duration of the delivery.** A shell that needs a value beyond the callback copies it.
- *
- * D-66 excluded the alternative arithmetically: FR-6's ten fields against NFR-6's
- * 10,000-row fling is a hundred thousand boundary crossings per fling, versus one delivery.
- */
-typedef struct {
-  /**
-   * D-78's local identity. Stable for as long as the message exists in that account, and
-   * therefore usable as a key for selection, undo rendering and notification
-   * click-through.
-   */
-  SiftId id;
-  SiftId account;
-  /**
-   * Server-assigned received time — what D-55 orders on.
-   */
-  uint64_t received_millis;
-  /**
-   * The sender's `Date` header. **Displayed only.**
-   */
-  uint64_t origination_millis;
-  /**
-   * Normalized under NFR-54 before it got here. Validity is established once, where
-   * normalization happens, and is **not re-checked by the shell**.
-   */
-  SiftStr sender;
-  SiftStr subject;
-  SiftStr snippet;
-  uint8_t unread;
-  uint8_t flagged;
-  uint8_t has_attachments;
-  /**
-   * Marked rather than joined — D-4.
-   */
-  uint8_t duplicate_across_accounts;
-  uint32_t thread_count;
-} SiftMessageRow;
-
-/**
- * A contiguous, borrowed array of fixed-layout records.
- *
- * The alternative — an opaque row handle with a per-field accessor — was excluded
- * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
- * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
- * hundred thousand boundary crossings per fling, against one delivery.
- *
- * # Safety
- *
- * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
- * pointing into layer-owned storage with the same lifetime.
- */
-typedef struct {
-  const SiftMessageRow *ptr;
-  size_t len;
-} SiftRows_SiftMessageRow;
 
 /**
  * What a search found, and what it understood.
@@ -1532,6 +1551,24 @@ SiftStatus sift_add_replayed_account(SiftApp *app,
  * `app` must be valid; `label` must point to `label_len` bytes of UTF-8.
  */
 SiftStatus sift_sync_account(SiftApp *app, const uint8_t *label, size_t label_len);
+
+/**
+ * One message's list row, by identity alone — FR-23's activation.
+ *
+ * **What makes a message addressable from a cold start.** A notification carries identifiers
+ * and nothing else across a relaunch, and a reader needs the row a list would have handed it:
+ * subject and sender to title the window, attachments to show. With no window there is no
+ * list to find it in, so the shell asks here.
+ *
+ * The row is read through D-51's overlay like the list's, so a message put away since the
+ * notification was posted — or removed by the server — is `Failed`, and the shell opens
+ * Sift rather than a reader over something the list no longer shows. The strings are held by
+ * the layer until the next call.
+ *
+ * # Safety
+ * `app` and `out` must be valid.
+ */
+SiftStatus sift_message_row(SiftApp *app, SiftId message, SiftMessageRow *out);
 
 /**
  * Open a message's body: fetch its chosen part and run the seven stages over it.
