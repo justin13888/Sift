@@ -1519,9 +1519,12 @@ SiftStatus sift_add_replayed_account(SiftApp *app,
  * arrives the way every delivery does, through D-48's hop, so a shell sees the same thing it
  * saw when this blocked, without its loop stopping for a provider in the meantime.
  *
- * `Ok` means the sync is queued, not that it succeeded. A sync that fails reaches the shell
- * as a D-49 condition on the delivery that follows it, which is where every other account
- * fault already arrives. Asking again while one is queued for the same account asks once.
+ * `Ok` means the sync is queued, not that it succeeded — and not that the label names an
+ * account, which is only known where the sync runs. A failure is not returned from here.
+ * What it changed about the account — that it needs authentication, say — reaches the shell
+ * as a D-49 condition on the delivery that follows, the way the wheel's own failures do; a
+ * transient one is tried again by the next fire. Asking again while a sync for the same
+ * account is still queued asks once.
  *
  * It does not take the session lock, so it does not wait on a sync already running.
  *
