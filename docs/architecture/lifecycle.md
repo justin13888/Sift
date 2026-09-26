@@ -84,7 +84,7 @@ direction and expensive in the other, which is why it is drawn here.
 the stores, exit — under a stated bound, after which the process exits regardless. **No provider call is
 awaited and no queue is flushed.**
 **Rejected:** draining the mutation queue before exit; awaiting in-flight network calls; an unbounded
-graceful shutdown.
+graceful shutdown; joining the blocking pool; freeing state a running job still uses.
 
 **Why nothing is flushed, which reads wrong and is right.** [FR-25](process-model.md) calls the
 close-versus-quit distinction *"the single most likely source of user distrust in the whole design"*, so
@@ -115,6 +115,19 @@ worker-side work and can wait; a quit that cancelled every live observation firs
 path's duration depend on whatever query happened to be running. Teardown discards observations by
 advancing their generation, which is [D-66](view-protocol.md)'s mechanism used in the direction it is
 already correct for.
+
+**Work already running on the blocking pool is abandoned, and what it uses outlives the quit rather
+than being freed under it.** Sync and the queue flush run on [D-19](overview.md)'s blocking pool rather
+than on the shell's loop, so a quit can arrive while one of them is inside a provider round trip. Waiting
+for it is exactly what the paragraphs above rule out, and freeing the state it is using would turn an
+abandoned call into a use-after-free. So a quit does three things and waits for none of them: the pool
+stops taking work and discards what is queued; the running job loses the ability to reach the shell, so
+nothing it finishes is posted to a loop that may no longer exist; and the layer's state is released by
+whichever lets go of it last — the shell's handle at the quit, or the running job when it returns. The
+one wait this admits is for a post already in progress, which returns immediately by the view protocol's
+own contract. The stores such a job holds close when it returns, which on a normal quit is before the
+process exits and on a hung provider is never — the same outcome as the bound expiring, and covered by
+the same recovery.
 
 **The bound exists because the ordered path can hang.** A store that will not close, a body view that
 will not tear down, and a blocking-pool task that will not return are all possible, and a quit that waits
