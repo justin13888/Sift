@@ -1,0 +1,6 @@
+{
+ "value": [
+  {"@odata.type": "#microsoft.graph.message", "id": "AAMk-m3"}
+ ],
+ "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/mailFolders/AAMk-inbox/messages/delta?$deltatoken=round1"
+}

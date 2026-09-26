@@ -1,0 +1,28 @@
+{
+ "responses": [
+  {"id": "2", "status": 200, "headers": {"Content-Type": "application/json"}, "body": {
+   "id": "AAMk-n-u1", "conversationId": "conv-u", "internetMessageId": "<u1@example.invalid>",
+   "subject": "Invoice 42",
+   "from": {"emailAddress": {"name": "Sender E", "address": "e@example.invalid"}},
+   "toRecipients": [{"emailAddress": {"name": "Me", "address": "me@example.invalid"}}],
+   "receivedDateTime": "2026-09-04T11:00:02Z", "sentDateTime": "2026-09-04T11:00:00Z",
+   "bodyPreview": "A scrubbed preview", "parentFolderId": "AAMk-archive",
+   "categories": [], "isRead": true, "flag": {"flagStatus": "notFlagged"}}},
+  {"id": "0", "status": 200, "headers": {"Content-Type": "application/json"}, "body": {
+   "id": "AAMk-n-d1", "conversationId": "conv-dup", "internetMessageId": "<dup@example.invalid>",
+   "subject": "Team update",
+   "from": {"emailAddress": {"name": "A List", "address": "list@example.invalid"}},
+   "toRecipients": [{"emailAddress": {"name": "Me", "address": "me@example.invalid"}}],
+   "receivedDateTime": "2026-09-04T10:00:05Z", "sentDateTime": "2026-09-04T10:00:00Z",
+   "bodyPreview": "A scrubbed preview", "parentFolderId": "AAMk-archive",
+   "categories": [], "isRead": true, "flag": {"flagStatus": "notFlagged"}}},
+  {"id": "1", "status": 200, "headers": {"Content-Type": "application/json"}, "body": {
+   "id": "AAMk-n-d2", "conversationId": "conv-dup", "internetMessageId": "<dup@example.invalid>",
+   "subject": "Team update",
+   "from": {"emailAddress": {"name": "A List", "address": "list@example.invalid"}},
+   "toRecipients": [{"emailAddress": {"name": "Me", "address": "me@example.invalid"}}],
+   "receivedDateTime": "2026-09-04T10:00:09Z", "sentDateTime": "2026-09-04T10:00:00Z",
+   "bodyPreview": "A scrubbed preview", "parentFolderId": "AAMk-archive",
+   "categories": [], "isRead": true, "flag": {"flagStatus": "notFlagged"}}}
+ ]
+}

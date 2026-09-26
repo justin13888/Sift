@@ -1,0 +1,20 @@
+{
+ "responses": [
+  {"id": "1", "status": 200, "headers": {"Content-Type": "application/json"}, "body": {
+   "id": "AAMk-m2", "conversationId": "conv-1", "internetMessageId": "<m2@example.invalid>",
+   "subject": "Re: Quarterly figures",
+   "from": {"emailAddress": {"name": "Sender B", "address": "b@example.invalid"}},
+   "toRecipients": [{"emailAddress": {"name": "Me", "address": "me@example.invalid"}}],
+   "receivedDateTime": "2026-09-01T09:00:01Z", "sentDateTime": "2026-09-01T09:00:00Z",
+   "bodyPreview": "A scrubbed preview", "parentFolderId": "AAMk-inbox",
+   "categories": ["Receipts"], "isRead": false, "flag": {"flagStatus": "flagged"}}},
+  {"id": "0", "status": 200, "headers": {"Content-Type": "application/json"}, "body": {
+   "id": "AAMk-m1", "conversationId": "conv-1", "internetMessageId": "<m1@example.invalid>",
+   "subject": "Quarterly figures",
+   "from": {"emailAddress": {"name": "Sender A", "address": "a@example.invalid"}},
+   "toRecipients": [{"emailAddress": {"name": "Me", "address": "me@example.invalid"}}],
+   "receivedDateTime": "2026-09-01T08:00:02Z", "sentDateTime": "2026-09-01T08:00:00Z",
+   "bodyPreview": "A scrubbed preview", "parentFolderId": "AAMk-inbox",
+   "categories": [], "isRead": true, "flag": {"flagStatus": "notFlagged"}}}
+ ]
+}

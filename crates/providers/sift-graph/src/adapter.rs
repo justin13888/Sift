@@ -266,6 +266,15 @@ impl<T: Transport> Graph<T> {
         outcomes: &mut [Option<MutationOutcome>],
     ) -> Result<Vec<Option<Vec<String>>>, GraphError> {
         let mut categories: Vec<Option<Vec<String>>> = vec![None; batch.len()];
+        // A name L-15 refuses is settled before anything is asked: reading a message's
+        // categories to learn that a tag will not be written is a request for nothing.
+        for (i, mutation) in batch.iter().enumerate() {
+            if let Operation::AddTag(name) = &mutation.operation
+                && !self.capabilities.accepts_tag_name(name)
+            {
+                outcomes[i] = Some(MutationOutcome::Refused);
+            }
+        }
         let wanted: Vec<usize> = batch
             .iter()
             .enumerate()

@@ -1,0 +1,8 @@
+{
+ "value": [
+  {"id": "AAMk-junk", "displayName": "Junk-E-Mail", "parentFolderId": "AAMk-root", "childFolderCount": 0},
+  {"id": "AAMk-drafts", "displayName": "Entwürfe", "parentFolderId": "AAMk-root", "childFolderCount": 0},
+  {"id": "AAMk-projects", "displayName": "Projects", "parentFolderId": "AAMk-root", "childFolderCount": 1},
+  {"id": "AAMk-user-archive", "displayName": "Archive", "parentFolderId": "AAMk-root", "childFolderCount": 0}
+ ]
+}

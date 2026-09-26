@@ -1,0 +1,8 @@
+{
+ "value": [
+  {"id": "AAMk-d1", "@removed": {"reason": "deleted"}},
+  {"id": "AAMk-d2", "@removed": {"reason": "deleted"}},
+  {"id": "AAMk-u1", "@removed": {"reason": "deleted"}}
+ ],
+ "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/mailFolders/AAMk-inbox/messages/delta?$deltatoken=round3"
+}
