@@ -211,6 +211,30 @@ parameters, and the interface MUST be narrow enough that a reviewer can confirm 
 Where a platform library cannot supply the chosen construction, the fallback is a vendored implementation
 of **that** construction — never a different one chosen because it was available.
 
+**How each platform supplies it.** The interface is one call — seal or open a single message under a
+stated key, nonce and additional data — and everything around it (the nonce derivation, the additional
+data, the header, the counter stored with each page) is shared code, identical on both platforms, so the
+platforms can only disagree inside that call.
+
+- **macOS: the platform's cipher.** The authenticated cipher is the platform's own framework. That
+  framework has no C interface, unlike the credential store, so it is reached through a bridge in the
+  platform's own language compiled by the platform's own toolchain — which D-61 already requires of
+  every macOS build — and the bridge is kept to that one call, so a reviewer can confirm by reading it
+  that it adds nothing to the construction.
+- **Linux: the vendored construction, for now.** The Linux platform library is not yet wired. Until it
+  is, Linux uses the vendored implementation of the same construction, which is the fallback this
+  decision already permits, not a different construction. Wiring the platform library waits for the
+  Linux shell, which is deferred; it changes no byte, because the fixture already decides what the
+  bytes are.
+- **The key-derivation function: vendored on both.** D-106's per-file derivation and D-43's keyed
+  addressing use a keyed hash that neither platform ships, so the fallback applies to it on both
+  platforms. The construction was chosen for D-23's reasons and is not to change to suit availability.
+
+Because each build carries exactly one cipher, the fixture proves that build's cipher on every run. On
+macOS the vendored construction is additionally kept in the tests — never in the binary — as a second
+implementation every platform seal is compared against across page sizes, additional data and forgeries.
+That is what makes R-16 a test failure on the platform where two implementations actually coexist.
+
 **What it costs:** two implementations of one interface, and a class of bug — the two platforms
 disagreeing — that a single vendored implementation would not have. That is precisely what the
 byte-for-byte fixture check in [verification](../build/verification.md) exists to catch, and it is a test
