@@ -87,6 +87,9 @@ final class BodyView: NSView {
     /// The document waiting for the rule list, if `show` arrived first. Only the latest is
     /// kept: an earlier one was superseded before it could be shown.
     private var pending: String?
+    /// Whether a document is being held for the rule list — for the probe, which checks that
+    /// a document shown before the list exists waits for it.
+    var holding: Bool { pending != nil }
 
     /// The P0 probe's recorder, when this view is being measured rather than read in.
     /// Always `nil` in the application: see [`BodyViewInstrument`].

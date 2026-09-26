@@ -223,17 +223,20 @@ private struct Probe {
         // one to find, which is the correlation NFR-25 closes.
         let instrument = BodyViewInstrument()
 
-        // Registered before the hardened view exists, so it is told the list is ready before
-        // that view is: what the recorder holds at that moment is what the view loaded while
-        // it had no rule list.
+        // Registered before the hardened view exists, so it is told the list is ready just
+        // before that view is: what it sees then is the view's state while it had no list.
         var compiled: Bool?
+        var stillHeld = false
         var loadedWhileHeld = 0
+        weak var early: BodyView?
         BodyViewIsolation.whenReady { list in
+            stillHeld = early?.holding == true
             loadedWhileHeld = instrument.events.count
             compiled = list != nil
         }
 
         let hardened = BodyView(frame: window.contentLayoutRect, instrument: instrument)
+        early = hardened
         window.contentView = hardened
 
         print("probe: \(samples.count) samples, WebKit \(webKitVersion())")
@@ -243,15 +246,15 @@ private struct Probe {
         let held = "<img src=\"\(Marker.sentinel)\" width=\"1\" height=\"1\">"
             + "<img src=\"http://probe.invalid/held\" width=\"1\" height=\"1\">"
         hardened.present(held)
-        let heldBeforeCompile = compiled == nil
+        let exercised = compiled == nil
         spin(for: 30) { compiled != nil }
         guard compiled == true else {
             print("probe: FAIL — the rule list never compiled, so the body view never renders")
             return 1
         }
         var failed = !holdsUntilIsolated(
-            instrument: instrument, html: held,
-            exercised: heldBeforeCompile, loadedWhileHeld: loadedWhileHeld)
+            hardened, instrument: instrument, html: held, exercised: exercised,
+            stillHeld: stillHeld, loadedWhileHeld: loadedWhileHeld)
 
         // NFR-25's separation, shown directly: storage written into one view's store is not
         // visible from another's.
@@ -377,14 +380,23 @@ private struct Probe {
     }
 
     /// Judge the document the hardened view was given before its rule list existed: it must
-    /// have been presented while the list was still compiling, have loaded nothing until the
-    /// list was ready, and then render with the list in force — the `http:` image it carries
-    /// is egress if it was loaded without one.
+    /// have been presented while the list was still compiling, still be held and have loaded
+    /// nothing when the list became ready, be released once it is installed, and then render
+    /// with the list in force — the `http:` image it carries is egress if it was not.
     func holdsUntilIsolated(
-        instrument: BodyViewInstrument, html: String, exercised: Bool, loadedWhileHeld: Int
+        _ view: BodyView, instrument: BodyViewInstrument, html: String, exercised: Bool,
+        stillHeld: Bool, loadedWhileHeld: Int
     ) -> Bool {
         guard exercised else {
             print("probe: FAIL — the rule list was ready before the first document, so the hold was never exercised")
+            return false
+        }
+        guard stillHeld else {
+            print("probe: FAIL — a document shown before the rule list was not held for it")
+            return false
+        }
+        guard !view.holding else {
+            print("probe: FAIL — the rule list was installed and the held document was never released")
             return false
         }
         guard loadedWhileHeld == 0 else {
