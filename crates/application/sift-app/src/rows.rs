@@ -51,22 +51,55 @@ pub struct MessageRow {
 /// # Errors
 /// The store could not be read.
 pub fn message_rows(account: &OpenAccount, limit: u32) -> Result<Vec<MessageRow>, String> {
+    read(
+        account,
+        &format!(
+            "{COLUMNS}
+             ORDER BY m.received_at_millis DESC, m.id DESC
+             LIMIT ?1"
+        ),
+        [i64::from(limit)],
+    )
+}
+
+/// One row, by identity, read exactly as the list reads it — FR-23's activation.
+///
+/// **Through the overlay like every other read.** A notification the user acts on after
+/// archiving the message it names finds nothing here, which is the truthful answer: the list
+/// no longer shows it either, and a reader opened over a row the user just put away would be
+/// the one surface that disagreed.
+///
+/// # Errors
+/// The store could not be read.
+pub fn message_row(account: &OpenAccount, id: LocalId) -> Result<Option<MessageRow>, String> {
+    Ok(read(
+        account,
+        &format!("{COLUMNS} WHERE m.id = ?1"),
+        [id.to_bytes().to_vec()],
+    )?
+    .pop())
+}
+
+/// What a row is made of — one projection, so the list and a single row cannot drift apart.
+const COLUMNS: &str = "SELECT m.id, m.received_at_millis, m.origination_millis, m.sender,
+        m.subject, m.snippet, m.flags, m.has_attachments, m.fallback_digest,
+        (SELECT COUNT(*) FROM message t WHERE t.thread_id = m.thread_id)
+     FROM message m";
+
+fn read<P: rusqlite::Params>(
+    account: &OpenAccount,
+    sql: &str,
+    params: P,
+) -> Result<Vec<MessageRow>, String> {
     let overlay: Overlay = account.queue.overlay();
     let mut stmt = account
         .store
         .store
-        .prepare(
-            "SELECT m.id, m.received_at_millis, m.origination_millis, m.sender, m.subject,
-                    m.snippet, m.flags, m.has_attachments, m.fallback_digest,
-                    (SELECT COUNT(*) FROM message t WHERE t.thread_id = m.thread_id)
-             FROM message m
-             ORDER BY m.received_at_millis DESC, m.id DESC
-             LIMIT ?1",
-        )
+        .prepare(sql)
         .map_err(|e| e.to_string())?;
 
     let raw = stmt
-        .query_map([i64::from(limit)], |r| {
+        .query_map(params, |r| {
             let key: Vec<u8> = r.get(0)?;
             let received: i64 = r.get(1)?;
             let origination: Option<i64> = r.get(2)?;
