@@ -90,7 +90,8 @@ fn subject_key(raw: &str) -> String {
 /// D-44's corroborating digest.
 ///
 /// Over the originator address, the origination date, the **normalized** subject and the
-/// reference chain — the four things `docs/mail/identity.md` names. See [`tuple`].
+/// reference chain — the four things D-44 in `docs/storage/data-model.md` names. See
+/// [`tuple`].
 ///
 /// A field that is absent contributes its absence rather than an empty string, because
 /// "no subject" and "a subject that is empty" are different messages and a digest that
