@@ -51,9 +51,10 @@ pub fn default_bindings() -> Vec<(&'static str, &'static str)> {
 /// announced by a screen reader.
 ///
 /// Three surfaces, and the third is the hard one: NFR-50's bridge has to cross the body
-/// view's process and sandbox, and R-14 says that has never been shown to happen under the
-/// five properties working against it. On Linux it additionally needs the accessibility bus
-/// reachable from inside the Flatpak sandbox.
+/// view's process and sandbox under the five properties working against it. R-14's P0 spike
+/// has shown that on macOS, where the engine carries the tree itself; **this shell is the half
+/// it has not shown**, because here it additionally needs the accessibility bus reachable from
+/// inside the Flatpak sandbox, and there is no WebKitGTK body view yet to read (#116).
 ///
 /// NFR-27 and NFR-50 read as one requirement and are not. NFR-50 — that isolation does not
 /// sever the tree — is gated in P1, because the sanitizer allowlist that decides whether

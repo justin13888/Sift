@@ -2,7 +2,7 @@
 
 The containment boundary around message rendering.
 
-**Owns:** D-3, D-28, D-50, D-54, D-90, D-116, N-1, NFR-20, NFR-21, NFR-25, NFR-46, NFR-50.
+**Owns:** D-3, D-28, D-50, D-54, D-90, D-116, D-117, N-1, NFR-20, NFR-21, NFR-25, NFR-46, NFR-50.
 
 ## D-3 — Bodies render in a separate, hardened document
 
@@ -292,6 +292,42 @@ cosmetic one.
 
 Verification belongs in the fidelity corpus gate rather than in manual spot checks — see
 [reference environment](../product/reference-environment.md).
+
+## D-117 — The accessibility tree crosses through the engine, with no bridge of Sift's own
+
+**Chosen:** the body view's accessibility tree reaches the reader's hierarchy only through the engine's own
+remote accessibility; Sift writes no bridge of its own.
+**Rejected:** a native mirror of the body's structure — Sift building its own accessibility elements for
+the body view in the host.
+
+**Why.** A mirror is a new interface into the body view, and N-1 would have to police it as it polices
+every other; adding no channel is the strongest posture that rule allows. It would also add nothing: the
+engine's tree already crosses under all five properties, as demonstrated below.
+
+**What it costs:** what an assistive client hears from the body is whatever the engine exposes, so a gap in
+the engine's remote accessibility is a gap Sift cannot fill from the host without reopening this decision.
+
+**The tree crosses, demonstrated on WKWebView — R-14's P0 spike.** The
+engine already carries the content process's accessibility tree into the host's hierarchy as a remote
+subtree, so the body's web area is a descendant of the reader's window and a screen reader walks into it as
+it walks into any other view. None of the five properties stands in the way: the tree is a separate
+channel from the network, the store and script, and the engine builds it in the content process whether
+script runs or not. The accessibility probe shows it with the view that ships — hardened, with a
+non-persistent store minted for it, script disabled engine-wide, the rule list and the CSP in force — read
+by **a second process** through the platform's assistive-technology interface, which is what a screen
+reader consumes. It finds the body's web area under the host's window and its content served by the
+engine's content process rather than the host, and in it the body text, a heading at its level, an image by
+its alternative text, a table with its rows and columns, and paragraphs in document order.
+
+The bridge is held to N-1 by the same probe. Reading is outward only, and the one inward act an assistive
+client has — pressing — reaches the same navigation policy as a click: while the client reads and presses,
+the body view attempts no load, admits no navigation and runs no script, and a pressed link is refused in
+place and handed up to the confirmation sheet. Three things the probe does not cover are stated rather than
+assumed: it reads the tree a screen reader reads and does not listen to one speak, so a spoken VoiceOver
+pass over the reader is part of release QA; it runs the host without the application sandbox, which the
+signed bundle has not yet adopted and under which the probe must be run again; and the Linux half — an
+accessibility-bus client reaching WebKitGTK's tree from outside the Flatpak sandbox — is deferred with the
+Linux shell, as the hardened-view spike's is.
 
 ## D-54 — One body view, and a thread is not one document
 

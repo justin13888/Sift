@@ -13,6 +13,15 @@ if let flag = CommandLine.arguments.firstIndex(of: "--probe-body-view") {
     exit(BodyViewProbe.run(arguments: Array(CommandLine.arguments[(flag + 1)...])))
 }
 
+// The P0 accessibility spike (NFR-50, R-14): a body view, and a second process reading its tree
+// as a screen reader would. The client half is this same binary, launched by the host half.
+if let flag = CommandLine.arguments.firstIndex(of: AccessibilityProbe.clientFlag) {
+    exit(AccessibilityProbe.client(arguments: Array(CommandLine.arguments[(flag + 1)...])))
+}
+if CommandLine.arguments.contains(AccessibilityProbe.flag) {
+    exit(AccessibilityProbe.run())
+}
+
 application.delegate = ApplicationShell.shared
 // The application is resident with or without a window, so it is an accessory rather than a
 // regular application until one opens. `LSUIElement` in the bundle states the same thing to

@@ -601,8 +601,8 @@ private final class ControlView: WKWebView, WKNavigationDelegate {
     }
 }
 
-/// Run the main loop until `done` holds or `seconds` pass.
-private func spin(for seconds: TimeInterval, until done: () -> Bool) {
+/// Run the main loop until `done` holds or `seconds` pass. Shared with [`AccessibilityProbe`].
+func spin(for seconds: TimeInterval, until done: () -> Bool) {
     let end = Date().addingTimeInterval(seconds)
     while Date() < end, !done() {
         RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
