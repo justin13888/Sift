@@ -299,15 +299,30 @@ impl Link {
 /// the answer that stays true after the user acts: allowing the sender would still fetch
 /// nothing, and a reason that invites a click which cannot help is the complaint FR-8's
 /// button was built to answer.
+///
+/// **Every sentence is in the reader's terms** (failure-model: a notice names its cause in
+/// the user's terms). The layer verdicts, the heuristic evidence, and the limits-register
+/// identifier belong to FR-33's debug view, not here: a reader cannot act on
+/// "authority and backstop agreed: Block", and a `Debug` dump of findings is not a cause.
 fn describe(reason: &Reason, authority_loaded: bool) -> String {
     match reason {
         Reason::Shed => SHED.to_owned(),
         Reason::NotAllowedBySender if !authority_loaded => SHED.to_owned(),
         Reason::NotAllowedBySender => "remote content is blocked until you allow it".to_owned(),
-        Reason::Rule(detail) => format!("a filter rule ({detail})"),
-        Reason::Heuristic(findings) => format!("a tracking heuristic ({findings:?})"),
+        Reason::Rule(_) => "a filter list identifies this address as a tracker".to_owned(),
+        Reason::Heuristic(findings) => {
+            let signs: Vec<&str> = findings.iter().map(|f| f.reason.name()).collect();
+            if signs.is_empty() {
+                "it looks like a tracker".to_owned()
+            } else {
+                format!("it looks like a tracker: {}", signs.join(", "))
+            }
+        }
         Reason::NetworkPolicy => "the current network policy allows no fetches".to_owned(),
-        Reason::Bounds(bound) => format!("larger than {bound} allows"),
+        Reason::Bounds(bound) if bound.starts_with("L-11") => {
+            "the image's dimensions are larger than Sift will decode".to_owned()
+        }
+        Reason::Bounds(_) => "the image is larger than Sift will load".to_owned(),
     }
 }
 
@@ -334,4 +349,72 @@ fn unsubscribe_among(links: &[Link]) -> Option<Link> {
                 || (l.needs_a_mail_handler && target.contains("unsub"))
         })
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sift_block::heuristic::{Finding, Reason as Sign};
+
+    /// No reader-facing reason may leak a layer verdict, a limits identifier, or `Debug`
+    /// output — the failure model's "names its cause in the user's terms".
+    fn in_the_readers_terms(text: &str) {
+        for leak in ["authority", "backstop", "L-1", "{", "(", "Finding", "Block"] {
+            assert!(!text.contains(leak), "{leak:?} leaked into {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_rule_refusal_names_a_filter_list_not_the_layer_verdict() {
+        let text = describe(
+            &Reason::Rule("authority and backstop agreed: Block".to_owned()),
+            true,
+        );
+        assert_eq!(text, "a filter list identifies this address as a tracker");
+        in_the_readers_terms(&text);
+    }
+
+    #[test]
+    fn a_heuristic_refusal_names_each_sign_in_words() {
+        let findings = vec![
+            Finding {
+                reason: Sign::PixelDimensions,
+                evidence: "1x1".to_owned(),
+            },
+            Finding {
+                reason: Sign::HiddenByStyle,
+                evidence: "display:none".to_owned(),
+            },
+        ];
+        let text = describe(&Reason::Heuristic(findings), true);
+        assert_eq!(
+            text,
+            "it looks like a tracker: tracking-pixel dimensions, hidden by style"
+        );
+        in_the_readers_terms(&text);
+        assert_eq!(
+            describe(&Reason::Heuristic(Vec::new()), true),
+            "it looks like a tracker"
+        );
+    }
+
+    #[test]
+    fn a_network_policy_refusal_says_so() {
+        let text = describe(&Reason::NetworkPolicy, true);
+        assert_eq!(text, "the current network policy allows no fetches");
+        in_the_readers_terms(&text);
+    }
+
+    #[test]
+    fn a_bound_refusal_names_the_size_not_the_register_entry() {
+        let pixels = describe(&Reason::Bounds("L-11 decoded pixels"), true);
+        assert_eq!(
+            pixels,
+            "the image's dimensions are larger than Sift will decode"
+        );
+        in_the_readers_terms(&pixels);
+        let bytes = describe(&Reason::Bounds("L-10 image bytes"), true);
+        assert_eq!(bytes, "the image is larger than Sift will load");
+        in_the_readers_terms(&bytes);
+    }
 }
