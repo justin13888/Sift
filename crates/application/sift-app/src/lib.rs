@@ -1290,41 +1290,46 @@ impl App {
     ///
     /// A failure is recorded rather than propagated: one account that cannot reach its
     /// provider must not stop the fire that four other accounts are sharing.
+    ///
+    /// This is [`App::begin_fire`] followed by [`App::perform`] for each item, in one call.
+    /// A caller that holds the application behind a lock — the boundary does — calls the two
+    /// halves itself, so that the lock is released between accounts rather than held across
+    /// every provider round trip the fire makes.
     pub fn tick(&mut self) -> TickReport {
+        let mut report = TickReport::default();
+        for due in self.begin_fire() {
+            self.perform(&due, &mut report);
+        }
+        report
+    }
+
+    /// The cheap half of a fire: take what is due off the wheel, re-tick the governor, and
+    /// re-arm. **No provider is reached from here**, so it is safe under a lock a main loop
+    /// also takes.
+    ///
+    /// Re-armed before the work rather than after it, which changes nothing observable: the
+    /// next aligned deadline is computed from the fire, not from when the work finished, and
+    /// the work does not change which accounts are armed.
+    pub fn begin_fire(&mut self) -> Vec<Due> {
         use sift_scheduler::wheel::Work;
 
-        let mut report = TickReport::default();
-        let due = self.wheel.fire_due(self.clock.monotonic());
-        for entry in due {
-            let Some(id) = entry.account else { continue };
-            let Some(name) = self.name_of(id) else {
-                continue;
-            };
-            match entry.kind {
-                // A paused account is armed like any other — disarming it would mean
-                // resuming had to re-arm from somewhere — but it is not *reported* as having
-                // polled. `sync` returns an empty report for it, so recording the name here
-                // would make FR-34's panel show a paused account polling every minute.
-                Work::Sync if self.is_paused(&name) => report.paused.push(name),
-                Work::Sync => match self.sync(&name, 1) {
-                    Ok(outcome) => {
-                        report.inserted += outcome.inserted;
-                        report.synced.push(name);
-                    }
-                    Err(why) => report.failures.push((name, why)),
-                },
-                Work::FlushMutations if self.is_paused(&name) => {}
-                Work::FlushMutations => match self.flush(&name) {
-                    Ok(f) if f.report.issued > 0 => report.flushed.push(name),
-                    Ok(_) => {}
-                    Err(why) => report.failures.push((name, why)),
-                },
-                // The remaining kinds are armed by the paths that own them — a retry by the
-                // backoff curve, a watch renewal by the provider that holds the watch. Firing
-                // them from here would be this function deciding policy it does not own.
-                _ => {}
-            }
-        }
+        let due: Vec<Due> = self
+            .wheel
+            .fire_due(self.clock.monotonic())
+            .into_iter()
+            .filter_map(|entry| {
+                let account = entry.account?;
+                match entry.kind {
+                    Work::Sync => Some(Due::Sync(account)),
+                    Work::FlushMutations => Some(Due::Flush(account)),
+                    // The remaining kinds are armed by the paths that own them — a retry by
+                    // the backoff curve, a watch renewal by the provider that holds the
+                    // watch. Firing them from here would be this function deciding policy it
+                    // does not own.
+                    _ => None,
+                }
+            })
+            .collect();
         // **The wheel is the governor's clock.** The platform's pressure source is
         // edge-triggered, so once the machine is calm nothing signals again — and the
         // hysteresis releases one tier per call. Re-ticking here against the last level the
@@ -1342,7 +1347,39 @@ impl App {
         }
 
         self.arm_periodic();
-        report
+        due
+    }
+
+    /// The expensive half of a fire: one account's sync or flush, which reaches the provider.
+    ///
+    /// The account is resolved here rather than when the fire began, because the two can be
+    /// apart: an account removed in between has nothing left to do, and is skipped rather than
+    /// reported as a failure it did not have.
+    pub fn perform(&mut self, due: &Due, report: &mut TickReport) {
+        let (Due::Sync(id) | Due::Flush(id)) = *due;
+        let Some(name) = self.name_of(id) else {
+            return;
+        };
+        match due {
+            // A paused account is armed like any other — disarming it would mean resuming had
+            // to re-arm from somewhere — but it is not *reported* as having polled. `sync`
+            // returns an empty report for it, so recording the name here would make FR-34's
+            // panel show a paused account polling every minute.
+            Due::Sync(_) if self.is_paused(&name) => report.paused.push(name),
+            Due::Sync(_) => match self.sync(&name, 1) {
+                Ok(outcome) => {
+                    report.inserted += outcome.inserted;
+                    report.synced.push(name);
+                }
+                Err(why) => report.failures.push((name, why)),
+            },
+            Due::Flush(_) if self.is_paused(&name) => {}
+            Due::Flush(_) => match self.flush(&name) {
+                Ok(f) if f.report.issued > 0 => report.flushed.push(name),
+                Ok(_) => {}
+                Err(why) => report.failures.push((name, why)),
+            },
+        }
     }
 
     /// The label an identity is open under, if it is open at all.
@@ -1638,6 +1675,17 @@ fn be_u128(bytes: &[u8]) -> u128 {
     let n = bytes.len().min(16);
     out[16 - n..].copy_from_slice(&bytes[..n]);
     u128::from_be_bytes(out)
+}
+
+/// One account's work that a wheel fire found due — [`App::begin_fire`]'s output.
+///
+/// By identity rather than by label, because the work may run after the account it names was
+/// renamed or removed, and an identity is the one thing that cannot come to mean a different
+/// account in the meantime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Due {
+    Sync(AccountId),
+    Flush(AccountId),
 }
 
 /// What one wheel fire did.
