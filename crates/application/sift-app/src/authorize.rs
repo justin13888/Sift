@@ -21,7 +21,7 @@ use sift_credentials::oauth::{AuthError, Broker, Registration};
 use sift_credentials::store::CredentialStore;
 use sift_foundation::identity::AccountId;
 use sift_provider::erased::ErasedAdapter;
-use sift_registry::ProviderKind;
+pub use sift_registry::ProviderKind;
 
 /// The adapter an account is reached through.
 ///
@@ -30,10 +30,29 @@ use sift_registry::ProviderKind;
 /// gone and every command plans against what the account declares.
 pub type Live = Box<dyn ErasedAdapter>;
 
-/// The kind the harness adds. A register of one, until the other three adapters are live.
+/// Resolve a kind a shell or the container named.
+///
+/// **The flow is keyed by the kind it was begun for, never by a position in the register.**
+/// Until there were two kinds every step here resolved "the first one", and so did the
+/// refresh that reconnects an account — which would have sent a second provider's refresh
+/// token to the first provider's token endpoint.
 #[must_use]
-pub fn default_kind() -> ProviderKind {
-    sift_registry::KINDS[0].kind
+pub fn kind(id: &str) -> Option<ProviderKind> {
+    sift_registry::by_id(id).map(|d| d.kind)
+}
+
+/// Every kind a shell may offer in the add-account choice, given the kinds a client is
+/// configured for.
+///
+/// A kind with no client configured is **absent**, not offered and broken — the rule the
+/// capability model applies to every other affordance. So is a kind that does not
+/// authorize: this is the OAuth flow's list, and a password kind has a different flow.
+pub fn offered<'a>(
+    configured: impl Fn(&str) -> bool + 'a,
+) -> impl Iterator<Item = &'static sift_registry::Descriptor> + 'a {
+    sift_registry::KINDS.iter().filter(move |d| {
+        d.authentication == sift_registry::Authentication::OAuth && configured(d.kind.as_str())
+    })
 }
 
 /// Where the callback comes back to — D-36's registered URI scheme, as the client requires it.
@@ -72,21 +91,27 @@ pub fn registration(kind: ProviderKind, client_id: &str) -> Result<Registration,
 /// it afterwards means they have already been sent to a browser and returned to nothing.
 pub fn begin<S: CredentialStore>(
     broker: &mut Broker<S>,
+    kind: ProviderKind,
     client_id: &str,
     scheme_is_registered: bool,
     now_millis: u64,
 ) -> Result<String, AuthError> {
-    let registration = registration(default_kind(), client_id)
+    let registration = registration(kind, client_id)
         .map_err(|why| AuthError::Store(sift_credentials::store::StoreError::Unavailable(why)))?;
     broker.begin(&registration, scheme_is_registered, now_millis)
 }
 
 /// Complete an authorization from the address the system handed back, and build the adapter.
 ///
+/// `kind` and `client_id` are the ones the flow was **begun** with, which the caller held
+/// from [`begin`] — the code in the callback is redeemable only at the token endpoint of the
+/// provider that issued it, by the client it was issued to.
+///
 /// # Errors
 /// See [`AuthError`].
 pub fn complete<S: CredentialStore>(
     broker: &mut Broker<S>,
+    kind: ProviderKind,
     client_id: &str,
     account: AccountId,
     callback: &str,
@@ -94,7 +119,6 @@ pub fn complete<S: CredentialStore>(
 ) -> Result<Live, AuthError> {
     let unavailable =
         |why: String| AuthError::Store(sift_credentials::store::StoreError::Unavailable(why));
-    let kind = default_kind();
     let descriptor = sift_registry::by_id(kind.as_str())
         .ok_or_else(|| unavailable(format!("no such provider: {kind}")))?;
     let registration = registration(kind, client_id).map_err(unavailable)?;
@@ -144,8 +168,47 @@ mod tests {
     }
 
     #[test]
-    fn the_registration_asks_for_nothing_that_can_send() {
-        let r = registration(default_kind(), "c").expect("the default kind authorizes");
-        assert!(!r.profile.authorizes_sending());
+    fn no_registration_asks_for_anything_that_can_send() {
+        for d in offered(|_| true) {
+            let r = registration(d.kind, "c").expect("an offered kind authorizes");
+            assert!(!r.profile.authorizes_sending(), "{}", d.kind);
+        }
+    }
+
+    #[test]
+    fn a_kind_with_no_client_is_not_offered() {
+        let all: Vec<_> = offered(|_| true).map(|d| d.kind).collect();
+        assert!(all.len() >= 2, "{all:?}");
+        let first = all[0];
+        let only: Vec<_> = offered(|k| k == first.as_str()).map(|d| d.kind).collect();
+        assert_eq!(only, vec![first]);
+        assert_eq!(offered(|_| false).count(), 0);
+    }
+
+    #[test]
+    fn each_kind_registers_against_its_own_token_endpoint() {
+        // The refresh goes where the registration says. Two kinds resolving to one endpoint
+        // is a refresh token handed to the wrong provider.
+        let hosts: Vec<String> = offered(|_| true)
+            .map(|d| {
+                registration(d.kind, "c")
+                    .expect("registers")
+                    .profile
+                    .token
+                    .url()
+            })
+            .collect();
+        let mut distinct = hosts.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(hosts.len(), distinct.len(), "{hosts:?}");
+    }
+
+    #[test]
+    fn an_unknown_kind_does_not_resolve() {
+        assert!(kind("a-provider-from-the-future").is_none());
+        for d in offered(|_| true) {
+            assert_eq!(kind(d.kind.as_str()), Some(d.kind));
+        }
     }
 }

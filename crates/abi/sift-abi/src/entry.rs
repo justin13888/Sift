@@ -144,21 +144,20 @@ pub unsafe extern "C" fn sift_initialize(
             // added and a first-run screen where a mailbox should be. Which is how it was
             // found.
             // D-36, D-71 and D-109 in one place, and deliberately *here* rather than in the
-            // shell that reported the facts. The shell says which client it was configured
-            // with and which schemes its bundle claims; which scheme this client requires is
+            // shell that reported the facts. The shell says which clients it was configured
+            // with and which schemes its bundle claims; which scheme each client requires is
             // the derivation in `sift-foundation`, and whether it is among them is arithmetic.
             // A shell has nothing left to assert, which is what stops the previous failure —
             // a hardcoded `true` beside a bundle that registered no such scheme — recurring.
-            let client_id = init.oauth_client_id.as_str().unwrap_or("");
-            app.oauth_client_id = client_id.to_owned();
-            let required = sift_foundation::identifiers::callback_scheme_for(client_id);
-            app.scheme_is_registered = !client_id.is_empty()
-                && init
-                    .registered_schemes
-                    .as_str()
-                    .unwrap_or("")
-                    .lines()
-                    .any(|claimed| claimed.trim() == required);
+            app.configure_oauth_clients(init.oauth_clients.as_str().unwrap_or(""));
+            app.registered_schemes = init
+                .registered_schemes
+                .as_str()
+                .unwrap_or("")
+                .lines()
+                .map(|claimed| claimed.trim().to_owned())
+                .filter(|claimed| !claimed.is_empty())
+                .collect();
             if std::env::var_os("SIFT_EPHEMERAL").is_none() {
                 app.open_container(std::path::Path::new(root))
                     .map_err(|_| ())?;
@@ -207,6 +206,7 @@ pub unsafe extern "C" fn sift_initialize(
                 setting_values: std::sync::Mutex::new(Vec::new()),
                 account_rows: std::sync::Mutex::new(Vec::new()),
                 account_names: std::sync::Mutex::new(Vec::new()),
+                provider_rows: std::sync::Mutex::new(Vec::new()),
                 account_setting_value: std::sync::Mutex::new(String::new()),
                 conditions: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 search: std::sync::Mutex::new(crate::layer::SearchResult::default()),
@@ -708,28 +708,36 @@ pub unsafe extern "C" fn sift_undo_last(app: *mut SiftApp, out: *mut SiftGesture
 /// to stop two shells growing two answers to a question like that, so the derivation stays in
 /// `sift-foundation` and this is how a shell reaches it.
 ///
-/// It is derived from the client this installation was configured with, which the layer was
-/// given at initialization — so a shell that asks this and a flow that declares a redirect
-/// cannot answer differently.
+/// It is derived from the client this installation was configured with **for `kind`**, which
+/// the layer was given at initialization — so a shell that asks this and a flow that declares
+/// a redirect cannot answer differently. Two kinds can require two different schemes.
 ///
 /// A shell needs it to tell the platform which scheme a callback will arrive on. It is empty
-/// where no client is configured, and a shell must not begin an authorization in that case.
+/// where no client is configured for the kind, and a shell must not begin an authorization in
+/// that case.
 ///
 /// The string lives in the layer until the next call that asks for one.
 ///
 /// # Safety
-/// `app` and `out` must be valid.
+/// `app` and `out` must be valid; `kind` must point to `kind_len` bytes of UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sift_callback_scheme(
     app: *mut SiftApp,
+    kind: *const u8,
+    kind_len: usize,
     out: *mut SiftStr<'static>,
 ) -> SiftStatus {
     unsafe {
         guard_out(out, || {
+            let kind = borrowed(kind, kind_len)?;
             let layer = layer(app).ok_or(())?;
             let client_id = {
                 let session = layer.session.lock().map_err(|_| ())?;
-                session.app().oauth_client_id.clone()
+                session
+                    .app()
+                    .oauth_client(kind)
+                    .map(str::to_owned)
+                    .unwrap_or_default()
             };
             let mut flows = layer.flows.lock().map_err(|_| ())?;
             flows.scheme = if client_id.is_empty() {
@@ -738,6 +746,64 @@ pub unsafe extern "C" fn sift_callback_scheme(
                 sift_foundation::identifiers::callback_scheme_for(&client_id)
             };
             Ok(SiftStr::new(extend(&flows.scheme)))
+        })
+    }
+}
+
+/// One choice in the add-account surface.
+///
+/// **A shell renders it and hands the kind back; it never reads either.** `kind` is the
+/// register's opaque string and `display_key` is a state identifier the shell translates —
+/// D-56 and D-68 keep Sift's own prose, a provider's display name included, out of every layer
+/// below the shell. So no shell names a provider in logic: it looks up a label by key and
+/// passes the kind to [`sift_begin_authorization`].
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SiftProvider<'a> {
+    pub kind: SiftStr<'a>,
+    pub display_key: SiftStr<'a>,
+    /// D-71 — whether this bundle claims the scheme this kind's client returns on. A choice
+    /// that cannot receive its callback is still listed, so the shell can say *why* it cannot
+    /// begin; beginning it is refused either way.
+    pub scheme_registered: u8,
+}
+
+/// Every provider this installation can add an account of, in the register's order.
+///
+/// A kind with no client configured is **absent**, not offered and broken — the rule the
+/// capability model applies to every other affordance. An empty list is a build with no
+/// client at all, which runs against the recorded corpus.
+///
+/// The rows are borrowed until the next call; the text they point at is the register's and
+/// lives for the process.
+///
+/// # Safety
+/// `app` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_providers(
+    app: *mut SiftApp,
+    out: *mut SiftRows<'static, SiftProvider<'static>>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out, || {
+            let layer = layer(app).ok_or(())?;
+            let rows: Vec<SiftProvider<'static>> = {
+                let session = layer.session.lock().map_err(|_| ())?;
+                let app = session.app();
+                sift_app::authorize::offered(|kind| app.oauth_client(kind).is_some())
+                    .map(|d| SiftProvider {
+                        kind: SiftStr::new(d.kind.as_str()),
+                        display_key: SiftStr::new(d.display_key),
+                        scheme_registered: u8::from(
+                            app.oauth_client(d.kind.as_str())
+                                .is_some_and(|client| app.scheme_is_registered(client)),
+                        ),
+                    })
+                    .collect()
+            };
+            let mut table = layer.provider_rows.lock().map_err(|_| ())?;
+            *table = rows;
+            Ok(SiftRows::new(extend_rows(&table)))
         })
     }
 }
@@ -752,30 +818,33 @@ pub unsafe extern "C" fn sift_callback_scheme(
 /// verifier behind it is: PKCE binds the exchange to the process that started it, and a shell
 /// holding the state would be a shell that could be asked to complete a flow it did not begin.
 ///
-/// The client is the one this installation was configured with, stated at initialization. It
-/// is not a parameter because it was one: a shell repeating it at every call is a shell that
-/// can disagree with the bundle it is running out of.
+/// `kind` is one a [`sift_providers`] row handed out. The client is the one this installation
+/// was configured with for it, stated at initialization. It is not a parameter because it
+/// was one: a shell repeating it at every call is a shell that can disagree with the bundle it
+/// is running out of. A kind this build does not have, or has no client for, is refused.
 ///
 /// # Safety
-/// `app` and `out` must be valid.
+/// `app` and `out` must be valid; `kind` must point to `kind_len` bytes of UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sift_begin_authorization(
     app: *mut SiftApp,
+    kind: *const u8,
+    kind_len: usize,
     out: *mut SiftStr<'static>,
 ) -> SiftStatus {
     unsafe {
         guard_out(out, || {
+            let kind = borrowed(kind, kind_len)?;
+            let kind = sift_app::authorize::kind(kind).ok_or(())?;
             let layer = layer(app).ok_or(())?;
             let (client_id, url) = {
                 let mut session = layer.session.lock().map_err(|_| ())?;
                 let app = session.app_mut();
-                let client_id = app.oauth_client_id.clone();
-                if client_id.is_empty() {
-                    return Err(());
-                }
-                let registered = app.scheme_is_registered;
+                let client_id = app.oauth_client(kind.as_str()).ok_or(())?.to_owned();
+                let registered = app.scheme_is_registered(&client_id);
                 let url = sift_app::authorize::begin(
                     &mut app.broker,
+                    kind,
                     &client_id,
                     registered,
                     now_millis(),
@@ -784,6 +853,7 @@ pub unsafe extern "C" fn sift_begin_authorization(
                 (client_id, url)
             };
             let mut flows = layer.flows.lock().map_err(|_| ())?;
+            flows.kind = Some(kind);
             flows.client_id = client_id;
             flows.url = url;
             Ok(SiftStr::new(extend(&flows.url)))
@@ -814,12 +884,16 @@ pub unsafe extern "C" fn sift_complete_authorization(
             let callback = borrowed(callback, callback_len)?;
             let display_name = borrowed(display_name, display_name_len)?;
             let layer = layer(app).ok_or(())?;
-            let client_id = {
+            // The kind and client the flow was **begun** with. The broker matches the callback
+            // to its flow by state; these say which provider's token endpoint that flow's code
+            // is redeemed at, and which kind the account is recorded as.
+            let (kind, client_id) = {
                 let flows = layer.flows.lock().map_err(|_| ())?;
+                let kind = flows.kind.ok_or(())?;
                 if flows.client_id.is_empty() {
                     return Err(());
                 }
-                flows.client_id.clone()
+                (kind, flows.client_id.clone())
             };
 
             // **Scoped, because `rearm_accounts` takes this same lock.** `std::sync::Mutex`
@@ -832,6 +906,7 @@ pub unsafe extern "C" fn sift_complete_authorization(
                 let identity = app_ref.reserve_identity();
                 let adapter = sift_app::authorize::complete(
                     &mut app_ref.broker,
+                    kind,
                     &client_id,
                     identity,
                     callback,
@@ -839,13 +914,14 @@ pub unsafe extern "C" fn sift_complete_authorization(
                 )
                 .map_err(|_| ())?;
                 app_ref
-                    .add_provider_account(display_name, adapter)
+                    .add_provider_account(display_name, kind, adapter)
                     .map_err(|_| ())?
             };
             // The flow is spent. A verifier that outlived its exchange would be one a second
             // callback could be replayed against.
             {
                 let mut flows = layer.flows.lock().map_err(|_| ())?;
+                flows.kind = None;
                 flows.client_id.clear();
                 flows.url.clear();
             }
@@ -2903,7 +2979,7 @@ mod tests {
             schedule,
             schedule_context: core::ptr::null_mut(),
             arm_timer: never_fires,
-            oauth_client_id: SiftStr::new(""),
+            oauth_clients: SiftStr::new(""),
             registered_schemes: SiftStr::new(""),
         };
         let status = unsafe { sift_initialize(callbacks(), init, &raw mut app) };
@@ -2933,17 +3009,28 @@ mod tests {
         }
     }
 
-    /// A layer configured the way a bundle configures one: a client, and the schemes that
-    /// bundle claims.
-    fn start_configured(client: &'static str, schemes: &'static str) -> *mut SiftApp {
+    /// Every kind the register offers, as the opaque strings a shell is handed. Read from the
+    /// register rather than spelled, because D-12 keeps the names out of this layer — its
+    /// tests included.
+    fn kinds() -> Vec<&'static str> {
+        sift_app::authorize::offered(|_| true)
+            .map(|d| d.kind.as_str())
+            .collect()
+    }
+
+    /// A layer configured the way a bundle configures one: its clients, one `kind=client` per
+    /// line, and the schemes that bundle claims.
+    fn start_configured(clients: &str, schemes: &str) -> *mut SiftApp {
         ephemeral();
+        let clients: &'static str = Box::leak(clients.to_owned().into_boxed_str());
+        let schemes: &'static str = Box::leak(schemes.to_owned().into_boxed_str());
         let mut app: *mut SiftApp = core::ptr::null_mut();
         let init = SiftInit {
             container_root: SiftStr::new(scratch_str()),
             schedule: drop_it,
             schedule_context: core::ptr::null_mut(),
             arm_timer: never_fires,
-            oauth_client_id: SiftStr::new(client),
+            oauth_clients: SiftStr::new(clients),
             registered_schemes: SiftStr::new(schemes),
         };
         let status = unsafe { sift_initialize(callbacks(), init, &raw mut app) };
@@ -2951,10 +3038,10 @@ mod tests {
         app
     }
 
-    fn scheme_of(app: *mut SiftApp) -> String {
+    fn scheme_of(app: *mut SiftApp, kind: &str) -> String {
         let mut out = SiftStr::new("");
         assert_eq!(
-            unsafe { sift_callback_scheme(app, &raw mut out) },
+            unsafe { sift_callback_scheme(app, kind.as_ptr(), kind.len(), &raw mut out) },
             SiftStatus::Ok
         );
         // SAFETY: the layer holds the string until the next call that asks for one, and this
@@ -2964,18 +3051,52 @@ mod tests {
             .to_owned()
     }
 
+    fn begin(app: *mut SiftApp, kind: &str) -> Result<String, SiftStatus> {
+        let mut url = SiftStr::new("");
+        let status =
+            unsafe { sift_begin_authorization(app, kind.as_ptr(), kind.len(), &raw mut url) };
+        if status != SiftStatus::Ok {
+            return Err(status);
+        }
+        // SAFETY: the layer holds the URL until the flow ends or another begins.
+        Ok(unsafe { url.as_str() }
+            .expect("the URL is UTF-8")
+            .to_owned())
+    }
+
+    /// The add-account choices, as `(kind, display_key, scheme_registered)`.
+    fn providers(app: *mut SiftApp) -> Vec<(String, String, bool)> {
+        let mut out = SiftRows::new(&[]);
+        assert_eq!(unsafe { sift_providers(app, &raw mut out) }, SiftStatus::Ok);
+        // SAFETY: the rows are held by the layer until the next call.
+        unsafe { out.as_slice() }
+            .iter()
+            .map(|row| {
+                (
+                    unsafe { row.kind.as_str() }.expect("utf-8").to_owned(),
+                    unsafe { row.display_key.as_str() }
+                        .expect("utf-8")
+                        .to_owned(),
+                    row.scheme_registered != 0,
+                )
+            })
+            .collect()
+    }
+
+    const DERIVED_CLIENT: &str = "123456-abcdef.apps.googleusercontent.com";
+    const DERIVED_SCHEME: &str = "com.googleusercontent.apps.123456-abcdef";
+    const OWN_CLIENT: &str = "a-client-that-names-its-own-redirect";
+
     #[test]
     fn the_callback_scheme_a_shell_is_given_is_the_one_the_flow_declares() {
         // D-17: one derivation. A shell that computed this itself would be a second answer to
         // the question of which scheme a provider accepts, and the two would drift the first
         // time a provider changed its mind — silently, because the symptom is a browser page
         // the user reaches *after* granting consent.
-        for client in [
-            "123456-abcdef.apps.googleusercontent.com",
-            "a-client-that-names-its-own-redirect",
-        ] {
-            let app = start_configured(client, "");
-            let scheme = scheme_of(app);
+        let kind = kinds()[0];
+        for client in [DERIVED_CLIENT, OWN_CLIENT] {
+            let app = start_configured(&format!("{kind}={client}"), "");
+            let scheme = scheme_of(app, kind);
             assert_eq!(
                 scheme,
                 sift_foundation::identifiers::callback_scheme_for(client)
@@ -2995,12 +3116,11 @@ mod tests {
         // **This is the bug.** The shell used to pass a hardcoded `true` here, so a bundle
         // shipped without the derived scheme still opened a browser, and the user granted
         // consent and came back to a page saying no application would open the address.
-        let client = "123456-abcdef.apps.googleusercontent.com";
-        let app = start_configured(client, "net.justinchung.sift");
-        let mut url = SiftStr::new("");
+        let kind = kinds()[0];
+        let app = start_configured(&format!("{kind}={DERIVED_CLIENT}"), "net.justinchung.sift");
         assert_eq!(
-            unsafe { sift_begin_authorization(app, &raw mut url) },
-            SiftStatus::Failed,
+            begin(app, kind),
+            Err(SiftStatus::Failed),
             "an authorization began against a scheme the bundle does not claim"
         );
         assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
@@ -3010,18 +3130,12 @@ mod tests {
     fn the_same_bundle_claiming_the_derived_scheme_may_begin_one() {
         // The other half, so the refusal above is the check working rather than the flow
         // being broken for some unrelated reason.
-        let client = "123456-abcdef.apps.googleusercontent.com";
+        let kind = kinds()[0];
         let app = start_configured(
-            client,
-            "net.justinchung.sift\ncom.googleusercontent.apps.123456-abcdef",
+            &format!("{kind}={DERIVED_CLIENT}"),
+            &format!("net.justinchung.sift\n{DERIVED_SCHEME}"),
         );
-        let mut url = SiftStr::new("");
-        assert_eq!(
-            unsafe { sift_begin_authorization(app, &raw mut url) },
-            SiftStatus::Ok
-        );
-        // SAFETY: the layer holds the URL until the flow ends or another begins.
-        let url = unsafe { url.as_str() }.expect("the URL is UTF-8");
+        let url = begin(app, kind).expect("it begins");
         assert!(
             url.contains("code_challenge") && !url.contains("client_secret"),
             "{url}"
@@ -3035,11 +3149,95 @@ mod tests {
         // authorization with an empty client identifier would produce an authorization URL a
         // provider rejects, which is a worse way to say the same thing.
         let app = start_configured("", "net.justinchung.sift");
-        assert_eq!(scheme_of(app), "");
-        let mut url = SiftStr::new("");
+        assert!(
+            providers(app).is_empty(),
+            "a kind with no client was offered"
+        );
+        for kind in kinds() {
+            assert_eq!(scheme_of(app, kind), "");
+            assert_eq!(begin(app, kind), Err(SiftStatus::Failed));
+        }
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    #[test]
+    fn two_kinds_with_two_clients_resolve_independently() {
+        // #57's acceptance, at the boundary: each kind begins against its own client, its own
+        // authorization endpoint and its own callback scheme, and neither borrows the other's.
+        let all = kinds();
+        assert!(all.len() >= 2, "this needs two kinds: {all:?}");
+        let (a, b) = (all[0], all[1]);
+        let app = start_configured(
+            &format!("{a}={DERIVED_CLIENT}\n{b}={OWN_CLIENT}\nnot-a-kind=ignored"),
+            &format!("net.justinchung.sift\n{DERIVED_SCHEME}"),
+        );
+
+        let offered = providers(app);
+        let offered_kinds: Vec<&str> = offered.iter().map(|(k, _, _)| k.as_str()).collect();
         assert_eq!(
-            unsafe { sift_begin_authorization(app, &raw mut url) },
-            SiftStatus::Failed
+            offered_kinds,
+            vec![a, b],
+            "the register's order, and nothing else"
+        );
+        assert!(offered.iter().all(|(_, _, registered)| *registered));
+        assert_ne!(offered[0].1, offered[1].1, "one display key per kind");
+
+        assert_eq!(scheme_of(app, a), DERIVED_SCHEME);
+        assert_eq!(scheme_of(app, b), "net.justinchung.sift");
+
+        let url_a = begin(app, a).expect("the first kind begins");
+        let url_b = begin(app, b).expect("the second kind begins");
+        let host = |url: &str| url.split('/').nth(2).unwrap_or_default().to_owned();
+        assert_ne!(host(&url_a), host(&url_b), "{url_a}\n{url_b}");
+        assert!(
+            url_a.contains(&format!("client_id={DERIVED_CLIENT}")),
+            "{url_a}"
+        );
+        assert!(
+            url_b.contains(&format!("client_id={OWN_CLIENT}")),
+            "{url_b}"
+        );
+        assert!(!url_b.contains(DERIVED_CLIENT), "{url_b}");
+        // Each redirect is the one its own client requires.
+        assert!(url_a.contains(DERIVED_SCHEME), "{url_a}");
+        assert!(!url_b.contains(DERIVED_SCHEME), "{url_b}");
+
+        // The flow remembers the kind it was begun for, which is what the callback is
+        // completed against.
+        // SAFETY: `app` is live until the shutdown below.
+        let kind = unsafe { layer(app) }
+            .expect("live")
+            .flows
+            .lock()
+            .expect("unpoisoned")
+            .kind
+            .map(|k| k.as_str());
+        assert_eq!(kind, Some(b));
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    #[test]
+    fn a_kind_the_shell_invented_does_not_begin() {
+        let a = kinds()[0];
+        let app = start_configured(&format!("{a}={OWN_CLIENT}"), "net.justinchung.sift");
+        assert_eq!(begin(app, "not-a-kind"), Err(SiftStatus::Failed));
+        assert_eq!(begin(app, ""), Err(SiftStatus::Failed));
+        // A registered kind with no client is refused as well, not begun with another's.
+        let b = kinds()[1];
+        assert_eq!(begin(app, b), Err(SiftStatus::Failed));
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    #[test]
+    fn a_choice_whose_scheme_is_not_claimed_is_listed_and_says_so() {
+        let a = kinds()[0];
+        let app = start_configured(&format!("{a}={DERIVED_CLIENT}"), "net.justinchung.sift");
+        assert_eq!(
+            providers(app)
+                .iter()
+                .map(|(k, _, r)| (k.as_str(), *r))
+                .collect::<Vec<_>>(),
+            vec![(a, false)]
         );
         assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
     }
@@ -3063,7 +3261,7 @@ mod tests {
             schedule: drop_it,
             schedule_context: core::ptr::null_mut(),
             arm_timer: never_fires,
-            oauth_client_id: SiftStr::new(""),
+            oauth_clients: SiftStr::new(""),
             registered_schemes: SiftStr::new(""),
         };
         assert_eq!(
@@ -3629,7 +3827,7 @@ mod tests {
             schedule: run_inline,
             schedule_context: core::ptr::null_mut(),
             arm_timer: never_fires,
-            oauth_client_id: SiftStr::new(""),
+            oauth_clients: SiftStr::new(""),
             registered_schemes: SiftStr::new(""),
         };
         assert_eq!(
@@ -3679,7 +3877,7 @@ mod tests {
             schedule: run_inline,
             schedule_context: core::ptr::null_mut(),
             arm_timer: never_fires,
-            oauth_client_id: SiftStr::new(""),
+            oauth_clients: SiftStr::new(""),
             registered_schemes: SiftStr::new(""),
         };
         assert_eq!(
@@ -4297,7 +4495,7 @@ mod tests {
             schedule: run_inline,
             schedule_context: core::ptr::null_mut(),
             arm_timer: never_fires,
-            oauth_client_id: SiftStr::new(""),
+            oauth_clients: SiftStr::new(""),
             registered_schemes: SiftStr::new(""),
         };
         assert_eq!(
@@ -4368,7 +4566,7 @@ mod tests {
             schedule: drop_it,
             schedule_context: core::ptr::null_mut(),
             arm_timer: record_arm,
-            oauth_client_id: SiftStr::new(""),
+            oauth_clients: SiftStr::new(""),
             registered_schemes: SiftStr::new(""),
         };
         assert_eq!(
@@ -4450,7 +4648,7 @@ mod tests {
             schedule: count_post,
             schedule_context: core::ptr::from_ref(asked).cast_mut().cast(),
             arm_timer: keep_timer,
-            oauth_client_id: SiftStr::new(""),
+            oauth_clients: SiftStr::new(""),
             registered_schemes: SiftStr::new(""),
         };
         assert_eq!(

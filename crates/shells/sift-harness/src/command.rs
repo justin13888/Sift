@@ -84,7 +84,7 @@ fn help() -> Vec<String> {
         "account add <name> <rich|minimal|unstable-ids>   add an account of a capability shape",
         "account add-replayed <name>                      an account backed by D-65's fixture corpus",
         "account writes <name> <on|off>                   authorize writes to a mailbox, or withdraw it",
-        "account authorize <name> <client-id>             begin a real authorization; prints the address",
+        "account authorize <name> <client-id> [kind]      begin a real authorization; prints the address",
         "account callback <name> <url>                    finish one, from what the scheme handed back",
         "account forget <name>                            FR-4: erase every credential, by enumeration",
         "account list                                     accounts and what they declare",
@@ -141,20 +141,46 @@ fn account(app: &mut App, args: &[&str]) -> Output {
             let id = app.add_account_of_kind(name, adapter, sift_app::REPLAYED_KIND)?;
             Ok(vec![format!("added `{name}` (replayed)  id={id}")])
         }
-        ["authorize", name, client_id] => {
+        ["authorize", name, client_id] | ["authorize", name, client_id, _] => {
+            // The kind is the register's opaque string; with none given, the first one
+            // registered, which is what this command did before there were two.
+            let kind = match args {
+                [_, _, _, kind] => sift_app::authorize::kind(kind).ok_or_else(|| {
+                    let known: Vec<&str> = sift_registry::KINDS
+                        .iter()
+                        .map(|d| d.kind.as_str())
+                        .collect();
+                    format!("no such provider kind `{kind}` — try {}", known.join(", "))
+                })?,
+                _ => {
+                    sift_registry::KINDS
+                        .first()
+                        .ok_or("this build has no provider adapters")?
+                        .kind
+                }
+            };
             // D-36's registration is checked *before* the flow starts. This shell has not
             // registered the scheme with the system — a bundle does that, and a bundle is
             // what this binary is not — so it says so rather than opening a browser the user
             // would return from to nothing.
-            // D-71's fact, which the shell owns. This binary is not a bundle, so it is false
-            // unless a test forces it to exercise the URL's shape.
-            app.scheme_is_registered = std::env::var("SIFT_CALLBACK_SCHEME_REGISTERED").is_ok();
-            let registered = app.scheme_is_registered;
-            let url =
-                sift_app::authorize::begin(&mut app.broker, client_id, registered, now_millis())
-                    .map_err(|e| e.to_string())?;
+            // D-71's fact, which the shell owns. This binary is not a bundle, so it claims no
+            // scheme unless a test forces it to exercise the URL's shape.
+            app.registered_schemes = if std::env::var("SIFT_CALLBACK_SCHEME_REGISTERED").is_ok() {
+                vec![sift_foundation::identifiers::callback_scheme_for(client_id)]
+            } else {
+                Vec::new()
+            };
+            let registered = app.scheme_is_registered(client_id);
+            let url = sift_app::authorize::begin(
+                &mut app.broker,
+                kind,
+                client_id,
+                registered,
+                now_millis(),
+            )
+            .map_err(|e| e.to_string())?;
             app.pending_authorization
-                .insert((*name).to_owned(), (*client_id).to_owned());
+                .insert((*name).to_owned(), (kind, (*client_id).to_owned()));
             Ok(vec![
                 format!(
                     "the callback returns through the registered scheme{}",
@@ -171,7 +197,7 @@ fn account(app: &mut App, args: &[&str]) -> Output {
             ])
         }
         ["callback", name, callback] => {
-            let client_id = app
+            let (kind, client_id) = app
                 .pending_authorization
                 .get(*name)
                 .cloned()
@@ -179,6 +205,7 @@ fn account(app: &mut App, args: &[&str]) -> Output {
             let id = app.reserve_identity();
             let adapter = sift_app::authorize::complete(
                 &mut app.broker,
+                kind,
                 &client_id,
                 id,
                 callback,
@@ -186,7 +213,7 @@ fn account(app: &mut App, args: &[&str]) -> Output {
             )
             .map_err(|e| e.to_string())?;
             app.pending_authorization.remove(*name);
-            let id = app.add_provider_account(name, adapter)?;
+            let id = app.add_provider_account(name, kind, adapter)?;
             Ok(vec![format!("added `{name}`  id={id}")])
         }
         ["writes", name, state] => {
@@ -887,14 +914,20 @@ fn refresh_credential(
     name: &str,
     account: sift_foundation::identity::AccountId,
 ) -> Result<String, String> {
+    // The account's own kind, as the container recorded it — never the first one registered,
+    // which would present one provider's refresh token to another's token endpoint.
+    let recorded = app.account(name)?.kind.clone();
+    let kind = sift_registry::by_persisted(&recorded)
+        .ok_or_else(|| format!("`{name}` is of a kind this build does not have: {recorded}"))?
+        .kind;
     let client_id = app
         .pending_authorization
         .get(name)
-        .cloned()
+        .filter(|(pending, _)| *pending == kind)
+        .map(|(_, client)| client.clone())
         .or_else(|| std::env::var("SIFT_OAUTH_CLIENT_ID").ok())
         .ok_or("no client identifier is known for this account, so it cannot be refreshed")?;
-    let registration =
-        sift_app::authorize::registration(sift_app::authorize::default_kind(), &client_id)?;
+    let registration = sift_app::authorize::registration(kind, &client_id)?;
     let mut transport = sift_http::Https::to(&registration.profile.token.host)
         .map_err(|why| format!("the trust store could not be consulted: {why}"))?;
     app.broker

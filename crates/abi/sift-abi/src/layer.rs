@@ -86,13 +86,23 @@ pub struct SiftInit {
     /// own wheel; the shell owns the one thing only it can do, which is asking the platform
     /// for a timer that is allowed to fire late.
     pub arm_timer: SiftArmTimer,
-    /// The OAuth client this bundle was configured with — empty where there is none.
+    /// The OAuth clients this bundle was configured with, one `kind=client` per line — empty
+    /// where there are none.
+    ///
+    /// **Keyed by the register's opaque kind string, never by a provider name.** D-12 keeps
+    /// the name out of this boundary; a kind is a string the layer hands out through
+    /// `sift_providers` and takes back, and a shell copies it from its bundle without reading
+    /// it. One client per kind, because an identifier one identity platform issued means
+    /// nothing to another. A kind with none is absent from the add-account choices.
     ///
     /// **Configuration, not a secret.** A public client's identifier appears in every
     /// authorization URL it generates, which is why PKCE exists; D-88 forbids an embedded
     /// secret outright. It is stated once, here, rather than repeated at every call, because
     /// the layer needs it for three things a shell should not be answering separately.
-    pub oauth_client_id: crate::repr::SiftStr<'static>,
+    ///
+    /// Neither a kind nor a client identifier contains a newline or `=`, so this needs no
+    /// escaping.
+    pub oauth_clients: crate::repr::SiftStr<'static>,
     /// Every URI scheme this shell's bundle claims, separated by newlines — D-36 and D-109.
     ///
     /// **A fact, not a conclusion, and the difference is the bug this replaced.** The macOS
@@ -171,6 +181,9 @@ pub(crate) struct Layer {
     /// Each account's label and kind, paired. Paired rather than concatenated so that an
     /// index cannot mean one account's name and another's kind.
     pub(crate) account_names: Mutex<Vec<(String, String)>>,
+    /// The add-account choices last listed. The text they borrow is the register's own and
+    /// lives for the process; the rows are held here for the same reason every other table is.
+    pub(crate) provider_rows: Mutex<Vec<crate::entry::SiftProvider<'static>>>,
     /// The last account setting read back, held for the string handed out.
     pub(crate) account_setting_value: Mutex<String>,
     /// D-49's condition, per account, as the shell was last told it.
@@ -267,6 +280,10 @@ pub(crate) struct SearchResult {
 /// One authorization in progress. Empty means none.
 #[derive(Debug, Default)]
 pub(crate) struct Flow {
+    /// The kind the flow was begun for. The callback is completed against this one and no
+    /// other: its code is redeemable only at the token endpoint of the provider that issued
+    /// it.
+    pub(crate) kind: Option<sift_app::authorize::ProviderKind>,
     pub(crate) client_id: String,
     pub(crate) url: String,
     /// The callback scheme last asked for, kept alive for the string handed back.

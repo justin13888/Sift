@@ -71,9 +71,71 @@ fn a_real_account_in_a_build_with_no_client_says_that_rather_than_nothing() {
         .expect("added");
     as_if_restarted(&mut app, "work");
 
-    assert!(app.oauth_client_id.is_empty(), "this build has no client");
+    assert!(app.oauth_clients.is_empty(), "this build has no client");
     let why = app.reconnect("work").expect_err("it cannot reconnect");
     assert!(why.contains("OAuth client"), "{why}");
+}
+
+#[test]
+fn another_providers_client_does_not_reconnect_an_account() {
+    // One client per kind. An account of the first kind in a build configured only for the
+    // second must say its own client is missing — the alternative is presenting its refresh
+    // token, under the wrong client, to the wrong provider's token endpoint.
+    let kinds = sift_registry::KINDS;
+    assert!(kinds.len() >= 2, "this needs two kinds");
+    let (mine, other) = (kinds[0].kind, kinds[1].kind);
+
+    let mut app = App::new();
+    app.configure_oauth_clients(&format!("{other}=a-client-for-the-other-kind"));
+    assert_eq!(
+        app.oauth_client(other.as_str()),
+        Some("a-client-for-the-other-kind")
+    );
+    assert_eq!(app.oauth_client(mine.as_str()), None);
+
+    let adapter = sift_app::authorize::replayed();
+    app.add_provider_account("work", mine, adapter)
+        .expect("added");
+    assert_eq!(app.account("work").expect("open").kind, mine.as_str());
+    as_if_restarted(&mut app, "work");
+    let why = app.reconnect("work").expect_err("it cannot reconnect");
+    assert!(why.contains("OAuth client"), "{why}");
+}
+
+#[test]
+fn a_row_written_before_kinds_were_recorded_needs_the_first_kinds_client() {
+    // Every real account a previous build added is recorded as `PROVIDER_KIND`, and there was
+    // one provider then. Configured only for another, it must not borrow that client.
+    let kinds = sift_registry::KINDS;
+    let mut app = App::new();
+    app.configure_oauth_clients(&format!("{}=another", kinds[1].kind));
+    let adapter = sift_app::authorize::replayed();
+    app.add_account_of_kind("old", adapter, PROVIDER_KIND)
+        .expect("added");
+    as_if_restarted(&mut app, "old");
+    let why = app.reconnect("old").expect_err("no client for its kind");
+    assert!(why.contains("OAuth client"), "{why}");
+}
+
+#[test]
+fn the_configured_clients_are_read_one_per_kind() {
+    let kinds = sift_registry::KINDS;
+    let (a, b) = (kinds[0].kind, kinds[1].kind);
+    let mut app = App::new();
+    app.configure_oauth_clients(&format!(
+        "{a}=client-a\n{b} = client-b \nnot-a-kind=x\n{a}x=y\nno-separator\n"
+    ));
+    assert_eq!(app.oauth_client(a.as_str()), Some("client-a"));
+    assert_eq!(app.oauth_client(b.as_str()), Some("client-b"));
+    assert_eq!(app.oauth_clients.len(), 2, "{:?}", app.oauth_clients);
+
+    // An empty client is none at all, so the kind is not offered.
+    app.configure_oauth_clients(&format!("{a}=\n{b}=client-b"));
+    assert_eq!(app.oauth_client(a.as_str()), None);
+    let offered: Vec<_> = sift_app::authorize::offered(|k| app.oauth_client(k).is_some())
+        .map(|d| d.kind)
+        .collect();
+    assert_eq!(offered, vec![b]);
 }
 
 #[test]
@@ -101,10 +163,10 @@ fn a_container_written_before_the_corpus_had_its_own_kind_is_not_taken_to_the_ne
 
 #[test]
 fn an_unrecognised_kind_is_treated_as_a_provider_rather_than_as_a_shape() {
-    // The registry column holds a name, and it will hold a real provider kind as soon as there
-    // is a second provider. A `reconnect` that branched on the literal `"provider"` would then
-    // report every real account as a capability shape — so the arm that refuses is the one
-    // that recognises a *shape*, not the one that recognises a provider.
+    // The registry column holds the register's kind. A `reconnect` that branched on the
+    // literal `"provider"` would report every real account as a capability shape — so the arm
+    // that refuses is the one that recognises a *shape*, not the one that recognises a
+    // provider. A kind this build does not have is an account added by a newer one.
     let mut app = App::new();
     let adapter = sift_app::authorize::replayed();
     app.add_account_of_kind("work", adapter, "some-future-provider")
