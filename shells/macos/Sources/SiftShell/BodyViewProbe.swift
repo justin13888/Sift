@@ -222,18 +222,40 @@ private struct Probe {
         // messages of a reading session: whatever a sample leaves behind is there for the next
         // one to find, which is the correlation NFR-25 closes.
         let instrument = BodyViewInstrument()
+
+        // Registered before the hardened view exists, so it is told the list is ready before
+        // that view is: what the recorder holds at that moment is what the view loaded while
+        // it had no rule list.
+        var compiled: Bool?
+        var loadedWhileHeld = 0
+        BodyViewIsolation.whenReady { list in
+            loadedWhileHeld = instrument.events.count
+            compiled = list != nil
+        }
+
         let hardened = BodyView(frame: window.contentLayoutRect, instrument: instrument)
         window.contentView = hardened
 
         print("probe: \(samples.count) samples, WebKit \(webKitVersion())")
-        guard waitForIsolation() else {
+
+        // The hold: a document presented before the rule list is installed is kept, not
+        // loaded, and is loaded once the list is in force.
+        let held = "<img src=\"\(Marker.sentinel)\" width=\"1\" height=\"1\">"
+            + "<img src=\"http://probe.invalid/held\" width=\"1\" height=\"1\">"
+        hardened.present(held)
+        let heldBeforeCompile = compiled == nil
+        spin(for: 30) { compiled != nil }
+        guard compiled == true else {
             print("probe: FAIL — the rule list never compiled, so the body view never renders")
             return 1
         }
+        var failed = !holdsUntilIsolated(
+            instrument: instrument, html: held,
+            exercised: heldBeforeCompile, loadedWhileHeld: loadedWhileHeld)
 
         // NFR-25's separation, shown directly: storage written into one view's store is not
         // visible from another's.
-        var failed = !separateStores()
+        if !separateStores() { failed = true }
 
         // Every hardened run back to back, as a reading session would be, then every control.
         var shipped: [Observation] = []
@@ -244,6 +266,10 @@ private struct Probe {
                     hardened.present(html)
                 })
         }
+
+        // `clear()` goes through the same admission as a document, and leaves the view able
+        // to admit the next one.
+        if !clears(hardened, instrument: instrument) { failed = true }
 
         var heard = Set<Detector>()
         var open: [Observation] = []
@@ -293,10 +319,14 @@ private struct Probe {
 
     /// Load one sample and report everything it did. `admissions` is how many admitted
     /// navigations are the view's own load rather than something the document caused.
+    ///
+    /// `fresh: false` keeps what the recorder already holds, for a load that began before the
+    /// call.
     func observe(
-        instrument: BodyViewInstrument, html: String, admissions: Int, load: () -> Void
+        instrument: BodyViewInstrument, html: String, admissions: Int, fresh: Bool = true,
+        load: () -> Void
     ) -> Observation {
-        _ = instrument.drain()
+        if fresh { _ = instrument.drain() }
         load()
         var rendered = false
         spin(for: deadline) {
@@ -346,12 +376,75 @@ private struct Probe {
         return o
     }
 
-    /// Wait for the rule list the hardened view will not render without.
-    func waitForIsolation() -> Bool {
-        var outcome: Bool?
-        BodyViewIsolation.whenReady { outcome = $0 != nil }
-        spin(for: 30) { outcome != nil }
-        return outcome == true
+    /// Judge the document the hardened view was given before its rule list existed: it must
+    /// have been presented while the list was still compiling, have loaded nothing until the
+    /// list was ready, and then render with the list in force — the `http:` image it carries
+    /// is egress if it was loaded without one.
+    func holdsUntilIsolated(
+        instrument: BodyViewInstrument, html: String, exercised: Bool, loadedWhileHeld: Int
+    ) -> Bool {
+        guard exercised else {
+            print("probe: FAIL — the rule list was ready before the first document, so the hold was never exercised")
+            return false
+        }
+        guard loadedWhileHeld == 0 else {
+            print("probe: FAIL — the body view loaded \(loadedWhileHeld) things before its rule list was installed")
+            return false
+        }
+        let problems = observe(instrument: instrument, html: html, admissions: 1, fresh: false) {}
+            .failures
+        guard problems.isEmpty else {
+            print("probe: FAIL — the document held for the rule list:")
+            for problem in problems { print("          \(problem)") }
+            return false
+        }
+        print("probe: pass  a document shown before the rule list is held, then rendered under it")
+        return true
+    }
+
+    /// `clear()`: one admitted navigation to a minted internal address, nothing loaded, and
+    /// the next document still admitted after it.
+    func clears(_ view: BodyView, instrument: BodyViewInstrument) -> Bool {
+        _ = instrument.drain()
+        view.clear()
+        let admittedClear: () -> [URL?] = {
+            instrument.events.compactMap {
+                if case .navigation(let url, true) = $0 { return url }
+                return nil
+            }
+        }
+        spin(for: deadline) { !admittedClear().isEmpty }
+        spin(for: settle) { false }
+        let (events, dropped) = instrument.drain()
+        var admitted: [URL?] = []
+        var other: [String] = []
+        for event in events {
+            switch event {
+            case .navigation(let url, true): admitted.append(url)
+            case .navigation: break
+            case .load(let url): other.append("loaded \(url?.absoluteString ?? "<no url>")")
+            case .execution(let body): other.append("bridge received '\(body)'")
+            }
+        }
+        if dropped > 0 { other.append("\(dropped) events dropped past the recorder's bound") }
+        let minted = admitted.count == 1
+            && admitted[0]?.scheme == BodyView.internalScheme
+            && admitted[0]?.host == "document"
+        guard minted, other.isEmpty else {
+            print("probe: FAIL — clear() admitted \(admitted.map { $0?.absoluteString ?? "<no url>" }) and \(other)")
+            return false
+        }
+        let html = "<img src=\"\(Marker.sentinel)\" width=\"1\" height=\"1\">"
+        let after = observe(instrument: instrument, html: html, admissions: 1) {
+            view.present(html)
+        }.failures
+        guard after.isEmpty else {
+            print("probe: FAIL — the document after clear():")
+            for problem in after { print("          \(problem)") }
+            return false
+        }
+        print("probe: pass  clear() loads an empty document through the minted admission")
+        return true
     }
 
     /// Write a cookie into one body view's store and look for it from another's.
