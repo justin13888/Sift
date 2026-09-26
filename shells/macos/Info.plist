@@ -71,11 +71,19 @@
 			</array>
 		</dict>
 	</array>
-	<!-- The OAuth client this build was configured with. **Not a secret**: a client identifier
-	     for a public client is published in every authorization URL it generates, which is why
-	     PKCE exists. It is here rather than baked into the core because it is per-installation
-	     configuration, and because a build with none should still run against fixtures. -->
-	<key>SiftOAuthClientID</key>
-	<string>$(SIFT_OAUTH_CLIENT_ID)</string>
+	<!-- The OAuth clients this build was configured with, one per provider kind, keyed by the
+	     register's opaque kind string. **Not secrets**: a client identifier for a public client
+	     is published in every authorization URL it generates, which is why PKCE exists. They
+	     are here rather than baked into the core because they are per-installation
+	     configuration, and because a build with none should still run against fixtures. The
+	     shell hands the pairs to the core without reading them; a kind whose value is empty is
+	     a kind this build cannot add. -->
+	<key>SiftOAuthClients</key>
+	<dict>
+		<key>gmail</key>
+		<string>$(SIFT_OAUTH_CLIENT_ID_GMAIL)</string>
+		<key>graph</key>
+		<string>$(SIFT_OAUTH_CLIENT_ID_GRAPH)</string>
+	</dict>
 </dict>
 </plist>

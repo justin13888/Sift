@@ -24,7 +24,7 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     private var containerRoot: [UInt8] = []
 
     /// The same, for the two facts the layer is given about this bundle's OAuth configuration.
-    private var oauthClientID: [UInt8] = []
+    private var oauthClients: [UInt8] = []
     private var registeredSchemes: [UInt8] = []
     /// The platform timers the layer has asked for, by ticket.
     ///
@@ -81,10 +81,10 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         //
         // What a shell can honestly report is what its own bundle claims. Which scheme the
         // configured client requires, and whether it is among them, is the layer's to decide.
-        oauthClientID = Array(Self.configuredClientID.utf8)
+        oauthClients = Array(Self.configuredClients.utf8)
         registeredSchemes = Array(Self.claimedURLSchemes().joined(separator: "\n").utf8)
         let status = containerRoot.withUnsafeBufferPointer { bytes -> SiftStatus in
-            oauthClientID.withUnsafeBufferPointer { client in
+            oauthClients.withUnsafeBufferPointer { client in
                 registeredSchemes.withUnsafeBufferPointer { schemes in
                     let init_ = SiftInit(
                         container_root: SiftStr(ptr: bytes.baseAddress, len: bytes.count),
@@ -123,7 +123,7 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
                                 timer.resume()
                             }
                         },
-                        oauth_client_id: SiftStr(ptr: client.baseAddress, len: client.count),
+                        oauth_clients: SiftStr(ptr: client.baseAddress, len: client.count),
                         registered_schemes: SiftStr(ptr: schemes.baseAddress, len: schemes.count)
                     )
                     return sift_initialize(hostCallbacks(), init_, &handle)
@@ -899,12 +899,22 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// The OAuth client this bundle was built with, or the empty string where there is none.
+    /// The OAuth clients this bundle was built with, one `kind=client` per line, or the empty
+    /// string where there are none.
     ///
-    /// A build with none is a legitimate state: it runs against the recorded corpus and says
-    /// so. The key is written by the build from `shells/macos/oauth-client.txt`.
-    static var configuredClientID: String {
-        Bundle.main.object(forInfoDictionaryKey: "SiftOAuthClientID") as? String ?? ""
+    /// **Copied, not read.** The keys are the register's opaque kind strings and this shell
+    /// never looks at one: it hands the pairs to the core, which decides which kinds exist, and
+    /// asks the core back through `sift_providers` which ones it can offer. A build with none
+    /// is a legitimate state: it runs against the recorded corpus and says so. The dictionary
+    /// is written by the build from `shells/macos/oauth-client.<kind>.txt`.
+    static var configuredClients: String {
+        let clients =
+            Bundle.main.object(forInfoDictionaryKey: "SiftOAuthClients") as? [String: String] ?? [:]
+        return clients
+            .filter { !$0.key.isEmpty && !$0.value.isEmpty }
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: "\n")
     }
 
     /// Every URI scheme this bundle's `CFBundleURLTypes` claims.
