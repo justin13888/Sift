@@ -8,7 +8,7 @@
 //! The legitimate reasons to run this are exactly two: the fixture does not exist yet, and
 //! a deliberate format version bump has already been made.
 
-use sift_crypto::page::{Header, KeyId, PageCipher, PageKey};
+use sift_crypto::page::{BACKEND, Header, KeyId, PageCipher, PageKey};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -42,7 +42,8 @@ fn main() {
          # writes a store the other platform cannot read, or reads one incorrectly.\n\
          #\n\
          # A platform backend that produces different bytes for these inputs is wrong,\n\
-         # however audited its cipher is.\n\
+         # however audited its cipher is. Every build checks this file through the one\n\
+         # cipher it carries: CryptoKit on macOS, the vendored construction elsewhere.\n\
          #\n\
          # Inputs: page number {page_number}, write counter {counter}.\n\
          # Regenerate with `cargo run -p sift-crypto --example bless-fixtures` — but read\n\
@@ -63,5 +64,7 @@ fn main() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/page-format-v1.txt");
     std::fs::create_dir_all(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures")).expect("mkdir");
     std::fs::write(path, out).expect("write fixture");
-    eprintln!("wrote {path}");
+    // Which cipher produced these bytes. The file does not record it — it must be the same on
+    // every platform — but whoever blessed it should know which one they asked.
+    eprintln!("wrote {path} (sealed with {BACKEND})");
 }

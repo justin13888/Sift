@@ -36,6 +36,15 @@ sift-foundation.workspace = true
 # and hashing a large attachment is under 2% of its transfer time. So the assembly is
 # paying for a property this design does not want.
 blake3 = { version = "1", default-features = false, features = ["std", "pure"] }
-# The AEAD construction. See page.rs for why AES-256-GCM and not another.
-aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 subtle = "2"
+
+# D-75: the AEAD construction, vendored — see page.rs for why AES-256-GCM and not another.
+# On macOS the cipher is CryptoKit's `AES.GCM` (build.rs, platform/cryptokit.swift), so this
+# is compiled only where no platform backend is wired: today, Linux.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+
+# On macOS the vendored construction stays in the tests as the second implementation R-16
+# needs: every CryptoKit seal is compared byte for byte against it. Never in the binary.
+[dev-dependencies]
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }

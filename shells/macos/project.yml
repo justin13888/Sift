@@ -17,7 +17,8 @@ options:
   # D-46's floor. Structural rather than conservative: the modern sandbox-legal
   # background-residency mechanism registers the *main application*, while the older one
   # requires a separate helper executable inside the bundle — a second process, which would
-  # make D-2 false on the App Store channel.
+  # make D-2 false on the App Store channel. One of the places the floor is stated;
+  # docs/build/workspace.md lists them all, and they change together.
   deploymentTarget:
     macOS: "13.0"
   createIntermediateGroups: true

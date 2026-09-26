@@ -15,9 +15,22 @@ store of. Those are the three things here.
 
 **Chosen:** on macOS the platform's own application toolchain owns the bundle and the signing, and the
 Rust core is built into a static library it links; the Rust workspace never produces the `.app`. On Linux
-the relationship inverts — Cargo owns the binary and the GTK shell is Rust in the same workspace.
-**Rejected:** Cargo driving the platform toolchain as a build step; a bespoke script assembling the bundle
-from parts.
+the relationship inverts — Cargo owns the binary and the GTK shell is Rust in the same workspace. One
+narrow exception runs the other way: where a platform library the core must call has no C interface, a
+core crate MAY compile a bridge written in the platform's own language, with the platform's own compiler,
+into its own static archive — [D-75](../storage/encryption.md)'s cipher is the one such case today.
+**Rejected:** Cargo driving the platform toolchain to assemble, bundle or sign the application; a bespoke
+script assembling the bundle from parts.
+
+**Why the bridge exception is not the rejected alternative.** What was rejected is a build system that
+reimplements the bundle's assembly and so owns the correctness of signing. A bridge compiled into a
+crate's archive assembles nothing: it produces object code, the same as the Rust around it, and the
+platform application toolchain still owns every step from the linked archive onwards. The alternative —
+having the shell supply the platform library to the core across the ABI — would widen the boundary and
+leave every Cargo-driven test on a different implementation from the one that ships, which is exactly
+the gap D-75's byte-for-byte fixture exists to close. The exception is bounded by its condition: a
+platform library with a C interface is called directly, and a bridge that grows beyond forwarding one
+call to the platform library is a second implementation and not a bridge.
 
 **Why the native toolchain owns the macOS side.** Everything [D-45](../product/platform-baseline.md) and
 the entitlement set commit to is expressed in the platform's own project format and enforced by its own
@@ -32,7 +45,11 @@ library keeps every one of those on rails.
 bundle is a second signed artefact with its own load path and its own hardened-runtime posture, bought in
 exchange for a link step nobody needs — the two halves ship together, always, and there is no third
 consumer. It also keeps [D-59](workspace.md)'s ABI leaf genuinely a leaf: one archive, one symbol
-surface, and no runtime resolution that could find a different one.
+surface, and no runtime resolution that could find a different one. A bridge under the exception above
+keeps that true: its objects are members of the same archive, its symbols are resolved when the shell
+links it rather than at run time, and they are internal to the core — the surface the shell may call is
+still exactly the one [D-60](workspace.md)'s generated header declares, and the bridge's symbols are not
+in it.
 
 **Why the inversion on Linux is not an inconsistency.** [D-1](../architecture/ui-shell.md) makes the GTK
 shell Rust, so there is no second toolchain to hand the build to and no bundle format to honour —
@@ -41,13 +58,16 @@ the Flatpak manifest wraps an ordinary Cargo binary. The asymmetry is D-1's, not
 **What it costs:** the macOS build is not reproducible from `cargo build` alone, so a contributor needs
 the platform toolchain to produce anything runnable, and CI needs a macOS host for even a smoke build.
 [Verification](verification.md) already needs macOS hosts for other reasons, which is the only thing that
-makes this affordable.
+makes this affordable. The bridge exception extends that cost to the core: on macOS even a Cargo build or
+test of a crate that depends on a bridge needs the platform toolchain, where a Rust toolchain alone used
+to suffice.
 
 **Contestable because:** it means the two platforms are assembled by different systems, so a build-time
 concern — a feature flag, a vendored source path, an embedded asset — must be expressed twice and can
 drift in exactly the way [D-17](../architecture/shell-boundary.md) refuses to let the shells drift. The
-mitigation is that the list of such concerns is short and enumerated in [workspace](workspace.md); if it
-grows, this decision is the thing to revisit.
+mitigation is that the list of such concerns is short and enumerated in
+[workspace](workspace.md#build-time-concerns-expressed-more-than-once); if it grows, this decision is the
+thing to revisit.
 
 ## D-62 — One version, three channels, and a support floor that is stated rather than implied
 

@@ -96,6 +96,18 @@ build. A target measured under one flag set and shipped under another has not be
 | Allocation stack capture | off in release | [D-24](../runtime/observability.md)'s per-allocation backtraces. On, it exceeds NFR-44's 2% and is a debugging tool rather than a shipping one |
 | Fault injection | off, and absent from release | The kill points and write-interception [verification](verification.md) requires for NFR-16. It MUST NOT be compilable into a shipped binary |
 
+## Build-time concerns expressed more than once
+
+[D-61](packaging.md) has the two platforms assembled by different systems, and on macOS the core is
+also built by Cargo on its own for tests and tools, so a build-time setting can end up stated in more than
+one place and drift. **Every such setting MUST be listed here, with each place that states it, and a
+change to one place is a change to all of them in the same commit.** If this list grows, D-61 is the
+decision to revisit.
+
+| Concern | Stated in | Why more than once |
+|---|---|---|
+| The macOS deployment floor ([D-46](../product/platform-baseline.md)) | The shell's project specification; the workspace's Cargo configuration, as the environment every Cargo build of the core sees; and the page-cipher bridge's build script, as the fallback when Cargo runs without that configuration | Xcode links the application at the floor, but a Cargo-linked test or tool otherwise links below it, where the Swift runtime the [D-75](../storage/encryption.md) bridge needs does not load; the bridge must also be compiled for the same floor it is linked at |
+
 ## Toolchain and edition
 
 **The minimum supported toolchain is recorded once, in the workspace manifest, and raising it is a

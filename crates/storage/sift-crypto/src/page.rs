@@ -62,10 +62,27 @@
 //! scopes the same-user adversary to "what a peer process can reach *without entering
 //! Sift*" against a store the provider can refill. A reviewer should still know this is
 //! here, because it is the kind of property that reads as an oversight when it is a trade.
+//!
+//! # Where the cipher comes from
+//!
+//! Everything above — the nonce, the additional data, the header, the counter written with
+//! the page — is this module's, and is the same code on every platform. Only the AEAD call
+//! itself is the platform's, behind [`backend`], which seals and opens one message under a
+//! stated key, nonce and additional data and knows nothing else:
+//!
+//! - **macOS:** CryptoKit's `AES.GCM`. CryptoKit has no C interface, so a Swift file of four
+//!   C-named functions (`platform/cryptokit.swift`, compiled by `build.rs`) is the bridge.
+//! - **Everywhere else:** the vendored implementation of the same construction. D-75 names
+//!   the Linux platform library as the eventual source; until it is wired, this is the
+//!   fallback D-75 permits — *that* construction, vendored — not a different one.
+//!
+//! [`BACKEND`] says which one a build carries. The byte-for-byte fixture runs through it on
+//! every platform, and on macOS every CryptoKit seal is additionally compared against the
+//! vendored construction, so a disagreement (R-16) fails a test rather than a store.
 
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
 use core::sync::atomic::{AtomicU64, Ordering};
+
+pub use backend::BACKEND;
 
 /// Identifies a file as a Sift store.
 ///
@@ -211,7 +228,7 @@ impl Header {
 
 /// Seals and opens the pages of one file.
 pub struct PageCipher {
-    cipher: Aes256Gcm,
+    cipher: backend::Aead,
     key_id: KeyId,
     counter: AtomicU64,
 }
@@ -228,7 +245,7 @@ impl PageCipher {
     /// Open a file's cipher, resuming the counter **above** the header's high-water mark.
     #[must_use]
     pub fn new(key: &PageKey, header: &Header) -> Self {
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.bytes()));
+        let cipher = backend::Aead::new(key.bytes());
         Self {
             cipher,
             key_id: header.key_id,
@@ -272,20 +289,11 @@ impl PageCipher {
     ) -> Result<Vec<u8>, PageError> {
         let nonce = nonce_for(page_number, counter);
         let aad = aad_for(self.key_id, page_number, counter);
-        let sealed = self
-            .cipher
-            .encrypt(
-                Nonce::from_slice(&nonce),
-                Payload {
-                    msg: plaintext,
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| PageError::FailedAuthentication)?;
-
-        let mut out = Vec::with_capacity(COUNTER_LEN + sealed.len());
-        out.extend_from_slice(&counter.to_be_bytes());
-        out.extend_from_slice(&sealed);
+        let mut out = vec![0u8; COUNTER_LEN + plaintext.len() + TAG_LEN];
+        out[..COUNTER_LEN].copy_from_slice(&counter.to_be_bytes());
+        self.cipher
+            .seal(&nonce, &aad, plaintext, &mut out[COUNTER_LEN..])
+            .map_err(|()| PageError::FailedAuthentication)?;
         Ok(out)
     }
 
@@ -304,15 +312,243 @@ impl PageCipher {
 
         let nonce = nonce_for(page_number, counter);
         let aad = aad_for(self.key_id, page_number, counter);
+        let body = &sealed[COUNTER_LEN..];
+        let mut out = vec![0u8; body.len() - TAG_LEN];
         self.cipher
-            .decrypt(
-                Nonce::from_slice(&nonce),
-                Payload {
-                    msg: &sealed[COUNTER_LEN..],
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| PageError::FailedAuthentication)
+            .open(&nonce, &aad, body, &mut out)
+            .map_err(|()| PageError::FailedAuthentication)?;
+        Ok(out)
+    }
+}
+
+/// The one call that is the platform's: AES-256-GCM over one message.
+///
+/// Both implementations keep the same contract, and it is all of D-75's "one interface":
+///
+/// - `new` takes the 32-byte key.
+/// - `seal` writes `plaintext.len() + 16` bytes into `out` — ciphertext, then the tag.
+/// - `open` takes that shape back and writes `sealed.len() - 16` bytes, only on a verified tag.
+/// - Any failure is `Err(())`, undistinguished, because the caller must treat every one as
+///   [`PageError::FailedAuthentication`].
+///
+/// Callers size `out` exactly; a mismatch is a failure, never a partial write.
+mod backend {
+    #[cfg(target_os = "macos")]
+    pub(super) use cryptokit::Aead;
+    #[cfg(target_os = "macos")]
+    pub use cryptokit::BACKEND;
+    #[cfg(not(target_os = "macos"))]
+    pub(super) use vendored::Aead;
+    #[cfg(not(target_os = "macos"))]
+    pub use vendored::BACKEND;
+
+    #[cfg(target_os = "macos")]
+    mod cryptokit {
+        use core::ffi::c_void;
+        use core::ptr::NonNull;
+
+        /// Which implementation this build seals with.
+        pub const BACKEND: &str = "CryptoKit AES.GCM";
+
+        unsafe extern "C" {
+            fn sift_cryptokit_key_new(bytes: *const u8, len: usize) -> *mut c_void;
+            fn sift_cryptokit_key_free(handle: *mut c_void);
+            fn sift_cryptokit_seal(
+                handle: *const c_void,
+                nonce: *const u8,
+                nonce_len: usize,
+                aad: *const u8,
+                aad_len: usize,
+                msg: *const u8,
+                msg_len: usize,
+                out: *mut u8,
+                out_len: usize,
+            ) -> i32;
+            fn sift_cryptokit_open(
+                handle: *const c_void,
+                nonce: *const u8,
+                nonce_len: usize,
+                aad: *const u8,
+                aad_len: usize,
+                sealed: *const u8,
+                sealed_len: usize,
+                out: *mut u8,
+                out_len: usize,
+            ) -> i32;
+        }
+
+        /// A CryptoKit `SymmetricKey`, owned through an opaque handle and released on drop.
+        /// The key bytes live in CryptoKit's own storage, which zeroes itself on release.
+        pub(crate) struct Aead(NonNull<c_void>);
+
+        // SAFETY: the handle points at an immutable Swift object (`let key: SymmetricKey`);
+        // CryptoKit's sealing and opening read it without mutation, so sharing one handle
+        // across threads is sound. `PageCipher` is shared between the VFS's file handles.
+        unsafe impl Send for Aead {}
+        unsafe impl Sync for Aead {}
+
+        impl Aead {
+            pub(crate) fn new(key: &[u8; 32]) -> Self {
+                // SAFETY: `key` is 32 readable bytes for the duration of the call; the shim
+                // copies them into CryptoKit's storage and keeps no reference.
+                let handle = unsafe { sift_cryptokit_key_new(key.as_ptr(), key.len()) };
+                // The shim refuses only a key that is not 32 bytes, which the type rules out.
+                Self(NonNull::new(handle).expect("CryptoKit refused a 32-byte key"))
+            }
+
+            pub(crate) fn seal(
+                &self,
+                nonce: &[u8; 12],
+                aad: &[u8],
+                plaintext: &[u8],
+                out: &mut [u8],
+            ) -> Result<(), ()> {
+                // SAFETY: every pointer is paired with the length of the slice it came from,
+                // and the shim reads or writes exactly those lengths, returning non-zero
+                // before touching `out` if the lengths do not fit its contract.
+                let rc = unsafe {
+                    sift_cryptokit_seal(
+                        self.0.as_ptr(),
+                        nonce.as_ptr(),
+                        nonce.len(),
+                        aad.as_ptr(),
+                        aad.len(),
+                        plaintext.as_ptr(),
+                        plaintext.len(),
+                        out.as_mut_ptr(),
+                        out.len(),
+                    )
+                };
+                if rc == 0 { Ok(()) } else { Err(()) }
+            }
+
+            pub(crate) fn open(
+                &self,
+                nonce: &[u8; 12],
+                aad: &[u8],
+                sealed: &[u8],
+                out: &mut [u8],
+            ) -> Result<(), ()> {
+                // SAFETY: as `seal`. `out` is written only after the tag verified.
+                let rc = unsafe {
+                    sift_cryptokit_open(
+                        self.0.as_ptr(),
+                        nonce.as_ptr(),
+                        nonce.len(),
+                        aad.as_ptr(),
+                        aad.len(),
+                        sealed.as_ptr(),
+                        sealed.len(),
+                        out.as_mut_ptr(),
+                        out.len(),
+                    )
+                };
+                if rc == 0 { Ok(()) } else { Err(()) }
+            }
+        }
+
+        impl Drop for Aead {
+            fn drop(&mut self) {
+                // SAFETY: the handle came from `sift_cryptokit_key_new` and is released
+                // exactly once, here.
+                unsafe { sift_cryptokit_key_free(self.0.as_ptr()) };
+            }
+        }
+    }
+
+    #[cfg(any(not(target_os = "macos"), test))]
+    pub(super) mod vendored {
+        use aes_gcm::aead::{AeadInPlace, KeyInit};
+        use aes_gcm::{Aes256Gcm, Key, Nonce, Tag};
+
+        /// Which implementation this build seals with.
+        #[cfg(not(target_os = "macos"))]
+        pub const BACKEND: &str = "vendored AES-256-GCM";
+
+        /// The vendored construction. On macOS it exists only in tests, as the reference
+        /// CryptoKit is compared against.
+        pub(crate) struct Aead(Aes256Gcm);
+
+        impl Aead {
+            pub(crate) fn new(key: &[u8; 32]) -> Self {
+                Self(Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key)))
+            }
+
+            pub(crate) fn seal(
+                &self,
+                nonce: &[u8; 12],
+                aad: &[u8],
+                plaintext: &[u8],
+                out: &mut [u8],
+            ) -> Result<(), ()> {
+                if out.len() != plaintext.len() + super::super::TAG_LEN {
+                    return Err(());
+                }
+                let (body, tag_out) = out.split_at_mut(plaintext.len());
+                body.copy_from_slice(plaintext);
+                let tag = self
+                    .0
+                    .encrypt_in_place_detached(Nonce::from_slice(nonce), aad, body)
+                    .map_err(|_| ())?;
+                tag_out.copy_from_slice(&tag);
+                Ok(())
+            }
+
+            pub(crate) fn open(
+                &self,
+                nonce: &[u8; 12],
+                aad: &[u8],
+                sealed: &[u8],
+                out: &mut [u8],
+            ) -> Result<(), ()> {
+                let tag_len = super::super::TAG_LEN;
+                if sealed.len() < tag_len || out.len() != sealed.len() - tag_len {
+                    return Err(());
+                }
+                let (body, tag) = sealed.split_at(out.len());
+                out.copy_from_slice(body);
+                let result = self.0.decrypt_in_place_detached(
+                    Nonce::from_slice(nonce),
+                    aad,
+                    out,
+                    Tag::from_slice(tag),
+                );
+                if result.is_err() {
+                    // Nothing unauthenticated leaves, even into a buffer about to be dropped.
+                    out.fill(0);
+                    return Err(());
+                }
+                Ok(())
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::Aead;
+            use crate::page::TAG_LEN;
+
+            #[test]
+            fn a_failed_open_leaves_nothing_unauthenticated_in_out() {
+                // `open` copies the ciphertext into `out` before the tag is checked, so
+                // without the zeroing a refused page would leave the forger's bytes behind.
+                let aead = Aead::new(&[0x42; 32]);
+                let nonce = [7u8; 12];
+                let plain = [0x5Au8; 64];
+                let mut sealed = vec![0u8; plain.len() + TAG_LEN];
+                aead.seal(&nonce, b"aad", &plain, &mut sealed).unwrap();
+
+                for i in 0..sealed.len() {
+                    let mut forged = sealed.clone();
+                    forged[i] ^= 0x01;
+                    let mut out = vec![0xAAu8; plain.len()];
+                    assert_eq!(aead.open(&nonce, b"aad", &forged, &mut out), Err(()));
+                    assert!(out.iter().all(|&b| b == 0), "byte {i}: out not zeroed");
+                }
+                let mut out = vec![0xAAu8; plain.len()];
+                assert_eq!(aead.open(&nonce, b"other", &sealed, &mut out), Err(()));
+                assert!(out.iter().all(|&b| b == 0), "wrong AAD: out not zeroed");
+            }
+        }
     }
 }
 
@@ -620,5 +856,175 @@ mod byte_for_byte {
             cipher.open(7, &parse("sealed")).unwrap(),
             parse("plaintext")
         );
+    }
+
+    #[test]
+    fn this_build_seals_with_its_platforms_backend() {
+        // The fixture above proves whichever backend is compiled in. This pins *which* one,
+        // so a build that quietly fell back to the vendored construction on macOS — the
+        // alternative D-75 rejected, arriving through a cfg — fails here rather than passing
+        // the fixture and meaning nothing about CryptoKit.
+        let expected = if cfg!(target_os = "macos") {
+            "CryptoKit AES.GCM"
+        } else {
+            "vendored AES-256-GCM"
+        };
+        assert_eq!(BACKEND, expected);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod cryptokit_agrees_with_the_vendored_construction {
+    //! R-16 beyond one vector. The fixture pins one input; this compares CryptoKit with the
+    //! vendored construction across page sizes, additional data and nonces a single vector
+    //! cannot cover — the empty page, one byte, a block boundary either side, the store's
+    //! page size and a large one — and requires both to refuse the same forgeries.
+
+    use super::TAG_LEN;
+    use super::backend::{Aead as Platform, vendored::Aead as Vendored};
+
+    /// A small deterministic generator, so a failure names a reproducible case.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u8 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 56) as u8
+        }
+        fn fill(&mut self, buf: &mut [u8]) {
+            for b in buf {
+                *b = self.next();
+            }
+        }
+    }
+
+    const LENGTHS: &[usize] = &[0, 1, 15, 16, 17, 31, 32, 33, 255, 4095, 4096, 4097, 65_536];
+
+    #[test]
+    fn both_seal_every_input_to_the_same_bytes_and_open_each_others() {
+        let mut rng = Lcg(0x5EED_D075);
+        for case in 0..16 {
+            let mut key = [0u8; 32];
+            let mut nonce = [0u8; 12];
+            rng.fill(&mut key);
+            rng.fill(&mut nonce);
+            let platform = Platform::new(&key);
+            let vendored = Vendored::new(&key);
+
+            for &len in LENGTHS {
+                let mut aad = vec![0u8; usize::from(rng.next()) % 64];
+                rng.fill(&mut aad);
+                let mut plain = vec![0u8; len];
+                rng.fill(&mut plain);
+
+                let mut a = vec![0u8; len + TAG_LEN];
+                let mut b = vec![0u8; len + TAG_LEN];
+                platform.seal(&nonce, &aad, &plain, &mut a).unwrap();
+                vendored.seal(&nonce, &aad, &plain, &mut b).unwrap();
+                assert_eq!(
+                    a, b,
+                    "case {case}, length {len}: CryptoKit and vendored disagree"
+                );
+
+                let mut out = vec![0u8; len];
+                platform.open(&nonce, &aad, &b, &mut out).unwrap();
+                assert_eq!(
+                    out, plain,
+                    "case {case}, length {len}: CryptoKit opening vendored"
+                );
+                out.fill(0);
+                vendored.open(&nonce, &aad, &a, &mut out).unwrap();
+                assert_eq!(
+                    out, plain,
+                    "case {case}, length {len}: vendored opening CryptoKit"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn both_refuse_the_same_forgeries() {
+        let key = [0x42u8; 32];
+        let nonce = [7u8; 12];
+        let aad = b"additional data";
+        let platform = Platform::new(&key);
+        let vendored = Vendored::new(&key);
+        let plain = b"a page of a Sift store";
+        let mut sealed = vec![0u8; plain.len() + TAG_LEN];
+        platform.seal(&nonce, aad, plain, &mut sealed).unwrap();
+
+        let mut out = vec![0u8; plain.len()];
+        for i in 0..sealed.len() {
+            let mut t = sealed.clone();
+            t[i] ^= 0x80;
+            assert_eq!(
+                platform.open(&nonce, aad, &t, &mut out),
+                Err(()),
+                "byte {i}"
+            );
+            assert_eq!(
+                vendored.open(&nonce, aad, &t, &mut out),
+                Err(()),
+                "byte {i}"
+            );
+        }
+        let mut other_nonce = nonce;
+        other_nonce[11] ^= 1;
+        assert_eq!(platform.open(&other_nonce, aad, &sealed, &mut out), Err(()));
+        assert_eq!(
+            platform.open(&nonce, b"other data", &sealed, &mut out),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn a_wrongly_sized_buffer_is_refused_rather_than_overrun() {
+        // The shim's length checks are the only thing between a caller's mistake and a
+        // write past the end of `out`, so they are asserted rather than trusted.
+        let platform = Platform::new(&[1u8; 32]);
+        let nonce = [0u8; 12];
+        let plain = [9u8; 32];
+        let mut short = vec![0u8; plain.len() + TAG_LEN - 1];
+        assert_eq!(platform.seal(&nonce, &[], &plain, &mut short), Err(()));
+        let mut long = vec![0u8; plain.len() + TAG_LEN + 1];
+        assert_eq!(platform.seal(&nonce, &[], &plain, &mut long), Err(()));
+
+        let mut sealed = vec![0u8; plain.len() + TAG_LEN];
+        platform.seal(&nonce, &[], &plain, &mut sealed).unwrap();
+        let mut out = vec![0u8; plain.len() - 1];
+        assert_eq!(platform.open(&nonce, &[], &sealed, &mut out), Err(()));
+        assert_eq!(
+            platform.open(&nonce, &[], &sealed[..TAG_LEN - 1], &mut []),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn one_key_is_usable_from_many_threads_at_once() {
+        // `PageCipher` is shared between the VFS's handles, which is what the `Send` and
+        // `Sync` claims on the CryptoKit handle rest on.
+        let platform = std::sync::Arc::new(Platform::new(&[3u8; 32]));
+        let vendored = Vendored::new(&[3u8; 32]);
+        let mut expected = vec![0u8; 4096 + TAG_LEN];
+        vendored
+            .seal(&[5u8; 12], b"aad", &[6u8; 4096], &mut expected)
+            .unwrap();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let p = std::sync::Arc::clone(&platform);
+                std::thread::spawn(move || {
+                    let mut out = vec![0u8; 4096 + TAG_LEN];
+                    for _ in 0..200 {
+                        p.seal(&[5u8; 12], b"aad", &[6u8; 4096], &mut out).unwrap();
+                    }
+                    out
+                })
+            })
+            .collect();
+        for t in threads {
+            assert_eq!(t.join().unwrap(), expected);
+        }
     }
 }

@@ -7,7 +7,8 @@
 # writes a store the other platform cannot read, or reads one incorrectly.
 #
 # A platform backend that produces different bytes for these inputs is wrong,
-# however audited its cipher is.
+# however audited its cipher is. Every build checks this file through the one
+# cipher it carries: CryptoKit on macOS, the vendored construction elsewhere.
 #
 # Inputs: page number 7, write counter 42.
 # Regenerate with `cargo run -p sift-crypto --example bless-fixtures` — but read
