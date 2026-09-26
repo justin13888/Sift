@@ -629,9 +629,8 @@ mod tests {
 
     /// FR-8's *load once*, at the layer that decides it.
     ///
-    /// Asserted here rather than through the document's `blocked` count, because that count
-    /// comes from the filter engine's verdicts and never consults the allowance state — a
-    /// test written against it passes whether `once` means once, forever, or nothing.
+    /// Asserted here, at the layer that decides it, rather than through a document's
+    /// `blocked` count — which is derived from [`Broker::withheld`] and so from this.
     #[test]
     fn loading_once_permits_this_document_and_no_other() {
         let origin = attested("sender.test");

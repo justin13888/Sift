@@ -322,6 +322,16 @@ pub struct App {
     /// window at once, which is a durable allowance nobody asked for. It is also bounded by
     /// construction, in a process specified to run for weeks.
     allowed_once_message: Option<LocalId>,
+    /// D-10's authority — the filter engine built from the bundled lists, or its absence.
+    ///
+    /// **Held only while a window is open and the governor is at L0**, which is NFR-42's
+    /// eviction policy: loaded when a window opens, released when the last one closes, and
+    /// dropped at the first tier that is not steady state. An absent authority denies, so
+    /// every state in which this is `Absent` is one in which nothing remote is fetched.
+    ///
+    /// Private, and changed only by [`App::reconcile_filter_engine`] and the shed, so that
+    /// no caller can load forty megabytes in response to a pressure signal.
+    filter: sift_block::engine::Authority,
 }
 
 impl std::fmt::Debug for App {
@@ -376,6 +386,8 @@ impl App {
             last_pressure_at: None,
             last_pressure: sift_governor::Pressure::Normal,
             allowed_once_message: None,
+            // Absent until a window opens: no window means no body view and so no caller.
+            filter: sift_block::engine::Authority::Absent,
         }
     }
 
@@ -1422,6 +1434,10 @@ impl App {
         if let Some(t) = &transition {
             self.shed(t);
         }
+        // After the shed rather than inside it: a transition *down* to L0 is how the engine
+        // comes back, and only once L-19 of clear signal has passed — the governor's
+        // hysteresis is what makes this a return rather than the reload-on-demand D-10 bans.
+        self.reconcile_filter_engine();
         // The wheel is the governor's clock, and a tier entered with nothing armed would never
         // be released. Armed here rather than only at the boundary so that any caller which
         // can raise a tier also gives it a way down.
@@ -1453,6 +1469,51 @@ impl App {
         // stated rather than hidden: the tier is real and the release is outstanding.
         if transition.to == sift_governor::Tier::L3 {
             self.resources.shed();
+        }
+        // NFR-42's forty megabytes go at the first tier that is not steady state. The window
+        // may well stay open, and that is D-10's stated case: the authority is absent, so
+        // every remote fetch is refused and the reason names the shed.
+        if transition.to.releases_filter_engine() {
+            self.filter = sift_block::engine::Authority::Absent;
+        }
+    }
+
+    /// Tell the layer whether a window exists — FR-25, and NFR-42's eviction policy.
+    ///
+    /// A method rather than only the field, because a window opening is when the filter
+    /// engine is loaded and the last one closing is when it is released: a shell that only
+    /// wrote the flag would leave forty megabytes resident with no body view to use them.
+    pub fn set_window_present(&mut self, present: bool) {
+        self.has_window = present;
+        self.reconcile_filter_engine();
+    }
+
+    /// Whether D-10's authority is loaded — FR-34 shows it, and a test asserts the lifecycle.
+    #[must_use]
+    pub const fn filter_engine_loaded(&self) -> bool {
+        self.filter.is_loaded()
+    }
+
+    /// Bring the filter engine into line with the governor and the window.
+    ///
+    /// **One predicate decides both directions**, `Governor::filter_engine_may_return`: held
+    /// while a window is open at L0, absent otherwise. Loading is therefore never a response
+    /// to a pressure signal — at any tier above L0 this only ever releases.
+    ///
+    /// Called where the answer can change (a window opening or closing, a governor
+    /// transition) and again before a body renders or a resource is answered. The second
+    /// pair is what makes "the engine MUST be loaded before the first body renders" hold
+    /// even for a caller that wrote `has_window` directly, and it is cheap when nothing
+    /// changes: a comparison and no allocation.
+    fn reconcile_filter_engine(&mut self) {
+        use sift_block::engine::{Authority, Blocker};
+        let may_hold = self.governor.filter_engine_may_return(self.has_window);
+        match (&self.filter, may_hold) {
+            (Authority::Loaded(_), false) => self.filter = Authority::Absent,
+            (Authority::Absent, true) => {
+                self.filter = Authority::Loaded(Box::new(Blocker::bundled()));
+            }
+            _ => {}
         }
     }
 

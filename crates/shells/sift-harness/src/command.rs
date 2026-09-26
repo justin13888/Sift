@@ -446,11 +446,11 @@ fn open(app: &mut App, args: &[&str]) -> Output {
 fn window(app: &mut App, args: &[&str]) -> Output {
     match args {
         ["open"] => {
-            app.has_window = true;
+            app.set_window_present(true);
             Ok(vec!["window open".to_owned()])
         }
         ["close"] => {
-            app.has_window = false;
+            app.set_window_present(false);
             // FR-25: closing the window is not quitting. Sync continues, the queue
             // continues, and the process stays resident.
             Ok(vec![

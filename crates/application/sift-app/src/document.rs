@@ -13,7 +13,7 @@
 //! messages and falsify the property D-28 rests on — that two messages share no address
 //! space.
 
-use sift_broker::broker::Answer;
+use sift_broker::broker::{Answer, Reason};
 use sift_foundation::identity::LocalId;
 
 use crate::App;
@@ -95,8 +95,8 @@ pub struct Withheld {
     /// The address the sender wrote, shown under the same rules as a link: decoded, stripped,
     /// and never fetched from.
     pub displayed: String,
-    /// Why. `AbsentAuthority` is the honest answer until the filter lists ship, and it says
-    /// *shed* rather than *rule* — which is a different sentence and the true one.
+    /// Why, as the broker would answer a request for it now. With no window open or the
+    /// engine shed it says *shed* rather than *rule* — a different sentence, and the true one.
     pub rule: String,
 }
 
@@ -112,6 +112,9 @@ impl App {
     /// or a stage refused it. A refusal is a degradation to FR-9's raw view rather than a
     /// panic — the pipeline catches at every stage boundary.
     pub fn open_document(&mut self, id: LocalId, dark: bool) -> Result<Document, String> {
+        // "The engine MUST be loaded before the first body renders." Where a window is open
+        // at L0 this loads it if nothing has yet; anywhere else it stays absent and denies.
+        self.reconcile_filter_engine();
         let owner = self
             .owner_of_stored(id)
             .ok_or("no account holds this message")?;
@@ -156,7 +159,7 @@ impl App {
             // resource is third-party under the strictest rules. D-11's fourth priority is
             // exactly this case, and it is the correct answer rather than a placeholder.
             origin: context_origin.clone(),
-            blocker: None,
+            blocker: Some(&self.filter),
             dark,
             // The ordinary threshold until the shell reports the system's increased-contrast
             // preference across the boundary; nothing carries it here yet. The pipeline and
@@ -165,26 +168,6 @@ impl App {
             broker: &mut self.resources,
         };
         let rendered = sift_pipeline::render(&selected, &mut context).map_err(|e| e.to_string())?;
-
-        // A refusal is anything that is not an allow, which includes `AbsentAuthority`:
-        // D-10 makes a missing filter engine **deny**, never fall through, so a shed that
-        // dropped the engine shows as content withheld rather than as content loaded.
-        //
-        // `positions` and `verdicts` are in step by construction — the pipeline documents
-        // that, and I2 is asserted over the pair — so zipping them is reading the pairing
-        // rather than assuming one.
-        let withheld: Vec<Withheld> = rendered
-            .positions
-            .iter()
-            .zip(&rendered.verdicts)
-            .filter(|(_, verdict)| !verdict.permits_fetch())
-            .map(|(position, verdict)| Withheld {
-                element: position.element.clone(),
-                attribute: position.attribute.clone(),
-                displayed: sift_block::link::display_form(&position.original),
-                rule: describe(verdict),
-            })
-            .collect();
 
         // Nothing keys a durable allowance while the origin is null, so the control that
         // would set one is absent rather than present and ineffective.
@@ -197,10 +180,9 @@ impl App {
         let links: Vec<Link> = rendered
             .links
             .iter()
-            // No removal rules are loaded, so nothing is stripped and the wrapper recovery is
-            // the only transformation. That is the same shed as the absent authority above:
-            // the answer is honest about what it did rather than claiming a cleaning it did
-            // not perform.
+            // No removal rules are bundled, so nothing is stripped and the wrapper recovery is
+            // the only transformation. The answer is honest about what it did rather than
+            // claiming a cleaning it did not perform.
             .map(|target| Link::of(&sift_block::link::unwrap(target, &[])))
             .collect();
 
@@ -216,6 +198,37 @@ impl App {
         } else {
             self.allowed_once_message = None;
         }
+
+        // **What was withheld is asked of the broker**, after the allowance above is applied,
+        // so the count is the answer the body view's requests will actually receive. It used
+        // to be the authority's verdicts alone, which never consulted the allowance: with an
+        // engine loaded that would have said "nothing withheld" over a message whose every
+        // image the broker was refusing, and hidden the very control that would load them.
+        //
+        // A token that names no live document cannot happen here — it was minted a moment
+        // ago — but were it to, every position is reported withheld rather than none.
+        let infrastructure = sift_block::origin::Infrastructure::default();
+        let refusals = self
+            .resources
+            .withheld(rendered.token.as_str(), &self.filter, &infrastructure)
+            .unwrap_or_else(|| vec![Some(Reason::Shed); rendered.positions.len()]);
+        let authority_loaded = self.filter.is_loaded();
+        // In step by construction: the pipeline binds one broker position per sanitized
+        // position, in order.
+        let withheld: Vec<Withheld> = rendered
+            .positions
+            .iter()
+            .zip(refusals)
+            .filter_map(|(position, refusal)| {
+                let reason = refusal?;
+                Some(Withheld {
+                    element: position.element.clone(),
+                    attribute: position.attribute.clone(),
+                    displayed: sift_block::link::display_form(&position.original),
+                    rule: describe(&reason, authority_loaded),
+                })
+            })
+            .collect();
 
         Ok(Document {
             html: rendered.html,
@@ -235,19 +248,20 @@ impl App {
     /// The address is validated against the **live** token. A fabricated one resolves to
     /// nothing, which is what makes D-28's addressing a boundary rather than a naming scheme.
     ///
-    /// With no filter list loaded the authority is absent, and D-10 makes an absent authority
-    /// **deny** rather than fall through — so until the lists ship, every remote fetch is
-    /// refused and the reader says so. That is the correct answer rather than a gap: a
-    /// blocker that failed open would be worse than no blocker, because the product would
-    /// claim a protection it was not providing.
+    /// Answered under the authority the application holds: the bundled lists while a window
+    /// is open at L0, and **absent** otherwise — no window, or a shed tier. D-10 makes an
+    /// absent authority **deny** rather than fall through, so in that state every remote
+    /// fetch is refused and the reader says so. A blocker that failed open would be worse
+    /// than no blocker, because the product would claim a protection it was not providing.
     pub fn resolve_resource(&mut self, url: &str, transferred: Option<u64>) -> Answer {
+        self.reconcile_filter_engine();
         let request = sift_broker::broker::Request {
             url: url.to_owned(),
             transferred_length: transferred,
         };
         self.resources.answer(
             &request,
-            &sift_block::engine::Authority::Absent,
+            &self.filter,
             &sift_block::origin::Infrastructure::default(),
         )
     }
@@ -275,22 +289,30 @@ impl Link {
     }
 }
 
-/// Name a decision in the words that are true of it.
+/// Name a refusal in the words that are true of it.
 ///
-/// `AbsentAuthority` is not "blocked by a rule" — no rule ran. Saying so is the difference
-/// between a user believing a filter list caught something and knowing that Sift withheld it
-/// because it had nothing to decide with.
-fn describe(decision: &sift_block::engine::Decision) -> String {
-    use sift_block::engine::{Decision, Verdict};
-    match decision {
-        Decision::Agreed(Verdict::Block) => "a filter rule".to_owned(),
-        Decision::Agreed(Verdict::Allow) => "allowed".to_owned(),
-        Decision::Disagreed { authority, .. } => {
-            format!("{authority:?}, with the backstop disagreeing — a defect worth reporting")
-        }
-        Decision::AbsentAuthority => "no filter list is loaded, so nothing is fetched".to_owned(),
+/// The shed is not "blocked by a rule" — no rule ran. Saying so is the difference between a
+/// user believing a filter list caught something and knowing that Sift withheld it because it
+/// had nothing to decide with.
+///
+/// **With the authority absent, a sender refusal is reported as the shed**, because that is
+/// the answer that stays true after the user acts: allowing the sender would still fetch
+/// nothing, and a reason that invites a click which cannot help is the complaint FR-8's
+/// button was built to answer.
+fn describe(reason: &Reason, authority_loaded: bool) -> String {
+    match reason {
+        Reason::Shed => SHED.to_owned(),
+        Reason::NotAllowedBySender if !authority_loaded => SHED.to_owned(),
+        Reason::NotAllowedBySender => "remote content is blocked until you allow it".to_owned(),
+        Reason::Rule(detail) => format!("a filter rule ({detail})"),
+        Reason::Heuristic(findings) => format!("a tracking heuristic ({findings:?})"),
+        Reason::NetworkPolicy => "the current network policy allows no fetches".to_owned(),
+        Reason::Bounds(bound) => format!("larger than {bound} allows"),
     }
 }
+
+/// FR-33's reason when D-10's authority is absent.
+const SHED: &str = "no filter list is loaded, so nothing is fetched";
 
 /// FR-42 — the unsubscribe destination a message declares, recovered from what is renderable.
 ///
