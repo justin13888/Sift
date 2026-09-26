@@ -4547,6 +4547,165 @@ mod tests {
         assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
     }
 
+    /// A weak handle on the layer behind `app`, to watch who holds it without keeping it.
+    fn watch(app: *mut SiftApp) -> std::sync::Weak<Layer> {
+        // SAFETY: `app` came from `sift_initialize` and is live; the reference taken here is
+        // handed straight back, so the count is unchanged.
+        let strong = unsafe { std::sync::Arc::from_raw(app.cast::<Layer>().cast_const()) };
+        let weak = std::sync::Arc::downgrade(&strong);
+        let _ = std::sync::Arc::into_raw(strong);
+        weak
+    }
+
+    /// Wait until a job on the worker holds its own reference to the layer.
+    ///
+    /// **The reference, not `running()`.** The worker reports a job running before the job
+    /// upgrades its weak handle, so a shutdown in that gap would free the layer while the test
+    /// still holds a lock inside it. Two strong references — the shell's and the job's — is the
+    /// moment the layer is guaranteed to outlive a quit.
+    fn job_holds(weak: &std::sync::Weak<Layer>) {
+        let started = std::time::Instant::now();
+        while weak.strong_count() < 2 {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the job never started"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// Wait until the layer is gone, which after a quit means the job holding it returned.
+    fn freed(weak: &std::sync::Weak<Layer>) {
+        let started = std::time::Instant::now();
+        while weak.strong_count() > 0 {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the layer outlived the job that was holding it, so a quit leaks it"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// #49, decision 11 — the timer claim stays held through the worker's fire, so nothing
+    /// arms a second timer while the fire's work is still running.
+    ///
+    /// An account added mid-fire claims the timer through `ensure_timer`. Were the claim
+    /// released when the timer fired, on the main loop, that call would find it free and arm
+    /// a second timer beside the one the fire re-arms — two wakeups a minute, for good, since
+    /// each fire re-arms its own successor. Held, the call returns at the claim without even
+    /// taking the session lock the fire is waiting on.
+    #[test]
+    fn the_timer_stays_claimed_while_a_fire_is_still_working() {
+        let asked: &'static Asked = Box::leak(Box::default());
+        let app = start_asking(asked);
+        let name = "mail";
+        let mut account = SiftId::from_u128(0);
+        assert_eq!(
+            unsafe { sift_add_replayed_account(app, name.as_ptr(), name.len(), &raw mut account) },
+            SiftStatus::Ok
+        );
+        let fired = asked
+            .timers
+            .lock()
+            .expect("timers")
+            .first()
+            .copied()
+            .expect("adding an account armed no timer");
+        let weak = watch(app);
+
+        // The fire's work is stuck behind a provider that has not answered.
+        let layer = unsafe { layer(app) }.expect("a live layer");
+        let held = layer.session.lock().expect("session");
+        sift_run_scheduled(fired);
+        job_holds(&weak);
+
+        assert!(
+            layer
+                .timer_pending
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "the claim was released before the fire's work ran, so a second timer can be armed"
+        );
+        let handle = app as usize;
+        assert!(
+            returns_promptly(move || {
+                let live = unsafe { super::layer(handle as *mut SiftApp) }.expect("a live layer");
+                crate::layer::ensure_timer(live);
+            }),
+            "a mid-fire claim went past the timer claim and waited on the fire's session"
+        );
+        assert_eq!(
+            asked.timers.lock().expect("timers").len(),
+            1,
+            "a timer was armed while a fire was still running"
+        );
+
+        drop(held);
+        settle(app);
+        assert_eq!(
+            asked.timers.lock().expect("timers").len(),
+            2,
+            "the fire's own re-arm is the one timer that follows it"
+        );
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    /// #49 under D-70 — a wheel fire still running when the shell quits neither posts its
+    /// completion nor re-arms a timer into the shell that is gone.
+    ///
+    /// The `Rearm` guard runs when the fire finishes, which here is after the quit. Its
+    /// `ensure_timer` would find the claim free — the guard itself just released it — and the
+    /// account still due, and would arm a timer through a context the shell may have freed.
+    /// `while_live` is the only thing between the two.
+    #[test]
+    fn a_fire_that_outlives_the_quit_arms_no_timer() {
+        let asked: &'static Asked = Box::leak(Box::default());
+        let app = start_asking(asked);
+        let name = "mail";
+        let mut account = SiftId::from_u128(0);
+        assert_eq!(
+            unsafe { sift_add_replayed_account(app, name.as_ptr(), name.len(), &raw mut account) },
+            SiftStatus::Ok
+        );
+        let fired = asked
+            .timers
+            .lock()
+            .expect("timers")
+            .first()
+            .copied()
+            .expect("adding an account armed no timer");
+        let weak = watch(app);
+
+        let layer = unsafe { layer(app) }.expect("a live layer");
+        let held = layer.session.lock().expect("session");
+        sift_run_scheduled(fired);
+        job_holds(&weak);
+        let posts = asked.posts.load(std::sync::atomic::Ordering::SeqCst);
+
+        let handle = app as usize;
+        assert!(
+            returns_promptly(move || {
+                let status = unsafe { sift_shutdown(handle as *mut SiftApp) };
+                assert_eq!(status, SiftStatus::Ok);
+            }),
+            "shutdown waited for a fire in flight, which D-70 forbids"
+        );
+
+        // The provider answers after the quit, and the fire runs to its end — re-arm included.
+        drop(held);
+        freed(&weak);
+        assert_eq!(
+            asked.timers.lock().expect("timers").len(),
+            1,
+            "a fire that finished after shutdown armed a timer in a shell that is gone"
+        );
+        assert_eq!(
+            asked.posts.load(std::sync::atomic::Ordering::SeqCst),
+            posts,
+            "a fire that finished after shutdown posted to a shell that is gone"
+        );
+    }
+
     /// #49 under D-70 — quitting does not wait for a sync in flight, and the sync that
     /// outlives the quit neither reaches the shell nor leaks the layer.
     #[test]
@@ -4560,13 +4719,7 @@ mod tests {
             SiftStatus::Ok
         );
 
-        // A weak handle, to watch the layer go away without keeping it.
-        let weak = {
-            let strong = unsafe { std::sync::Arc::from_raw(app.cast::<Layer>().cast_const()) };
-            let weak = std::sync::Arc::downgrade(&strong);
-            let _ = std::sync::Arc::into_raw(strong);
-            weak
-        };
+        let weak = watch(app);
 
         let layer = unsafe { layer(app) }.expect("a live layer");
         let held = layer.session.lock().expect("session");
@@ -4574,15 +4727,7 @@ mod tests {
             unsafe { sift_sync_account(app, name.as_ptr(), name.len()) },
             SiftStatus::Ok
         );
-        let worker = layer.worker.get().expect("a worker");
-        let started = std::time::Instant::now();
-        while !worker.running() {
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(10),
-                "the sync never started"
-            );
-            std::thread::yield_now();
-        }
+        job_holds(&weak);
         let before = asked.posts.load(std::sync::atomic::Ordering::SeqCst);
 
         let handle = app as usize;
@@ -4597,14 +4742,7 @@ mod tests {
         // The provider answers after the quit. The running job still holds the layer, so the
         // lock this test holds is still a lock on something that exists.
         drop(held);
-        let started = std::time::Instant::now();
-        while weak.upgrade().is_some() {
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(10),
-                "the layer outlived the sync that was holding it, so a quit leaks it"
-            );
-            std::thread::yield_now();
-        }
+        freed(&weak);
         assert_eq!(
             asked.posts.load(std::sync::atomic::Ordering::SeqCst),
             before,
