@@ -479,6 +479,16 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         case "read.toggle-dark-transform":
             windows.first?.toggleDarkTransform()
             return
+        case "read.find-in-message":
+            // D-116: the engine's own find, from a native field in the reader. Nothing crosses
+            // the boundary — finding text is about what is on screen, and the layer has no
+            // screen. A standalone reader with the keyboard gets it; otherwise the main window.
+            if let reader = standaloneReaders.first(where: { $0.window?.isKeyWindow == true }) {
+                reader.findInMessage()
+            } else {
+                (windows.first(where: \.isKey) ?? windows.first)?.findInMessage()
+            }
+            return
         case "search.narrow-to-account":
             windows.first?.narrowSearchToAccount()
             return
