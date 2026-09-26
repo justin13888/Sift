@@ -42,7 +42,8 @@ them.
 
 - [Scope](product/scope.md) · [Platforms and distribution](product/platforms-and-distribution.md) ·
   [Platform baseline](product/platform-baseline.md) ·
-  [Reference environment](product/reference-environment.md) · [Roadmap](product/roadmap.md)
+  [Reference environment](product/reference-environment.md) ·
+  [Relevance corpus](product/relevance-corpus.md) · [Roadmap](product/roadmap.md)
 
 **Architecture** — process structure and the layers of the application.
 

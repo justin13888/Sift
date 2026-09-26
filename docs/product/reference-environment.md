@@ -136,6 +136,11 @@ answer that was not generated alongside it, so a synthetic relevance corpus meas
 is the only corpus of the three that requires human judgement to build, and that cost is the reason to
 size it deliberately rather than aspire to it.
 
+How a judgement is recorded, what it holds, where the corpus lives and how large it must be, and what the
+ranking report read over it can and cannot settle, are in the [relevance corpus](relevance-corpus.md)
+protocol. The instrument now exists; the judgements do not, and only the person whose mailbox it is can
+record them.
+
 ## NFR-26 — Rendering correctness gate
 
 Rendering MUST be correct across the fidelity corpus, verified by visual-regression snapshots per
