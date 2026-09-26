@@ -271,7 +271,11 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         switch pane {
         case .sidebar: window?.makeFirstResponder(sidebar.focusTarget)
         case .list: window?.makeFirstResponder(list.focusTarget)
-        case .reader: window?.makeFirstResponder(reader.view)
+        // The body, not the reader's container: the container refuses first responder, so the
+        // window would take the keyboard and nothing visible would have it. With no message
+        // open there is nothing to focus, and the keyboard stays where it was.
+        case .reader:
+            if let target = reader.focusTarget { window?.makeFirstResponder(target) }
         }
     }
 
@@ -291,6 +295,15 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     func toggleDarkTransform() {
         reader.toggleDarkTransform(app: app)
     }
+
+    /// `read.find-in-message` — FR-24, in this window's reader (D-116).
+    func findInMessage() {
+        reader.beginFind()
+    }
+
+    /// Whether this is the window the keyboard is in, so a reader action reaches the reader
+    /// the user is looking at.
+    var isKey: Bool { window?.isKeyWindow == true }
 
     /// `search.narrow-to-account`: search the account this window is looking at.
     ///

@@ -216,12 +216,9 @@ pub const ACTIONS: &[Action] = &[
         Scope::OpenMessage,
         "the sender's origin is not attested, so there is no sender to record the choice against",
     ),
-    not_yet(
-        "read.find-in-message",
-        Scope::OpenMessage,
-        "finding inside a body needs a search surface the reader does not have, and the body \
-         view runs no script that could provide one",
-    ),
+    // D-116: the engine's own find, driven from a native field in the reader. It needs no
+    // script, which D-50 forbids in the body view, and no intent — nothing is mutated.
+    act("read.find-in-message", Scope::OpenMessage),
     // FR-41. These hand off to the platform's mail handler and construct nothing.
     act("read.reply", Scope::OpenMessage),
     act("read.reply-all", Scope::OpenMessage),
@@ -495,6 +492,27 @@ mod tests {
     }
 
     #[test]
+    fn find_in_message_is_offered_exactly_when_a_message_is_open() {
+        // D-116 answered the P0 spike with the engine's own find, so FR-24's keyboard route to
+        // finding text is a real action rather than one carried as not-yet.
+        let find = by_id("read.find-in-message").expect("in the register");
+        assert_eq!(find.reach, Reach::Now);
+        assert_eq!(find.mutates, None, "finding text mutates nothing");
+        let open = Context {
+            selection_len: 1,
+            has_open_message: true,
+            has_window: true,
+            capabilities: None,
+        };
+        let closed = Context {
+            has_open_message: false,
+            ..open
+        };
+        assert!(find.is_available(&open));
+        assert!(!find.is_available(&closed), "there is nothing to find in");
+    }
+
+    #[test]
     fn an_action_nothing_can_perform_is_absent_whatever_the_account_declares() {
         // D-98's rule is that an unavailable action is absent rather than greyed, and until
         // `Reach` existed the mechanism could only express scope and capability — so an action
@@ -507,7 +525,6 @@ mod tests {
         };
         for id in [
             "read.show-raw-source",
-            "read.find-in-message",
             "navigate.next-folder",
             "search.narrow-to-folder",
         ] {

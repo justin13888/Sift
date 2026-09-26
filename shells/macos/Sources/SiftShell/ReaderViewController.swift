@@ -21,6 +21,12 @@ final class ReaderViewController: NSViewController {
     private let attachments = AttachmentBar(frame: .zero)
     private let empty = NSTextField(labelWithString: "No message selected")
     private let body = BodyView(frame: .zero)
+    /// FR-24's find-in-message, as native chrome above the body — D-116. Hidden until asked
+    /// for, and hidden again with every new message: a find is about one message.
+    private let findField = NSSearchField()
+    private let findReport = NSTextField(labelWithString: "")
+    private let findDone = NSButton()
+    private lazy var findBar = NSStackView(views: [findField, findReport, findDone])
     /// This document's links, copied out of the layer while the document is open.
     ///
     /// Copied rather than read at click time because the rows borrow from the document, and
@@ -67,6 +73,27 @@ final class ReaderViewController: NSViewController {
         header.translatesAutoresizingMaskIntoConstraints = false
         header.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
 
+        // Find is a native field, never markup: a find control drawn inside the body would be
+        // one a sender could counterfeit. Return finds the next match and Shift-Return the
+        // previous one; Escape closes the bar and hands the keyboard back to where it was.
+        findField.placeholderString = "Find in Message"
+        findField.sendsWholeSearchString = true
+        findField.delegate = self
+        findField.setAccessibilityLabel("Find in message")
+        findField.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+        findReport.font = .preferredFont(forTextStyle: .caption1)
+        findReport.textColor = .secondaryLabelColor
+        findDone.title = "Done"
+        findDone.bezelStyle = .rounded
+        findDone.controlSize = .small
+        findDone.target = self
+        findDone.action = #selector(endFind)
+        findBar.orientation = .horizontal
+        findBar.spacing = 8
+        findBar.edgeInsets = NSEdgeInsets(top: 6, left: 24, bottom: 6, right: 24)
+        findBar.translatesAutoresizingMaskIntoConstraints = false
+        findBar.isHidden = true
+
         // The order is the security argument made visible: chrome, then what was withheld,
         // then the body, then what is attached. Everything a sender wrote is in the one band
         // in the middle, and every control is outside it.
@@ -74,7 +101,7 @@ final class ReaderViewController: NSViewController {
         attachments.translatesAutoresizingMaskIntoConstraints = false
         body.translatesAutoresizingMaskIntoConstraints = false
 
-        let column = NSStackView(views: [header, blockedBar, body, attachments])
+        let column = NSStackView(views: [header, blockedBar, findBar, body, attachments])
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 0
@@ -95,6 +122,7 @@ final class ReaderViewController: NSViewController {
             column.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             header.widthAnchor.constraint(equalTo: column.widthAnchor),
             blockedBar.widthAnchor.constraint(equalTo: column.widthAnchor),
+            findBar.widthAnchor.constraint(equalTo: column.widthAnchor),
             attachments.widthAnchor.constraint(equalTo: column.widthAnchor),
             body.widthAnchor.constraint(equalTo: column.widthAnchor),
             empty.centerXAnchor.constraint(equalTo: container.centerXAnchor),
@@ -127,6 +155,111 @@ final class ReaderViewController: NSViewController {
         body.isHidden = true
         empty.isHidden = false
         links = []
+        closeFindBar()
+    }
+
+    /// `read.find-in-message` — FR-24's keyboard route to finding text in the open message.
+    ///
+    /// Shows the bar and gives it the keyboard. Invoked again while the bar is open, it selects
+    /// the query so a new one can be typed over it, which is what the platform's own find does.
+    func beginFind() {
+        _ = view
+        guard showing != nil, !body.isHidden else {
+            NSSound.beep()
+            return
+        }
+        // Remembered only when the bar opens: a second ⌘F while it is open would otherwise
+        // remember the find field itself, and closing would hand the keyboard straight back
+        // to the bar it just hid.
+        if findBar.isHidden {
+            findReturn = ReaderViewController.owner(of: view.window?.firstResponder)
+        }
+        findBar.isHidden = false
+        view.window?.makeFirstResponder(findField)
+        findField.currentEditor()?.selectAll(nil)
+    }
+
+    /// Where the keyboard was before the find bar took it, so closing the bar returns it there.
+    /// Weak, because a find is not a reason to keep a view alive.
+    private weak var findReturn: NSResponder?
+
+    /// The view that takes the keyboard when the reader is focused — the body, which accepts
+    /// it, rather than this controller's container, which refuses it. `nil` while no message
+    /// is shown: there is nothing in the reader to put the keyboard on.
+    var focusTarget: NSView? {
+        _ = view
+        return body.isHidden ? nil : body.keyboardTarget
+    }
+
+    /// The responder a first responder stands for. A text field being edited is first
+    /// responder through the window's shared field editor, and the field editor belongs to
+    /// whichever field is edited next — the field is what has to be given the keyboard back.
+    private static func owner(of responder: NSResponder?) -> NSResponder? {
+        if let editor = responder as? NSTextView, editor.isFieldEditor,
+            let field = editor.delegate as? NSResponder
+        {
+            return field
+        }
+        return responder
+    }
+
+    /// Find the query again, forwards or backwards, reporting only whether there was a match —
+    /// the engine's find answers that and not a count.
+    private func findAgain(backwards: Bool) {
+        let query = findField.stringValue
+        guard !query.isEmpty else {
+            findReport.stringValue = ""
+            return
+        }
+        body.find(query, backwards: backwards) { [weak self] found in
+            // A later query may have been typed while this one was answered; the report is
+            // about what the field says now or it is about nothing.
+            guard let self, self.findField.stringValue == query else { return }
+            self.findReport.stringValue = found ? "" : "Not found"
+            if !found {
+                NSAccessibility.post(
+                    element: self.findReport, notification: .announcementRequested,
+                    userInfo: [.announcement: "Not found", .priority: NSAccessibilityPriorityLevel.high.rawValue])
+            }
+        }
+    }
+
+    @objc private func endFind() {
+        closeFindBar()
+    }
+
+    /// Hide the bar, and where it had the keyboard, hand the keyboard back rather than leave
+    /// it in a hidden field or with the window (FR-24).
+    ///
+    /// It goes to whatever had it before the bar opened, where that is still an on-screen view
+    /// that takes it; otherwise to the body. **Not to this controller's view**, a plain
+    /// container that refuses first responder, so the window would take the keyboard and
+    /// nothing a person could see would have it. A bar closed while the keyboard is elsewhere —
+    /// Done clicked after focusing the list, or the message changing under a list selection —
+    /// leaves the keyboard where it is.
+    private func closeFindBar() {
+        let hadKeyboard = !findBar.isHidden && findBarHasKeyboard
+        findBar.isHidden = true
+        findReport.stringValue = ""
+        let back = findReturn
+        findReturn = nil
+        guard hadKeyboard, let window = view.window else { return }
+        if let back = back as? NSView, back.window === window, !back.isHiddenOrHasHiddenAncestor,
+            back.acceptsFirstResponder, window.makeFirstResponder(back)
+        {
+            return
+        }
+        // With no message there is nothing to give it to, and the window holding it is still
+        // better than a hidden field that would go on taking keystrokes.
+        window.makeFirstResponder(focusTarget)
+    }
+
+    /// Whether the keyboard is in the find bar — in the field, through the field editor, or on
+    /// Done under full keyboard access.
+    private var findBarHasKeyboard: Bool {
+        guard let view = ReaderViewController.owner(of: view.window?.firstResponder) as? NSView
+        else { return false }
+        return view.isDescendant(of: findBar)
     }
 
     /// FR-31's transform, per message. **Off by default and per message**, because a transform
@@ -182,7 +315,11 @@ final class ReaderViewController: NSViewController {
         }
         // A different message starts from the shipped default: the transform is a decision
         // about one message, and carrying it into the next one silently would make it a mode.
-        if showing?.id.same(as: row.id) != true { dark = false }
+        // A find is about one message too, so the bar closes with it.
+        if showing?.id.same(as: row.id) != true {
+            dark = false
+            closeFindBar()
+        }
         showing = row
         empty.isHidden = true
         subject.isHidden = false
@@ -371,5 +508,31 @@ final class ReaderViewController: NSViewController {
 
     private static func absolute(_ millis: UInt64) -> String {
         formatter.string(from: Date(timeIntervalSince1970: TimeInterval(millis) / 1000))
+    }
+}
+
+extension ReaderViewController: NSSearchFieldDelegate {
+    /// Return and Shift-Return step through matches; Escape closes the bar.
+    func control(
+        _ control: NSControl, textView: NSTextView, doCommandBy selector: Selector
+    ) -> Bool {
+        guard control === findField else { return false }
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            let shift = NSApp.currentEvent?.modifierFlags.contains(.shift) == true
+            findAgain(backwards: shift)
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            endFind()
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// A query that changed is a query nothing has been found for yet.
+    func controlTextDidChange(_ notification: Notification) {
+        guard (notification.object as? NSSearchField) === findField else { return }
+        findReport.stringValue = ""
     }
 }

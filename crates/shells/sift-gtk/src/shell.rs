@@ -55,6 +55,11 @@ pub const fn core_links_the_toolkit() -> bool {
 /// rendering risk**, and requires that running below the floor **fail loudly rather than
 /// degrade silently** — a silently degraded renderer produces a fidelity corpus failure
 /// nobody can reproduce.
+///
+/// D-116 adds to what this floor must cover: find-in-message is the engine's own find
+/// controller, which runs without script, and the body view scrolls itself rather than
+/// reporting a content height. Both are part of the GTK 4 WebKit API this floor already
+/// requires, so D-116 does not raise it.
 pub const MINIMUM_WEBKITGTK: (u32, u32) = (2, 44);
 
 /// Whether this build may run against `version`.

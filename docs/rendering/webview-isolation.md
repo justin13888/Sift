@@ -2,7 +2,7 @@
 
 The containment boundary around message rendering.
 
-**Owns:** D-3, D-28, D-50, D-54, D-90, N-1, NFR-20, NFR-21, NFR-25, NFR-46, NFR-50.
+**Owns:** D-3, D-28, D-50, D-54, D-90, D-116, N-1, NFR-20, NFR-21, NFR-25, NFR-46, NFR-50.
 
 ## D-3 — Bodies render in a separate, hardened document
 
@@ -137,15 +137,51 @@ one-liners now need a platform answer and P0 proof:
   [roadmap](../product/roadmap.md). If none exists, the retreat is a body view pinned to a fixed layout
   width — which [Q-15](../open-questions.md)'s answer in [dark mode](dark-mode.md) has since adopted for
   a different reason, so the retreat costs nothing further. The body view already lays out at one
-  width, and owning its own scrolling means it never needs the height.
+  width, and owning its own scrolling means it never needs the height. D-116 below takes that retreat
+  as the answer.
 - **Find-in-message.** FR-24 makes every action keyboard-reachable, so finding text in a message is a
   requirement rather than a convenience. Both engines offer a script-free find facility; it carries a
   minimum-version floor, which is one of the constraints setting [D-46](../product/platform-baseline.md).
+  D-116 below adopts it.
 
 **Contestable because:** it spends real implementation effort to protect a backstop against a failure that
 the sanitizer is separately tested not to have, and a reader who trusts I1's own verification may think
 the narrower setting is free. The answer is that backstops are for the case where that trust is misplaced,
 and a backstop that shares a failure mode with the thing it backs up is not one.
+
+## D-116 — The body view scrolls itself, and find is the engine's own
+
+**Chosen:** the body view **owns its own scrolling** and is sized by the reader pane, never by its
+document, so no content height is ever reported back. Find-in-message is the engine's own find facility,
+driven from a **native** find field in the reader's chrome, never from markup inside the body.
+**Rejected:** reporting content height back so the body participates in an outer scroll; an in-body find
+surface; retaining host-initiated evaluation for either, which D-50 already rejected.
+
+**Content height.** No non-script interface for a document's height is public on WKWebView, and D-50
+removes the script one. The P0 spike's answer is that the height is not needed: D-54 puts native rows
+*above* one body view rather than stacking documents in one scroll, so the body view can take the rest of
+the pane and scroll within it. That is the retreat D-50 named, and Q-15's pinned layout width had already
+adopted it for a different reason, so both concerns are served by one mechanism. The pipeline's closing
+step is therefore "the container is sized by the pane", not "the height is reported back".
+
+**Find-in-message.** Both engines offer a find facility that runs in the engine rather than in the
+document's script context — WKWebView's find API and WebKitGTK's find controller — so it works with script
+disabled engine-wide. The field that drives it is native, for the same reason every other affordance is:
+a find control drawn inside the body would be one a sender could counterfeit. The facility reports
+whether there is a match, not how many, and the field says only that. Its availability sits inside
+D-46's macOS floor and inside the WebKitGTK floor the Linux shell declares under
+[D-15](../product/platforms-and-distribution.md), which it must enforce at startup by failing loudly.
+
+**Demonstrated, not assumed, on WKWebView.** The body-view probe checks, in the hardened view with script
+off, that a document far taller than the pane leaves the web view at the pane's frame and the pinned width,
+and that find matches text that is present — forwards, backwards, and regardless of case — does not match
+text that is absent, and causes no load, no navigation and no execution. The WebKitGTK half is deferred
+with the Linux shell, as the hardened-view spike's is.
+
+**Contestable because:** a body view that scrolls itself inside a pane gives a long message a scroll region
+nested under the reader's chrome rather than one scroll for the whole reader, which some readers find worse
+on a small window; and a find that reports no match count is poorer than a browser's. Both are costs of
+keeping script off, which is the point of D-50.
 
 **NFR-21.** No unrequested network egress from message content. Remote resources are blocked by default.
 
