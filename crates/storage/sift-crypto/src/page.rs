@@ -521,6 +521,34 @@ mod backend {
                 Ok(())
             }
         }
+
+        #[cfg(test)]
+        mod tests {
+            use super::Aead;
+            use crate::page::TAG_LEN;
+
+            #[test]
+            fn a_failed_open_leaves_nothing_unauthenticated_in_out() {
+                // `open` copies the ciphertext into `out` before the tag is checked, so
+                // without the zeroing a refused page would leave the forger's bytes behind.
+                let aead = Aead::new(&[0x42; 32]);
+                let nonce = [7u8; 12];
+                let plain = [0x5Au8; 64];
+                let mut sealed = vec![0u8; plain.len() + TAG_LEN];
+                aead.seal(&nonce, b"aad", &plain, &mut sealed).unwrap();
+
+                for i in 0..sealed.len() {
+                    let mut forged = sealed.clone();
+                    forged[i] ^= 0x01;
+                    let mut out = vec![0xAAu8; plain.len()];
+                    assert_eq!(aead.open(&nonce, b"aad", &forged, &mut out), Err(()));
+                    assert!(out.iter().all(|&b| b == 0), "byte {i}: out not zeroed");
+                }
+                let mut out = vec![0xAAu8; plain.len()];
+                assert_eq!(aead.open(&nonce, b"other", &sealed, &mut out), Err(()));
+                assert!(out.iter().all(|&b| b == 0), "wrong AAD: out not zeroed");
+            }
+        }
     }
 }
 
