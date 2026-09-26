@@ -51,7 +51,18 @@ import WebKit
 /// D-50 removes the obvious route: there is no `evaluateJavaScript` here to ask the document
 /// how tall it is. So the body view **owns its own scrolling** rather than participating in an
 /// outer one, and never needs to know. That is compatible with D-54's native rows above one
-/// body view.
+/// body view. D-116 records this as the answer to the P0 sizing spike: the container is sized
+/// by the pane, never by the document, and the probe checks that a long document leaves the
+/// web view's frame exactly where the pane put it.
+///
+/// # Find, without script — D-116
+///
+/// FR-24's find-in-message uses the engine's own find (`WKWebView.find`, macOS 11 and later,
+/// inside D-46's floor), which runs in WebCore rather than in the document's script context, so
+/// it works with script disabled engine-wide. The field it is driven from is native chrome in
+/// the reader, never markup in the body: a find control drawn inside the body would be one a
+/// sender could counterfeit. The probe checks that it finds text that is there, does not find
+/// text that is not, and causes no load and no navigation.
 ///
 /// # The layout width is pinned — Q-15
 ///
@@ -263,6 +274,28 @@ final class BodyView: NSView {
 
     /// The web view's own data store — NFR-25's per-view store, for the probe to inspect.
     var dataStore: WKWebsiteDataStore { web.configuration.websiteDataStore }
+
+    /// Where the web view sits inside this view — for the probe, which checks that the
+    /// document never sizes its container (D-116).
+    var documentFrame: NSRect { web.frame }
+
+    /// Find `text` in the document on screen, selecting and scrolling to the next match —
+    /// or the previous one when `backwards` — and wrapping at either end. `found` is told
+    /// whether there was a match at all.
+    ///
+    /// D-116: the engine's own find, which needs no script and loads nothing. Case-insensitive,
+    /// because a person finding a word in a message is looking for the word.
+    func find(_ text: String, backwards: Bool, found: @escaping (Bool) -> Void) {
+        guard !text.isEmpty else {
+            found(false)
+            return
+        }
+        let configuration = WKFindConfiguration()
+        configuration.backwards = backwards
+        configuration.caseSensitive = false
+        configuration.wraps = true
+        web.find(text, configuration: configuration) { result in found(result.matchFound) }
+    }
 
     /// Revoke the current document's token.
     func closeCurrent() {

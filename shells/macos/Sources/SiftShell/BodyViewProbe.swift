@@ -274,6 +274,10 @@ private struct Probe {
         // to admit the next one.
         if !clears(hardened, instrument: instrument) { failed = true }
 
+        // D-116: the two things D-50 took script away from, done without it in the view that
+        // ships.
+        if !sizesAndFindsWithoutScript(hardened, instrument: instrument) { failed = true }
+
         var heard = Set<Detector>()
         var open: [Observation] = []
         for sample in samples {
@@ -456,6 +460,72 @@ private struct Probe {
             return false
         }
         print("probe: pass  clear() loads an empty document through the minted admission")
+        return true
+    }
+
+    /// D-116's P0 answer, in the hardened view: content sizing and find-in-message both work
+    /// with script disabled engine-wide.
+    ///
+    /// **Sizing** is shown by its absence being harmless: a document far taller than the pane
+    /// leaves the web view exactly the frame the pane gave it, at Q-15's pinned width, because
+    /// the view scrolls itself and no height is ever reported back.
+    ///
+    /// **Find** is shown with a control of its own, because a find that never matches would
+    /// pass a check that only looked for silence: a word that is in the document must be found
+    /// (in either direction, and regardless of case), and a word that is not must not be. And
+    /// finding must cause nothing — no load, no navigation, no execution.
+    func sizesAndFindsWithoutScript(_ view: BodyView, instrument: BodyViewInstrument) -> Bool {
+        view.layoutSubtreeIfNeeded()
+        let before = view.documentFrame
+        let filler = String(repeating: "<p>Lorem ipsum dolor sit amet.</p>\n", count: 400)
+        let html = "<img src=\"\(Marker.sentinel)\" width=\"1\" height=\"1\">"
+            + "<p>Top of the message.</p>\n\(filler)<p>The sift-needle is at the bottom.</p>"
+        let loaded = observe(instrument: instrument, html: html, admissions: 1) {
+            view.present(html)
+        }.failures
+        guard loaded.isEmpty else {
+            print("probe: FAIL — the document for the sizing and find checks:")
+            for problem in loaded { print("          \(problem)") }
+            return false
+        }
+        view.layoutSubtreeIfNeeded()
+        let after = view.documentFrame
+        guard after == before, after.width == BodyView.layoutWidth else {
+            print("probe: FAIL — a tall document moved the web view from \(before) to \(after); the container must be sized by the pane alone")
+            return false
+        }
+        print("probe: pass  a document taller than the pane leaves the web view at the pane's frame (\(Int(after.width))×\(Int(after.height)))")
+
+        _ = instrument.drain()
+        let cases: [(text: String, backwards: Bool, expected: Bool)] = [
+            ("sift-needle", false, true),
+            ("SIFT-NEEDLE", true, true),
+            ("Top of the message", false, true),
+            ("sift-absent-word", false, false),
+        ]
+        var ok = true
+        for each in cases {
+            var answer: Bool?
+            view.find(each.text, backwards: each.backwards) { answer = $0 }
+            spin(for: deadline) { answer != nil }
+            guard let answer else {
+                print("probe: FAIL — find '\(each.text)' never answered")
+                ok = false
+                continue
+            }
+            if answer != each.expected {
+                print("probe: FAIL — find '\(each.text)' \(answer ? "matched" : "did not match"), expected \(each.expected ? "a match" : "none")")
+                ok = false
+            }
+        }
+        spin(for: settle) { false }
+        let (events, dropped) = instrument.drain()
+        guard events.isEmpty, dropped == 0 else {
+            print("probe: FAIL — finding caused \(events.count + dropped) events: \(events)")
+            return false
+        }
+        guard ok else { return false }
+        print("probe: pass  find-in-message matches present text, refuses absent text, and loads nothing, with script off")
         return true
     }
 
