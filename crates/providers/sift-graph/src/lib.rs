@@ -33,6 +33,7 @@
 
 pub mod adapter;
 pub mod folder;
+pub mod oauth;
 pub mod schema;
 pub mod wire;
 
