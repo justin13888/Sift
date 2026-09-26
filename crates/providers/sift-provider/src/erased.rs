@@ -52,7 +52,12 @@ impl core::error::Error for ProviderError {}
 ///
 /// Deliberately **not** `classify`: there is nothing left to classify, because every method
 /// already returns a [`ProviderError`] that carries its own classification.
-pub trait ErasedAdapter {
+///
+/// **`Send`, because a sync runs on D-19's worker** while the adapter is owned by an account
+/// the shell's loop also reaches — one at a time, under the session's lock. An adapter that
+/// could not cross a thread would make that unsound, and the boundary's `unsafe impl` would
+/// hide it; requiring it here makes a non-`Send` adapter a build failure instead.
+pub trait ErasedAdapter: Send {
     fn capabilities(&self) -> &Capabilities;
     fn enumerate_folders(&self) -> Result<Vec<RemoteFolder>, ProviderError>;
     fn delta(
@@ -76,7 +81,7 @@ pub trait ErasedAdapter {
 /// Every adapter is an erased adapter, and the erasure is where `classify` is applied.
 impl<A> ErasedAdapter for A
 where
-    A: Adapter,
+    A: Adapter + Send,
     A::Error: fmt::Display,
 {
     fn capabilities(&self) -> &Capabilities {

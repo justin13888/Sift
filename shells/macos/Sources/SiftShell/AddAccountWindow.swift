@@ -329,13 +329,11 @@ final class AddAccountWindow: NSWindowController {
             status.stringValue = "That sign-in did not complete. You can try again."
             return
         }
-        // **The first sync happens here, or the account a person just signed in to shows them
-        // an empty list.** Nothing else asks: there is no periodic scheduler across this
-        // boundary yet, so an account that is never synced from a gesture is never synced.
+        // **The first sync is asked for here**, so the account a person just signed in to
+        // fills now rather than at the wheel's next aligned fire, up to a minute away.
         //
-        // It blocks this thread, which is stated rather than hidden. The walk belongs on a
-        // worker under D-19 and moving it there changes nothing a shell can see, because every
-        // delivery already arrives through D-48's hop rather than out of this call.
+        // It returns at once: the walk runs on the layer's worker (D-19, #49), and what it
+        // finds arrives through D-48's hop like every other delivery.
         status.stringValue = "Signed in. Fetching your mail…"
         status.displayIfNeeded()
         _ = SiftText.withBytes(name) { ptr, len in

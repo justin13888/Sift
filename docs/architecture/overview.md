@@ -84,7 +84,9 @@ Rust with no widget toolkit in it. Swift is the only non-Rust language in the pr
 ## D-19 — One work-stealing async runtime
 
 **Chosen:** a single multi-threaded, work-stealing async runtime for all concurrent work, with a separate
-blocking pool for database and filesystem calls.
+blocking pool for work that will not yield promptly: database and filesystem calls, the rendering
+pipeline's stages ([D-92](../rendering/pipeline.md)), and — for as long as the provider transport is
+synchronous — provider sync and the queue flush.
 **Rejected:** a current-thread runtime pinned per subsystem; a thread per connection with blocking I/O.
 
 **Why.** Fifteen watched folders across five accounts is dozens of concurrent operations that are almost
@@ -96,6 +98,16 @@ Work stealing does constrain [allocation attribution](../runtime/observability.m
 different worker thread than it started on, so the subsystem tag MUST be task-scoped and re-established at
 each poll, never a bare thread-local set once. Attribution is specified against that constraint rather
 than the runtime being chosen around it.
+
+**Provider round trips are on the blocking pool while the transport blocks.** The pool was scoped to
+database and filesystem calls, but the property that decides placement is the one D-92 names — whether
+a call occupies its thread long enough to matter — and a synchronous sync or queue flush holds its
+thread for a whole provider round trip, interleaved with store writes. Run on the shell's loop, that is
+a freeze nobody caused; run on the runtime's workers, it is a worker lost to a call that does not
+yield. So both run on the pool, and only their completion reaches the shell, through the
+[view protocol](view-protocol.md)'s hop. A quit that finds one in flight abandons it rather than joining
+it ([D-70](lifecycle.md)). When the transport yields, this work moves onto the runtime and the pool
+returns to calls that block.
 
 The runtime's own timer is used only for short I/O timeouts. **All periodic work goes through the
 scheduler's timing wheel instead** — a general-purpose runtime timer knows nothing about platform wakeup

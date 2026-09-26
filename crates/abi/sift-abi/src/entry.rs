@@ -183,7 +183,11 @@ pub unsafe extern "C" fn sift_initialize(
                 app.root = Some(scratch);
             }
 
-            let layer = Box::new(Layer {
+            // **Shared, not boxed** — #49. The worker can be inside a provider round trip
+            // when the shell quits, and D-70 forbids waiting for it, so the layer cannot be
+            // freed out from under it at shutdown. The shell's handle is one reference and a
+            // running job holds another; whichever is dropped last frees it.
+            let layer = std::sync::Arc::new(Layer {
                 session: std::sync::Mutex::new(Session::new(app)),
                 host: callbacks,
                 schedule: init.schedule,
@@ -206,8 +210,25 @@ pub unsafe extern "C" fn sift_initialize(
                 account_setting_value: std::sync::Mutex::new(String::new()),
                 conditions: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 search: std::sync::Mutex::new(crate::layer::SearchResult::default()),
+                worker: std::sync::OnceLock::new(),
+                live: std::sync::Mutex::new(true),
             });
-            let layer = Box::into_raw(layer);
+            // The worker holds the layer **weakly**. A strong reference would be a cycle —
+            // the layer owns the worker — and the layer would never be freed; a job upgrades
+            // it for as long as it runs and no longer.
+            let weak = std::sync::Arc::downgrade(&layer);
+            let worker = sift_runtime::worker::Worker::spawn("sift-worker", move |job| {
+                if let Some(layer) = weak.upgrade() {
+                    run_job(&layer, job);
+                }
+            })
+            // A layer that cannot start its worker has nowhere to sync, and the fallback
+            // would be the main loop this exists to keep the network off. D-71's rule for the
+            // scheduler's wheel is the same shape: refuse rather than degrade into the thing
+            // the constraint forbids.
+            .map_err(|_| ())?;
+            let _ = layer.worker.set(worker);
+            let layer = std::sync::Arc::into_raw(layer).cast_mut();
 
             // **Arm the wheel before handing the layer back.** Everything periodic in the
             // specification — the aligned poll, the queue flush — was armed by nobody, so
@@ -245,12 +266,19 @@ pub unsafe extern "C" fn sift_shutdown(app: *mut SiftApp) -> SiftStatus {
             // failed launch still has to be able to quit.
             return Ok(());
         }
-        // Every ticket the shell never ran, reclaimed rather than waited for. D-70's
-        // teardown is bounded and flushes nothing.
-        crate::layer::abandon_all();
         // SAFETY: the caller's obligation — the pointer came from `sift_initialize` and is
         // not used again.
-        drop(unsafe { Box::from_raw(app.cast::<Layer>()) });
+        let layer = unsafe { std::sync::Arc::from_raw(app.cast::<Layer>().cast_const()) };
+        // The worker first: after this it reaches the shell no more and takes no more work.
+        // A job already running is **abandoned, not joined** — D-70 awaits no provider call —
+        // and finishes on its own time holding its own reference, so the layer outlives it.
+        layer.retire();
+        // Every ticket the shell never ran, reclaimed rather than waited for. D-70's
+        // teardown is bounded and flushes nothing.
+        crate::layer::abandon_all(&layer);
+        // The shell's reference. Where no job is running this frees the layer here; where one
+        // is, the job's own reference does, when it returns.
+        drop(layer);
         Ok(())
     })
 }
@@ -586,10 +614,10 @@ pub struct SiftFlush {
 
 /// Send what is queued for one account, once.
 ///
-/// **This blocks the calling thread**, which is a limitation rather than a design, and the same
-/// one [`sift_sync_account`] carries: the work belongs on a worker under D-19, and moving it
-/// there changes nothing a shell can see because every delivery already arrives through D-48's
-/// hop rather than out of this call.
+/// **This blocks the calling thread**, and unlike [`sift_sync_account`] it still does: its
+/// answer is the out-parameter, which FR-34's runtime panel displays, and a worker cannot fill
+/// an out-parameter for a call that has already returned. The flush a person never asked for —
+/// the wheel's, once a minute — runs on the worker (#49); this is the panel's deliberate one.
 ///
 /// # Safety
 /// `app` and `out` must be valid; `label` must point to `label_len` bytes of UTF-8.
@@ -1608,20 +1636,54 @@ fn rearm_accounts(layer: &Layer) {
     crate::layer::ensure_timer(layer);
 }
 
-/// One wheel fire: do the work that came due, tell the shell, and arm the next timer.
+/// A wheel fire, on the shell's loop: hand the work to the worker and return — #49.
+///
+/// **The fire does no work here.** Every sync and flush reaches a provider, and this runs on
+/// the main loop by D-48's contract; doing the work inside it was a network round trip that
+/// happened on its own, once a minute, on the thread that draws — so a slow or unreachable
+/// provider froze the UI at a moment nobody touched anything. It does not even take the
+/// session lock, because the worker may be holding it through a round trip a person started.
+///
+/// The timer stays claimed until the worker re-arms it, so nothing else arms a second one in
+/// between — see [`fire`].
+fn run_tick(layer: &Layer) {
+    if !layer.dispatch(crate::layer::Job::Fire) {
+        // Nothing will run it, which happens only once the layer is shutting down. Released
+        // so that the claim is not left standing with no timer behind it.
+        layer
+            .timer_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Work the worker was handed.
+fn run_job(layer: &Layer, job: crate::layer::Job) {
+    use sift_subsystem::Subsystem;
+    match job {
+        // D-24: a job's allocations are the subsystem's that owns the work, the same tags the
+        // soak harness gives a fire and a sync.
+        crate::layer::Job::Fire => sift_alloc::tagged(Subsystem::Scheduler, || fire(layer)),
+        crate::layer::Job::Sync(name) => {
+            sift_alloc::tagged(Subsystem::Sync, || sync_now(layer, &name));
+        }
+    }
+}
+
+/// One wheel fire, on the worker: do the work that came due, hop the completion to the
+/// shell's loop, and arm the next timer.
+///
+/// **The session lock is taken per account, not per fire.** The cheap half — what is due,
+/// the governor, the re-arm — runs under one hold; each account's round trips run under
+/// their own. A gesture on the main loop then waits for at most one account's work rather
+/// than for every account's, which is the most this change can offer while `App::sync`
+/// itself holds the lock across its provider calls.
 ///
 /// **The re-arm is unconditional and last.** A fire that did its work and did not re-arm is a
 /// process that syncs once and then never again — and because nothing else arms the timer,
 /// there would be no second signal to recover from. It re-arms even where the work failed,
 /// for the same reason: an account that could not be reached this minute is exactly the one
 /// that must be tried next minute.
-fn run_tick(layer: &Layer) {
-    // Cleared first: the fire this belongs to has happened, so the next one is not yet armed
-    // and `ensure_timer` below must be free to arm it.
-    layer
-        .timer_pending
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-
+fn fire(layer: &Layer) {
     // **Re-armed on every exit, including the ones that did no work.** Nothing else arms the
     // timer once the process is running, so an early return that skipped the re-arm would end
     // periodic work for the life of the layer.
@@ -1630,32 +1692,71 @@ fn run_tick(layer: &Layer) {
     // one. A poisoned session lock is *not* recoverable here — `ensure_timer` reads the same
     // lock and bails on the same condition — and it is not a case worth special-handling
     // either: every other entry point already fails on a poisoned session, so that layer is
-    // dead rather than quietly un-scheduled. What this guard genuinely covers is a panic below
-    // the session lock, chiefly in `deliver`'s callback loop, which runs with the lock
-    // released: there the layer is healthy afterwards, and a plain early return would have
-    // left it healthy and never scheduled again.
+    // dead rather than quietly un-scheduled. What this guard genuinely covers is a panic in
+    // one account's work, which the worker catches: the layer is healthy afterwards, and a
+    // plain early return would have left it healthy and never scheduled again.
     struct Rearm<'a>(&'a Layer);
     impl Drop for Rearm<'_> {
         fn drop(&mut self) {
-            crate::layer::ensure_timer(self.0);
+            // Cleared only now: the claim was held through the work so that nothing else
+            // armed a second timer while this fire was still running, and the fire this
+            // belongs to is over.
+            self.0
+                .timer_pending
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            // The shell is called from here, so only while it is still there to call.
+            self.0.while_live(|| crate::layer::ensure_timer(self.0));
         }
     }
     let _rearm = Rearm(layer);
 
+    let due = {
+        let Ok(mut session) = layer.session.lock() else {
+            return;
+        };
+        session.app_mut().begin_fire()
+    };
+    // The report is dropped: FR-34's panel reads the queue and the conditions directly, and
+    // a fire that reported into nothing would be a second source of truth. A wheel fire
+    // cannot deepen a tier — it re-ticks the governor against the last level the platform
+    // reported, and the tier already satisfies that — so there is no L3 to issue from here
+    // either.
+    let mut report = sift_app::TickReport::default();
+    for item in &due {
+        let Ok(mut session) = layer.session.lock() else {
+            return;
+        };
+        session.app_mut().perform(item, &mut report);
+    }
+    // **Only the completion hops.** The delivery is computed and handed over on the shell's
+    // loop, which is where D-48 requires every callback to arrive — never from here.
+    complete(layer);
+}
+
+/// One account's sync, on the worker, then the completion hopped to the shell's loop.
+fn sync_now(layer: &Layer, name: &str) {
     {
         let Ok(mut session) = layer.session.lock() else {
             return;
         };
-        // The report is dropped: FR-34's panel reads the queue and the conditions directly,
-        // and a fire that reported into nothing would be a second source of truth. A wheel
-        // fire cannot deepen a tier — it re-ticks the governor against the last level the
-        // platform reported, and the tier already satisfies that — so there is no L3 to issue
-        // from here either.
-        let _ = session.app_mut().tick();
+        // A failure is not reported from here, because there is no call left to report it
+        // to: the shell returned long ago. What it changed about the account reaches the
+        // shell as a D-49 condition on the delivery that follows, as a wheel fire's does.
+        let _ = session.app_mut().sync(name, 20);
     }
-    // Outside the session lock, because it calls into the shell and a shell is permitted to
-    // call back — that is the same self-deadlock the sink lock had.
-    deliver(layer);
+    complete(layer);
+}
+
+/// Post a delivery from the worker, if the shell is still there to receive it.
+fn complete(layer: &Layer) {
+    layer.while_live(|| {
+        crate::layer::post(
+            layer,
+            Task::Deliver {
+                layer: core::ptr::from_ref(layer) as usize,
+            },
+        );
+    });
 }
 
 /// Tell the shell about a condition that has changed since it was last told.
@@ -1845,9 +1946,18 @@ pub unsafe extern "C" fn sift_add_replayed_account(
 /// Folders first, because a delta needs somewhere to put what it finds and D-83 assigns local
 /// identity on discovery rather than on first use.
 ///
-/// **This blocks the calling thread**, which is a limitation rather than a design: the work
-/// belongs on a worker under D-19, and moving it there changes nothing a shell can see
-/// because every delivery already arrives through D-48's hop rather than from this call.
+/// **It returns at once; the walk runs on the layer's worker** — D-19, #49. What it found
+/// arrives the way every delivery does, through D-48's hop, so a shell sees the same thing it
+/// saw when this blocked, without its loop stopping for a provider in the meantime.
+///
+/// `Ok` means the sync is queued, not that it succeeded — and not that the label names an
+/// account, which is only known where the sync runs. A failure is not returned from here.
+/// What it changed about the account — that it needs authentication, say — reaches the shell
+/// as a D-49 condition on the delivery that follows, the way the wheel's own failures do; a
+/// transient one is tried again by the next fire. Asking again while a sync for the same
+/// account is still queued asks once.
+///
+/// It does not take the session lock, so it does not wait on a sync already running.
 ///
 /// # Safety
 /// `app` must be valid; `label` must point to `label_len` bytes of UTF-8.
@@ -1868,17 +1978,11 @@ pub unsafe extern "C" fn sift_sync_account(
         let Some(layer) = (unsafe { layer(app) }) else {
             return Err(());
         };
-        {
-            let mut session = layer.session.lock().map_err(|_| ())?;
-            session.app_mut().sync(name, 20).map_err(|_| ())?;
+        if layer.dispatch(crate::layer::Job::Sync(name.to_owned())) {
+            Ok(())
+        } else {
+            Err(())
         }
-        crate::layer::post(
-            layer,
-            Task::Deliver {
-                layer: app as usize,
-            },
-        );
-        Ok(())
     })
 }
 
@@ -2691,6 +2795,29 @@ mod tests {
         run(ticket);
     }
 
+    /// Wait for the layer's worker to finish what it was handed.
+    ///
+    /// A sync returns before it runs now — #49 — so a test that reads what a sync brought in
+    /// has to wait for it, the way a shell waits for the delivery rather than for the call.
+    /// Bounded, so a worker that never finishes fails the test instead of hanging it.
+    fn settle(app: *mut SiftApp) {
+        let layer = unsafe { layer(app) }.expect("a live layer");
+        let worker = layer.worker.get().expect("a worker");
+        assert!(
+            worker.wait_idle(std::time::Duration::from_secs(30)),
+            "the worker did not finish its work"
+        );
+    }
+
+    /// Sync one account and wait for it, as the tests that read its mail need.
+    fn sync_and_settle(app: *mut SiftApp, name: &str) {
+        assert_eq!(
+            unsafe { sift_sync_account(app, name.as_ptr(), name.len()) },
+            SiftStatus::Ok
+        );
+        settle(app);
+    }
+
     /// A timer arming that never fires, which is what the tests want: the wheel is driven
     /// deterministically by `sift-app`'s own tests, and a real deadline here would make every
     /// ABI test wait a minute or race one.
@@ -3306,10 +3433,7 @@ mod tests {
             unsafe { sift_add_replayed_account(app, name.as_ptr(), name.len(), &raw mut account) },
             SiftStatus::Ok
         );
-        assert_eq!(
-            unsafe { sift_sync_account(app, name.as_ptr(), name.len()) },
-            SiftStatus::Ok
-        );
+        sync_and_settle(app, name);
 
         // The oldest of the three, which is the hostile one. Read through the same row
         // projection the list draws from rather than through a test-only path — the point of
@@ -4208,10 +4332,7 @@ mod tests {
         // with the same answer is a wakeup NFR-11 counts and a badge that redraws for nothing.
         let before = SEEN.load(Ordering::Relaxed);
         let name = "mail";
-        assert_eq!(
-            unsafe { sift_sync_account(app, name.as_ptr(), name.len()) },
-            SiftStatus::Ok
-        );
+        sync_and_settle(app, name);
         assert_eq!(
             SEEN.load(Ordering::Relaxed),
             before,
@@ -4287,5 +4408,345 @@ mod tests {
         );
 
         let _ = unsafe { sift_shutdown(app) };
+    }
+
+    /// What a shell was asked to do, counted through the context it supplied — per test,
+    /// because the tests run in parallel and a static would make them one test with a race.
+    #[derive(Default)]
+    struct Asked {
+        posts: std::sync::atomic::AtomicU64,
+        timers: std::sync::Mutex<Vec<u64>>,
+    }
+
+    extern "C" fn count_post(context: *mut c_void, _: crate::layer::SiftRun, _: u64) {
+        // SAFETY: the context is the test's own `Asked`, which outlives the layer.
+        let asked = unsafe { &*context.cast::<Asked>() };
+        asked
+            .posts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    extern "C" fn keep_timer(
+        context: *mut c_void,
+        _: crate::layer::SiftRun,
+        ticket: u64,
+        _: u64,
+        _: u64,
+    ) {
+        // SAFETY: as above.
+        let asked = unsafe { &*context.cast::<Asked>() };
+        asked.timers.lock().expect("timers").push(ticket);
+    }
+
+    /// A layer whose shell posts nothing and keeps every timer ticket it is handed, so a
+    /// test can fire the wheel itself.
+    fn start_asking(asked: &'static Asked) -> *mut SiftApp {
+        ephemeral();
+        let mut app: *mut SiftApp = core::ptr::null_mut();
+        let init = SiftInit {
+            container_root: SiftStr::new(scratch_str()),
+            schedule: count_post,
+            schedule_context: core::ptr::from_ref(asked).cast_mut().cast(),
+            arm_timer: keep_timer,
+            oauth_client_id: SiftStr::new(""),
+            registered_schemes: SiftStr::new(""),
+        };
+        assert_eq!(
+            unsafe { sift_initialize(callbacks(), init, &raw mut app) },
+            SiftStatus::Ok
+        );
+        app
+    }
+
+    /// Run `call` on another thread and say whether it returned within a second.
+    ///
+    /// The calls this is used on are ones that used to wait on the session lock, and the test
+    /// holds that lock: a call that still waits on it never returns, and a test that simply
+    /// made the call would hang rather than fail.
+    fn returns_promptly(call: impl FnOnce() + Send + 'static) -> bool {
+        let (done, returned) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            call();
+            let _ = done.send(());
+        });
+        returned
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok()
+    }
+
+    /// #49 — neither a sync a person asked for nor a wheel fire waits on the session.
+    ///
+    /// The session lock is what a sync holds across its provider round trips, so holding it
+    /// here stands in for a provider that is slow to answer. Before this change both calls
+    /// did the work inline, on the shell's loop, and would wait behind it — which is the
+    /// freeze nobody touched anything to cause.
+    #[test]
+    fn a_sync_and_a_wheel_fire_return_without_waiting_for_the_work() {
+        let asked: &'static Asked = Box::leak(Box::default());
+        let app = start_asking(asked);
+        let name = "mail";
+        let mut account = SiftId::from_u128(0);
+        assert_eq!(
+            unsafe { sift_add_replayed_account(app, name.as_ptr(), name.len(), &raw mut account) },
+            SiftStatus::Ok
+        );
+        let fired = asked
+            .timers
+            .lock()
+            .expect("timers")
+            .first()
+            .copied()
+            .expect("adding an account armed no timer");
+
+        let layer = unsafe { layer(app) }.expect("a live layer");
+        let held = layer.session.lock().expect("session");
+
+        let handle = app as usize;
+        assert!(
+            returns_promptly(move || {
+                let app = handle as *mut SiftApp;
+                let status = unsafe { sift_sync_account(app, name.as_ptr(), name.len()) };
+                assert_eq!(status, SiftStatus::Ok);
+            }),
+            "a sync waited for the session, so it ran on the caller's thread"
+        );
+        assert!(
+            returns_promptly(move || sift_run_scheduled(fired)),
+            "a wheel fire waited for the session, so its work ran on the shell's loop"
+        );
+        assert!(
+            layer.worker.get().expect("a worker").running(),
+            "the work is not running anywhere, so the calls above returned by dropping it"
+        );
+
+        // The provider answers.
+        drop(held);
+        settle(app);
+        {
+            let session = layer.session.lock().expect("session");
+            let (_, open) = session
+                .app()
+                .accounts()
+                .find(|(n, _)| *n == name)
+                .expect("the account");
+            assert!(
+                !sift_app::list_messages(open).expect("list").is_empty(),
+                "the sync that returned early never happened"
+            );
+        }
+        assert!(
+            asked.posts.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the work finished and its completion never hopped to the shell's loop"
+        );
+        assert_eq!(
+            asked.timers.lock().expect("timers").len(),
+            2,
+            "the fire's work finished and nothing re-armed, so periodic work has ended"
+        );
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    /// A weak handle on the layer behind `app`, to watch who holds it without keeping it.
+    fn watch(app: *mut SiftApp) -> std::sync::Weak<Layer> {
+        // SAFETY: `app` came from `sift_initialize` and is live; the reference taken here is
+        // handed straight back, so the count is unchanged.
+        let strong = unsafe { std::sync::Arc::from_raw(app.cast::<Layer>().cast_const()) };
+        let weak = std::sync::Arc::downgrade(&strong);
+        let _ = std::sync::Arc::into_raw(strong);
+        weak
+    }
+
+    /// Wait until a job on the worker holds its own reference to the layer.
+    ///
+    /// **The reference, not `running()`.** The worker reports a job running before the job
+    /// upgrades its weak handle, so a shutdown in that gap would free the layer while the test
+    /// still holds a lock inside it. Two strong references — the shell's and the job's — is the
+    /// moment the layer is guaranteed to outlive a quit.
+    fn job_holds(weak: &std::sync::Weak<Layer>) {
+        let started = std::time::Instant::now();
+        while weak.strong_count() < 2 {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the job never started"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// Wait until the layer is gone, which after a quit means the job holding it returned.
+    fn freed(weak: &std::sync::Weak<Layer>) {
+        let started = std::time::Instant::now();
+        while weak.strong_count() > 0 {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the layer outlived the job that was holding it, so a quit leaks it"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// #49, decision 11 — the timer claim stays held through the worker's fire, so nothing
+    /// arms a second timer while the fire's work is still running.
+    ///
+    /// An account added mid-fire claims the timer through `ensure_timer`. Were the claim
+    /// released when the timer fired, on the main loop, that call would find it free and arm
+    /// a second timer beside the one the fire re-arms — two wakeups a minute, for good, since
+    /// each fire re-arms its own successor. Held, the call returns at the claim without even
+    /// taking the session lock the fire is waiting on.
+    #[test]
+    fn the_timer_stays_claimed_while_a_fire_is_still_working() {
+        let asked: &'static Asked = Box::leak(Box::default());
+        let app = start_asking(asked);
+        let name = "mail";
+        let mut account = SiftId::from_u128(0);
+        assert_eq!(
+            unsafe { sift_add_replayed_account(app, name.as_ptr(), name.len(), &raw mut account) },
+            SiftStatus::Ok
+        );
+        let fired = asked
+            .timers
+            .lock()
+            .expect("timers")
+            .first()
+            .copied()
+            .expect("adding an account armed no timer");
+        let weak = watch(app);
+
+        // The fire's work is stuck behind a provider that has not answered.
+        let layer = unsafe { layer(app) }.expect("a live layer");
+        let held = layer.session.lock().expect("session");
+        sift_run_scheduled(fired);
+        job_holds(&weak);
+
+        assert!(
+            layer
+                .timer_pending
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "the claim was released before the fire's work ran, so a second timer can be armed"
+        );
+        let handle = app as usize;
+        assert!(
+            returns_promptly(move || {
+                let live = unsafe { super::layer(handle as *mut SiftApp) }.expect("a live layer");
+                crate::layer::ensure_timer(live);
+            }),
+            "a mid-fire claim went past the timer claim and waited on the fire's session"
+        );
+        assert_eq!(
+            asked.timers.lock().expect("timers").len(),
+            1,
+            "a timer was armed while a fire was still running"
+        );
+
+        drop(held);
+        settle(app);
+        assert_eq!(
+            asked.timers.lock().expect("timers").len(),
+            2,
+            "the fire's own re-arm is the one timer that follows it"
+        );
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    /// #49 under D-70 — a wheel fire still running when the shell quits neither posts its
+    /// completion nor re-arms a timer into the shell that is gone.
+    ///
+    /// The `Rearm` guard runs when the fire finishes, which here is after the quit. Its
+    /// `ensure_timer` would find the claim free — the guard itself just released it — and the
+    /// account still due, and would arm a timer through a context the shell may have freed.
+    /// `while_live` is the only thing between the two.
+    #[test]
+    fn a_fire_that_outlives_the_quit_arms_no_timer() {
+        let asked: &'static Asked = Box::leak(Box::default());
+        let app = start_asking(asked);
+        let name = "mail";
+        let mut account = SiftId::from_u128(0);
+        assert_eq!(
+            unsafe { sift_add_replayed_account(app, name.as_ptr(), name.len(), &raw mut account) },
+            SiftStatus::Ok
+        );
+        let fired = asked
+            .timers
+            .lock()
+            .expect("timers")
+            .first()
+            .copied()
+            .expect("adding an account armed no timer");
+        let weak = watch(app);
+
+        let layer = unsafe { layer(app) }.expect("a live layer");
+        let held = layer.session.lock().expect("session");
+        sift_run_scheduled(fired);
+        job_holds(&weak);
+        let posts = asked.posts.load(std::sync::atomic::Ordering::SeqCst);
+
+        let handle = app as usize;
+        assert!(
+            returns_promptly(move || {
+                let status = unsafe { sift_shutdown(handle as *mut SiftApp) };
+                assert_eq!(status, SiftStatus::Ok);
+            }),
+            "shutdown waited for a fire in flight, which D-70 forbids"
+        );
+
+        // The provider answers after the quit, and the fire runs to its end — re-arm included.
+        drop(held);
+        freed(&weak);
+        assert_eq!(
+            asked.timers.lock().expect("timers").len(),
+            1,
+            "a fire that finished after shutdown armed a timer in a shell that is gone"
+        );
+        assert_eq!(
+            asked.posts.load(std::sync::atomic::Ordering::SeqCst),
+            posts,
+            "a fire that finished after shutdown posted to a shell that is gone"
+        );
+    }
+
+    /// #49 under D-70 — quitting does not wait for a sync in flight, and the sync that
+    /// outlives the quit neither reaches the shell nor leaks the layer.
+    #[test]
+    fn shutdown_abandons_a_running_sync_rather_than_waiting_for_it() {
+        let asked: &'static Asked = Box::leak(Box::default());
+        let app = start_asking(asked);
+        let name = "mail";
+        let mut account = SiftId::from_u128(0);
+        assert_eq!(
+            unsafe { sift_add_replayed_account(app, name.as_ptr(), name.len(), &raw mut account) },
+            SiftStatus::Ok
+        );
+
+        let weak = watch(app);
+
+        let layer = unsafe { layer(app) }.expect("a live layer");
+        let held = layer.session.lock().expect("session");
+        assert_eq!(
+            unsafe { sift_sync_account(app, name.as_ptr(), name.len()) },
+            SiftStatus::Ok
+        );
+        job_holds(&weak);
+        let before = asked.posts.load(std::sync::atomic::Ordering::SeqCst);
+
+        let handle = app as usize;
+        assert!(
+            returns_promptly(move || {
+                let status = unsafe { sift_shutdown(handle as *mut SiftApp) };
+                assert_eq!(status, SiftStatus::Ok);
+            }),
+            "shutdown waited for a sync in flight, which D-70 forbids"
+        );
+
+        // The provider answers after the quit. The running job still holds the layer, so the
+        // lock this test holds is still a lock on something that exists.
+        drop(held);
+        freed(&weak);
+        assert_eq!(
+            asked.posts.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "a sync that finished after shutdown reached the shell, whose context may be gone"
+        );
     }
 }

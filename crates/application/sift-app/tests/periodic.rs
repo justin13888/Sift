@@ -97,6 +97,54 @@ fn an_idle_account_polls_without_anybody_asking() {
 }
 
 #[test]
+fn a_fire_splits_into_a_cheap_half_and_the_work() {
+    // #49: the boundary takes what is due under its lock and does the provider round trips
+    // one account at a time on a worker. The cheap half must reach no provider — it is what
+    // runs where a main loop can be waiting — and must already have re-armed, because the
+    // work may still be running when the next timer is asked for.
+    let hand = std::sync::Arc::new(Hand::new());
+    let mut app = App::with_clock(Box::new(Shared(std::sync::Arc::clone(&hand))));
+    let id = app.add_replayed_account("mail").expect("added");
+    app.arm_periodic();
+    advance(&hand, Duration::from_secs(65));
+
+    let due = app.begin_fire();
+    assert_eq!(
+        due,
+        vec![sift_app::Due::Sync(id), sift_app::Due::Flush(id)],
+        "the fire's work is the account's poll and its flush, in one bucket"
+    );
+    assert!(
+        sift_app::list_messages(app.account("mail").expect("open"))
+            .expect("list")
+            .is_empty(),
+        "taking what is due reached the provider, so it cannot run under a main loop's lock"
+    );
+    assert!(
+        app.next_wake().is_some(),
+        "the next fire was not armed before the work, so a slow provider delays it"
+    );
+
+    let mut report = sift_app::TickReport::default();
+    for item in &due {
+        app.perform(item, &mut report);
+    }
+    assert!(
+        report.inserted > 0,
+        "the work brought nothing in: {report:?}"
+    );
+
+    // An account removed between the two halves has nothing left to do, and is not a failure.
+    app.forget_account("mail").expect("forgotten");
+    let mut after = sift_app::TickReport::default();
+    app.perform(&sift_app::Due::Sync(id), &mut after);
+    assert!(
+        after.failures.is_empty() && after.synced.is_empty(),
+        "work for a removed account ran or failed: {after:?}"
+    );
+}
+
+#[test]
 fn a_second_account_costs_no_extra_fire() {
     // D-94: NFR-11's budget is the application's, not each account's, and the defence of
     // that is the wheel — an additional account joins a fire that already exists. Two

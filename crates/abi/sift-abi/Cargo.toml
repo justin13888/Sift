@@ -34,6 +34,8 @@ sift-broker.workspace = true
 # FR-34's per-subsystem live bytes. D-24's tagging allocator is the only source for them.
 sift-alloc.workspace = true
 sift-subsystem.workspace = true
+# D-19's blocking pool, where a sync and a wheel fire's work run instead of on the shell's loop.
+sift-runtime.workspace = true
 
 [lib]
 crate-type = ["staticlib", "rlib"]

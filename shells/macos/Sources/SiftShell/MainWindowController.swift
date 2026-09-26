@@ -338,10 +338,9 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     /// wakeup NFR-11 counts, and neither of those changes without something happening.
     /// Fetch the accounts this anchor covers, once each per run.
     ///
-    /// **This blocks the main thread for the length of a walk**, which is stated rather than
-    /// hidden behind a spinner: the work belongs on a worker under D-19, and moving it there
-    /// changes nothing a shell can see because every delivery already arrives through D-48's
-    /// hop rather than out of this call.
+    /// Each call returns at once: the walk runs on the layer's worker (D-19, #49), and what it
+    /// finds arrives through D-48's hop, with any condition it changed arriving as the host
+    /// callback that refreshes the annunciator.
     private func fetchOnce(matching anchor: SiftId) {
         let unified = anchor.same(as: .zero)
         for account in Account.all(app: app) {

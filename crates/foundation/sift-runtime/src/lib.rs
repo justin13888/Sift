@@ -14,6 +14,7 @@
 //! way to express "this may fire late, batch it".
 
 pub mod pipeline;
+pub mod worker;
 
 /// Which pool work belongs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
