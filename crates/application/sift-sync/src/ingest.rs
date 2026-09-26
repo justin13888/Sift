@@ -253,9 +253,59 @@ pub struct PageReport {
     pub inserted: usize,
     pub updated: usize,
     pub removed: usize,
-    /// Arrivals — messages the delta reported as *delivered* and that were not held before.
-    /// FR-23's definition of new mail, recorded at the only moment it can be.
+    /// Arrivals — messages the delta reported as *delivered*, that were not held before, and
+    /// that were **unread at that moment**. FR-23's definition of new mail, recorded at the only
+    /// moment it can be.
+    ///
+    /// A delivered message already read when it arrived — read on another device before this
+    /// turn reached it — is not new mail, and neither is one whose envelope did not come back:
+    /// nothing says whether it was read, and a notification with nothing to say is noise.
     pub delivered: usize,
+    /// The most recently received of those arrivals — what FR-23's notification names and
+    /// opens. `None` exactly when `delivered` is zero.
+    pub newest: Option<Arrival>,
+}
+
+/// One message FR-23 counts as new mail, as much of it as a notification needs to name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Arrival {
+    pub id: LocalId,
+    /// D-55's server-assigned received time — what "newest" is ordered by.
+    pub received_millis: u64,
+}
+
+impl PageReport {
+    /// Fold another turn's report into this one.
+    ///
+    /// **One place, because it is summed in two.** A field added here and forgotten at one of
+    /// the call sites would be a count that is right for one folder and wrong for an account.
+    pub fn absorb(&mut self, other: &Self) {
+        self.inserted += other.inserted;
+        self.updated += other.updated;
+        self.removed += other.removed;
+        self.delivered += other.delivered;
+        self.newest = newer(self.newest, other.newest);
+    }
+
+    fn arrived(&mut self, arrival: Arrival) {
+        self.delivered += 1;
+        self.newest = newer(self.newest, Some(arrival));
+    }
+}
+
+/// The later of two arrivals, by received time and then by identity — D-55's own order.
+fn newer(a: Option<Arrival>, b: Option<Arrival>) -> Option<Arrival> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(
+            if (b.received_millis, b.id.as_u128()) > (a.received_millis, a.id.as_u128()) {
+                b
+            } else {
+                a
+            },
+        ),
+        (a, None) => a,
+        (None, b) => b,
+    }
 }
 
 /// Apply one delta page and advance its cursor, **in one transaction**.
@@ -282,10 +332,16 @@ pub fn apply_page(
                 let envelope = envelopes.iter().find(|e| e.id == *id);
                 let outcome = upsert(&tx, folder, id, envelope, *provenance, ids)?;
                 match outcome {
-                    Upsert::Inserted => {
+                    Upsert::Inserted(local) => {
                         report.inserted += 1;
-                        if *provenance == Provenance::Delivered {
-                            report.delivered += 1;
+                        // FR-23: delivered, **and unread at this moment**.
+                        if *provenance == Provenance::Delivered
+                            && let Some(envelope) = envelope.filter(|e| !e.read)
+                        {
+                            report.arrived(Arrival {
+                                id: local,
+                                received_millis: envelope.received_at_millis,
+                            });
                         }
                     }
                     Upsert::Updated => report.updated += 1,
@@ -359,7 +415,8 @@ pub fn mark_degraded(store: &Connection, folder: i64, reason: &str) -> Result<()
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Upsert {
-    Inserted,
+    /// Carries the identity D-83 just assigned, because FR-23's notification has to name it.
+    Inserted(LocalId),
     Updated,
 }
 
@@ -486,7 +543,7 @@ fn upsert(
     Ok(if existing.is_some() {
         Upsert::Updated
     } else {
-        Upsert::Inserted
+        Upsert::Inserted(local)
     })
 }
 

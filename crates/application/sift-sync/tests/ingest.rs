@@ -520,6 +520,92 @@ fn a_backfill_never_counts_as_an_arrival() {
         report.delivered, 0,
         "a backfill announced the whole mailbox"
     );
+    assert_eq!(report.newest, None);
+}
+
+#[test]
+fn only_an_arrival_that_was_unread_is_new_mail_and_the_newest_is_named() {
+    // FR-23: delivered **and unread at that moment**. A message read on another device before
+    // this turn reached it arrived, and is still not something to announce; one whose envelope
+    // never came back has nothing to say about whether it was read, or anything else.
+    let s = Scratch::new("unread-arrivals");
+    let mut account = s.open();
+    ingest::reconcile_folders(&account.store, &[inbox()]).unwrap();
+    let folder = ingest::folder_local_id(&account.store, &RemoteFolderId("INBOX".into())).unwrap();
+    let mut read = envelope("m-read", "already read", 900);
+    read.read = true;
+    let report = ingest::apply_page(
+        &mut account.store,
+        folder,
+        &page(
+            vec![
+                present("m-old", Provenance::Delivered),
+                present("m-new", Provenance::Delivered),
+                present("m-read", Provenance::Delivered),
+                present("m-bare", Provenance::Delivered),
+            ],
+            "c1",
+            false,
+        )
+        .unwrap(),
+        &[
+            envelope("m-old", "older", 100),
+            envelope("m-new", "newer", 300),
+            read,
+        ],
+        &ids(),
+    )
+    .unwrap();
+
+    assert_eq!(report.inserted, 4);
+    assert_eq!(
+        report.delivered, 2,
+        "a read or envelope-less arrival was counted"
+    );
+    let newest = report.newest.expect("two arrivals and no newest");
+    assert_eq!(newest.received_millis, 300);
+    let named: String = account
+        .store
+        .query_row(
+            "SELECT remote_id FROM message WHERE id = ?1",
+            [newest.id.to_bytes().to_vec()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        named, "m-new",
+        "the notification would open the wrong message"
+    );
+}
+
+#[test]
+fn absorbing_reports_keeps_the_newest_arrival_across_them() {
+    // Summed per folder and again per account: the newest across both is what a notification
+    // names, and an absorb that kept the first one it saw would name whichever folder came first.
+    use sift_foundation::identity::LocalId;
+    let arrival = |n: u128, at: u64| ingest::Arrival {
+        id: LocalId::from_u128(n),
+        received_millis: at,
+    };
+    let mut total = ingest::PageReport::default();
+    let first = ingest::PageReport {
+        inserted: 1,
+        delivered: 1,
+        newest: Some(arrival(1, 500)),
+        ..Default::default()
+    };
+    let second = ingest::PageReport {
+        inserted: 2,
+        delivered: 1,
+        newest: Some(arrival(2, 200)),
+        ..Default::default()
+    };
+    total.absorb(&first);
+    total.absorb(&second);
+    total.absorb(&ingest::PageReport::default());
+    assert_eq!(total.inserted, 3);
+    assert_eq!(total.delivered, 2);
+    assert_eq!(total.newest, Some(arrival(1, 500)));
 }
 
 // ---------------------------------------------------------------------------
