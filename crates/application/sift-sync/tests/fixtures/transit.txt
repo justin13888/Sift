@@ -77,8 +77,8 @@ Subject: Quarterly capacity review for the storage cluster
 kind: same
 provenance: constructed
 source: RFC 5322 s2.2.3 (folding white space is a space or a horizontal tab); gateways that fold with a tab, which unfolds to a tab where the sender wrote a space
-equal: from, date, references
-digest: diverges
+equal: from, date, subject, references
+digest: agrees
 -- as sent, one line
 From: ops@example.test
 Date: Wed, 17 Sep 2026 10:05:00 +0000
@@ -93,8 +93,8 @@ Subject: Quarterly capacity review for the storage cluster and the two
 kind: same
 provenance: constructed
 source: RFC 5322 s2.2.3 permits folding only at existing whitespace; a non-compliant folder that inserts its own space leaves a doubled space after unfolding
-equal: from, date, references
-digest: diverges
+equal: from, date, subject, references
+digest: agrees
 -- as sent
 From: ops@example.test
 Date: Wed, 17 Sep 2026 10:10:00 +0000
@@ -109,8 +109,8 @@ Subject: Replica lag alert summary for the
 kind: same
 provenance: constructed
 source: RFC 5321 s4.5.3 and transport gateways that strip trailing white space from header lines
-equal: from, date, references
-digest: diverges
+equal: from, date, subject, references
+digest: agrees
 -- as sent, with trailing spaces
 From: billing@example.test
 Date: Thu, 18 Sep 2026 07:30:00 +0000

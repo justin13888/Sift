@@ -27,7 +27,11 @@ use sift_provider::adapter::Envelope;
 ///
 /// It changes when any input to [`digest`] changes — including how one is normalized, which
 /// is the change most likely to be made without noticing it is one.
-pub const DIGEST_RULE_VERSION: u32 = 1;
+///
+/// Version 2 made the subject's whitespace insignificant — R-5's measurement found that a
+/// relay's refold, an inserted fold space or stripped trailing spaces diverged the digest
+/// on mail that was otherwise unchanged.
+pub const DIGEST_RULE_VERSION: u32 = 2;
 
 /// The domain this hash is used in. Present so that a digest can never be confused with a
 /// content address, which is the same primitive over the same store.
@@ -56,15 +60,31 @@ pub fn tuple(envelope: &Envelope) -> Tuple {
     Tuple {
         from: envelope.from.clone(),
         origination_date_millis: envelope.origination_date_millis,
-        // Normalized under NFR-54, so that two spellings of one subject agree — which is
-        // the whole reason the normalizer lives in the foundation rather than in the
-        // presentation layer.
-        subject: envelope
-            .subject
-            .as_deref()
-            .map(|s| normalize::for_index(s).as_str().to_owned()),
+        subject: envelope.subject.as_deref().map(subject_key),
         references: envelope.references.clone(),
     }
+}
+
+/// The subject as the digest compares it.
+///
+/// Normalized under NFR-54, so that two spellings of one subject agree — which is the whole
+/// reason the normalizer lives in the foundation rather than in the presentation layer.
+///
+/// Whitespace is then insignificant: every run is one space and the ends are trimmed.
+/// Folding a long field is permitted at any whitespace and unfolding restores the fold's own
+/// character, so a relay that folds with a tab hands back a tab where the sender wrote a
+/// space; non-compliant folders insert a space, and gateways strip trailing ones. None of
+/// those is a different message. Whitespace becomes a space **before** the normalizer runs,
+/// because the normalizer deletes a tab as a control character and would join two words.
+fn subject_key(raw: &str) -> String {
+    let spaced: String = raw
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    normalize::for_index(&spaced)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// D-44's corroborating digest.
@@ -254,6 +274,42 @@ mod tests {
         let mut sneaked = envelope();
         sneaked.subject = Some("A sub\u{200b}ject".into());
         assert_eq!(digest(&plain), digest(&sneaked));
+    }
+
+    #[test]
+    fn whitespace_in_a_subject_is_insignificant_but_words_are_not_joined() {
+        // R-5: a refold with a tab, an inserted fold space and stripped trailing spaces
+        // each diverged the version-1 digest on mail that was otherwise unchanged.
+        let mut plain = envelope();
+        plain.subject = Some("A long subject".into());
+        for variant in [
+            "A long\tsubject",
+            "A long  subject",
+            "A long subject  ",
+            "  A long subject",
+            "A long\u{3000}subject",
+        ] {
+            let mut other = envelope();
+            other.subject = Some(variant.into());
+            assert_eq!(digest(&plain), digest(&other), "{variant:?}");
+        }
+        // The tab becomes a space before the normalizer deletes it as a control, so it
+        // separates two words rather than joining them.
+        let mut joined = envelope();
+        joined.subject = Some("A longsubject".into());
+        assert_ne!(digest(&plain), digest(&joined));
+    }
+
+    #[test]
+    fn a_whitespace_only_subject_is_empty_and_still_not_absent() {
+        let mut blank = envelope();
+        blank.subject = Some("   ".into());
+        let mut empty = envelope();
+        empty.subject = Some(String::new());
+        let mut absent = envelope();
+        absent.subject = None;
+        assert_eq!(digest(&blank), digest(&empty));
+        assert_ne!(digest(&blank), digest(&absent));
     }
 
     #[test]

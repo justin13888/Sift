@@ -301,12 +301,12 @@ fn every_collision_is_one_the_corpus_names() {
 /// chose, not a frequency in real mail, and the documents say so. It is asserted so that the
 /// figures they cite cannot drift from the corpus without this test saying so.
 const RECORDED: &str = "\
-digest rule version 1
+digest rule version 2
 from survives 14/16 transit groups
 date survives 16/16 transit groups
-subject survives 11/16 transit groups
+subject survives 14/16 transit groups
 references survives 16/16 transit groups
-digest survives 10/16 transit groups
+digest survives 13/16 transit groups
 digest collides 2/7 distinct pairs
 ";
 
