@@ -38,7 +38,11 @@ parts of the original sketch were wrong, and the design above is the corrected o
 - **Registering only the internal scheme refuses nothing the engine loads natively.** http, https and blob
   are built in, so a missing handler does not stop them. They are refused by a per-load block policy that
   denies every scheme and excepts only the internal one, installed before the first document is shown; a
-  view whose policy failed to install renders nothing rather than rendering without it.
+  view whose policy failed to install renders nothing rather than rendering without it. One exception
+  passes it: blob addresses the engine mints for its own use — a media element with no source and no
+  script makes it load several — are not refused by that policy. They resolve in the engine's in-process
+  blob registry, so they are not egress, and a document cannot mint one without script, which is off. A
+  blob address the document itself names is refused like any other scheme.
 - **The navigation policy callback never sees a subresource.** It is where navigations are refused, and
   only there.
 - **For `data:` and `file:` subresources the content security policy below is the only engine layer that

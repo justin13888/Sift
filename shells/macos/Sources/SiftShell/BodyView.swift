@@ -16,7 +16,11 @@ import WebKit
 ///    ([`BodyViewIsolation`]). This is the policy layer for http, https, websockets and blob:
 ///    WebKit has built-in support for all four, so a missing handler does not stop them, and
 ///    the navigation callback in 3 never sees a subresource. A body view whose rule list failed
-///    to compile **renders nothing** rather than rendering without it.
+///    to compile **renders nothing** rather than rendering without it. It refuses every blob
+///    address a document names, but **not** the blob addresses WebKit mints for its own use:
+///    a bare `<video>` makes it load several past the list. Those resolve in the engine's
+///    in-process blob registry rather than the network, and a document cannot mint one
+///    without script; the probe reports them and does not count them as egress.
 /// 3. `decidePolicyFor` admits exactly one navigation per document — the main-frame load this
 ///    view itself started, at an address minted for that load and consumed by it — and cancels
 ///    every other. Subframes, refreshes, reloads, and links never proceed in place.
@@ -381,7 +385,8 @@ private final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler {
 /// https, websockets and blob are built in, so registering nothing for them refuses nothing;
 /// and the navigation callback never sees a subresource. A content rule list is the engine's
 /// own per-load policy, applied in the content process before a request leaves it, so this is
-/// the layer at which those schemes are rejected.
+/// the layer at which those schemes are rejected — except the blob addresses WebKit mints for
+/// itself, which it loads past the list (see 2 on [`BodyView`]).
 ///
 /// **Block everything, then except the internal scheme.** `ignore-previous-rules` is how a
 /// rule list states an exception, and it overrides only rules before it — so the list denies
