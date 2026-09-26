@@ -1,0 +1,10 @@
+{
+ "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('me')/mailFolders(id,displayName,parentFolderId,childFolderCount)",
+ "value": [
+  {"id": "AAMk-inbox", "displayName": "Posteingang", "parentFolderId": "AAMk-root", "childFolderCount": 0},
+  {"id": "AAMk-archive", "displayName": "Archiv", "parentFolderId": "AAMk-root", "childFolderCount": 0},
+  {"id": "AAMk-sent", "displayName": "Gesendete Elemente", "parentFolderId": "AAMk-root", "childFolderCount": 0},
+  {"id": "AAMk-deleted", "displayName": "Gelöschte Elemente", "parentFolderId": "AAMk-root", "childFolderCount": 0}
+ ],
+ "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/mailFolders?$select=id,displayName,parentFolderId,childFolderCount&$top=100&$skip=4"
+}

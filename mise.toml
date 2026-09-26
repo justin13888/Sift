@@ -299,6 +299,10 @@ run = "cargo run -p sift-gmail --example reach"
 description = "D-13 — check the committed endpoint list against the live discovery document"
 run = "cargo run -p sift-gmail --example schema-check"
 
+[tasks.graph-schema]
+description = "D-13 — check the committed Graph endpoint list against the live published metadata"
+run = "cargo run -p sift-graph --example schema-check"
+
 [tasks.relevance-eval]
 description = "#24 — score D-79's ranking against a recorded relevance corpus. Args: --root DIR CORPUS"
 # Not networked, but it reads a real mailbox and a corpus that exists only on the machine of the

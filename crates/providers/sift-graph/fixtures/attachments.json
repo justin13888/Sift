@@ -1,0 +1,6 @@
+{
+ "value": [
+  {"@odata.type": "#microsoft.graph.fileAttachment", "id": "AAMk-att-1", "name": "report.pdf", "contentType": "application/pdf", "size": 41943040, "isInline": false},
+  {"@odata.type": "#microsoft.graph.fileAttachment", "id": "AAMk-att-2", "name": "logo.png", "contentType": "image/png", "size": 2048, "isInline": true}
+ ]
+}

@@ -1,0 +1,12 @@
+{
+ "responses": [
+  {"id": "0", "status": 200, "headers": {"Content-Type": "application/json"}, "body": {
+   "id": "AAMk-m3", "conversationId": "conv-2", "internetMessageId": "<m3@example.invalid>",
+   "subject": "Lunch",
+   "from": {"emailAddress": {"name": "Sender C", "address": "c@example.invalid"}},
+   "toRecipients": [{"emailAddress": {"name": "Me", "address": "me@example.invalid"}}],
+   "receivedDateTime": "2026-09-02T12:00:03Z", "sentDateTime": "2026-09-02T12:00:00Z",
+   "bodyPreview": "A scrubbed preview", "parentFolderId": "AAMk-inbox",
+   "categories": [], "isRead": false, "flag": {"flagStatus": "notFlagged"}}}
+ ]
+}

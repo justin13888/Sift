@@ -1,0 +1,43 @@
+# The endpoints and fields Sift uses, transcribed from the provider's published metadata.
+#
+# metadata: https://graph.microsoft.com/v1.0/$metadata
+# transcribed: 2026-09-26
+# endpoints used here: 10
+#
+# D-13 requires that where a client is hand-written, CI diff the hand-written types against
+# the current published schema and fail on drift. This file is the hand-written side of that
+# diff. `sift-graph`'s own tests check that every target the adapter can construct matches a
+# template here and that every field it selects is listed here; `mise run graph-schema` checks
+# the other half against the live metadata — which needs the network, so it belongs to the
+# per-integration tier of D-63 rather than the per-change one.
+#
+# Templates are relative to the version root, which is the form a batch element takes.
+#
+# Format: METHOD<space>PATH-TEMPLATE<space>#<space>evidence
+#
+# Evidence is what the live check looks for in the published metadata:
+#   nav:TYPE.PROPERTY   a navigation property on an entity type (or on one it derives from)
+#   action:TYPE.NAME    an action bound to the entity type
+#   documented:NAME     published in the reference documentation but not declared in the
+#                       metadata, so the live check reports it as unchecked rather than passed
+#
+# SELECT lines name the fields a `$select` asks for, per entity type.
+#
+# **Nothing may be added here that sends.** The published metadata binds `send`, `reply`,
+# `replyAll`, `forward` and their `create*` forms to the message type; none appears below, and
+# the test beside this file fails if any ever does.
+
+GET    /me/mailFolders                                         # nav:user.mailFolders
+GET    /me/mailFolders/{id}                                    # nav:user.mailFolders
+GET    /me/mailFolders/{id}/childFolders                       # nav:mailFolder.childFolders
+GET    /me/mailFolders/{id}/messages/delta                     # documented:message.delta
+GET    /me/messages/{id}                                       # nav:user.messages
+PATCH  /me/messages/{id}                                       # nav:user.messages
+POST   /me/messages/{id}/move                                  # action:message.move
+POST   /me/messages/{id}/permanentDelete                       # action:message.permanentDelete
+GET    /me/messages/{id}/attachments                           # nav:message.attachments
+GET    /me/messages/{id}/attachments/{id}/$value               # nav:message.attachments
+
+SELECT message     id conversationId internetMessageId subject from toRecipients receivedDateTime sentDateTime bodyPreview parentFolderId categories isRead flag body
+SELECT mailFolder  id displayName parentFolderId childFolderCount
+SELECT attachment  id name contentType size isInline
