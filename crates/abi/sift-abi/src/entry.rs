@@ -1460,7 +1460,9 @@ pub unsafe extern "C" fn sift_set_window_present(app: *mut SiftApp, present: u8)
         // SAFETY: the caller's obligation.
         let layer = (unsafe { layer(app) }).ok_or(())?;
         let mut session = layer.session.lock().map_err(|_| ())?;
-        session.app_mut().has_window = present != 0;
+        // Through the method rather than the field: a window opening is when NFR-42's filter
+        // engine is loaded, and the last one closing is when it is released.
+        session.app_mut().set_window_present(present != 0);
         Ok(())
     })
 }
@@ -3500,7 +3502,7 @@ mod tests {
         );
         assert_eq!(
             document.fetching_positions, document.blocked,
-            "with no filter list loaded, an absent authority denies every one"
+            "with no window open no filter engine is held, and an absent authority denies every one"
         );
         let _ = unsafe { sift_shutdown(app) };
     }
@@ -3549,9 +3551,9 @@ mod tests {
     /// to.
     ///
     /// **What this asserts is the crossing, not the semantics.** A document's `blocked` count
-    /// comes from the filter engine's verdicts and never consults the allowance state, so a
-    /// test written against it would pass whether `once` meant once, forever, or nothing —
-    /// which is exactly what an earlier version of this test did. That `once` is scoped to one
+    /// once came from the filter engine's verdicts and never consulted the allowance state, so
+    /// a test written against it passed whether `once` meant once, forever, or nothing — which
+    /// is exactly what an earlier version of this test did. That `once` is scoped to one
     /// document, that a durable allowance carries to the next one, and that a spoof inherits
     /// neither, are asserted in `sift-broker`, at the layer that decides them.
     #[test]

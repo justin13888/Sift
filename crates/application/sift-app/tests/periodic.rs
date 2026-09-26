@@ -286,6 +286,35 @@ fn a_container_with_no_accounts_still_walks_a_tier_back_down() {
 }
 
 #[test]
+fn the_filter_engine_returns_once_pressure_has_been_clear_with_a_window_open() {
+    // D-10 and D-93: the engine returns when pressure has been clear for L-19 **and a window
+    // is open** — not when a new window opens, which would leave a user who keeps one window
+    // open with no authority for that window's life after a single pass through L1.
+    let hand = std::sync::Arc::new(Hand::new());
+    let mut app = App::with_clock(Box::new(Shared(std::sync::Arc::clone(&hand))));
+    app.set_window_present(true);
+    assert!(app.filter_engine_loaded());
+
+    app.memory_pressure(sift_governor::Pressure::Warning);
+    assert!(!app.filter_engine_loaded());
+    app.memory_pressure(sift_governor::Pressure::Normal);
+    assert!(
+        !app.filter_engine_loaded(),
+        "reloaded the moment pressure cleared, with no dwell"
+    );
+
+    for _ in 0..4 {
+        advance(&hand, Duration::from_secs(65));
+        let _ = app.tick();
+    }
+    assert_eq!(app.tier(), sift_governor::Tier::L0);
+    assert!(
+        app.filter_engine_loaded(),
+        "the same window stayed open through the shed and never got its authority back"
+    );
+}
+
+#[test]
 fn a_warning_tier_does_not_revoke_the_open_documents_token() {
     // Only L3 destroys the views that hold a capability token, and D-67's callback set is
     // closed at six with nothing that can destroy a body view. Revoking at L2 would leave the

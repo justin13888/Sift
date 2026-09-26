@@ -274,64 +274,26 @@ impl Broker {
             // claims to belong to is not here.
             return Answer::Unavailable(Unavailable::Revoked);
         };
-        let Some(position) = document.positions.get(address.position).cloned() else {
+        let Some(position) = document.positions.get(address.position) else {
             return Answer::Unavailable(Unavailable::UnknownAddress);
         };
 
-        // 2. Bounded means bounded **before the decode, not during it**. A decode bomb is a
-        //    denial of service under NFR-19, and checking dimensions after handing bytes to a
-        //    decoder is checking them too late.
-        if let Some(bound) = exceeds_a_bound(&position, request.transferred_length) {
-            return Answer::Blocked(Reason::Bounds(bound));
-        }
-
-        // 3. May it be fetched now? The tier's answer does not depend on the message.
-        if !self.tier_permits_fetch {
-            return Answer::Blocked(Reason::NetworkPolicy);
-        }
-
-        // 4. Has the user allowed this sender? Remote content is blocked **by default**.
-        // **A durable allowance is matched only for an origin that could have earned one.**
-        // Without the second condition a `From:` header alone matches a domain the user
-        // granted on an attested message, so a spoof inherits the real sender's allowances —
-        // which is the property `Origin` exists to hold and states in its own header.
-        let allowed = document.allowed_once
-            || (document.origin.can_carry_a_durable_allowance()
-                && document.origin.domain().is_some_and(|d| {
-                    self.allowed_origins
-                        .iter()
-                        .any(|a| a == &d.to_ascii_lowercase())
-                }));
-        let first_party = infrastructure.is_first_party(&document.origin, host_of(&position.url));
-        if !allowed && !first_party {
-            return Answer::Blocked(Reason::NotAllowedBySender);
-        }
-
-        // 5. The authority. An absent one denies, and names the shed rather than a rule.
-        let source = document.origin.domain().unwrap_or("invalid.");
-        match authority.decide(&position.url, source, &position.request_type) {
-            Decision::AbsentAuthority => return Answer::Blocked(Reason::Shed),
-            d if !d.permits_fetch() => {
-                return Answer::Blocked(Reason::Rule(describe(&d)));
-            }
-            _ => {}
-        }
-
-        // 6. FR-29's heuristics, independent of filter-list coverage.
-        let findings = heuristic::examine(
-            &Candidate {
-                url: &position.url,
-                declared_width: position.declared_width,
-                declared_height: position.declared_height,
-                style: position.style.as_deref(),
-                alt: position.alt.as_deref(),
-                in_zero_height_container: position.in_zero_height_container,
+        // 2 through 6, in one place shared with [`Broker::withheld`], so that what a reader
+        // is told was withheld and what a request is actually answered cannot disagree.
+        if let Some(reason) = refusal(
+            &Gate {
+                tier_permits_fetch: self.tier_permits_fetch,
+                allowed_origins: &self.allowed_origins,
+                authority,
+                infrastructure,
             },
-            &document.origin,
-        );
-        if !findings.is_empty() {
-            return Answer::Blocked(Reason::Heuristic(findings));
+            document,
+            position,
+            request.transferred_length,
+        ) {
+            return Answer::Blocked(reason);
         }
+        let length = position.declared_length.unwrap_or(0);
 
         // 7. Per-document concurrency. **Queues rather than fails**, because refusing a
         //    legitimate image because five others were already loading would be a rendering
@@ -342,9 +304,40 @@ impl Broker {
             document.in_flight += 1;
         }
 
-        Answer::Bytes {
-            length: position.declared_length.unwrap_or(0),
-        }
+        Answer::Bytes { length }
+    }
+
+    /// What each of a live document's positions would be refused for, were it requested now.
+    ///
+    /// **The same checks as [`Broker::answer`], by construction** — both call one function —
+    /// so the blocked-content count a reader is shown is the broker's answer rather than a
+    /// second opinion beside it. The count used to come from the render's authority verdicts
+    /// alone, which never consulted the sender allowance: with an engine loaded it would have
+    /// said "nothing withheld" over a message whose every image the broker was refusing.
+    ///
+    /// `None` for a token that names no live document. Positions are in document order, and
+    /// the transferred length is unknown before a request, so only the declared bounds apply.
+    #[must_use]
+    pub fn withheld(
+        &self,
+        token: &str,
+        authority: &Authority,
+        infrastructure: &Infrastructure,
+    ) -> Option<Vec<Option<Reason>>> {
+        let document = self.documents.get(token)?;
+        let gate = Gate {
+            tier_permits_fetch: self.tier_permits_fetch,
+            allowed_origins: &self.allowed_origins,
+            authority,
+            infrastructure,
+        };
+        Some(
+            document
+                .positions
+                .iter()
+                .map(|position| refusal(&gate, document, position, None))
+                .collect(),
+        )
     }
 
     /// Whether prefetching is permitted right now.
@@ -376,6 +369,85 @@ impl Broker {
     pub fn live_documents(&self) -> usize {
         self.documents.len()
     }
+}
+
+/// The broker-wide state checks 3 to 5 read.
+struct Gate<'a> {
+    tier_permits_fetch: bool,
+    allowed_origins: &'a [String],
+    authority: &'a Authority,
+    infrastructure: &'a Infrastructure,
+}
+
+/// Checks 2 through 6 of [`Broker::answer`]: why this position is refused, or `None`.
+///
+/// The order is the design. Bounds **before any decoder is handed bytes**, then policy, then
+/// the sender, then the authority, then the heuristics — which run whether or not a list
+/// matched, because public lists cover email tracking poorly.
+fn refusal(
+    gate: &Gate<'_>,
+    document: &Document,
+    position: &Position,
+    transferred: Option<u64>,
+) -> Option<Reason> {
+    // 2. Bounded means bounded **before the decode, not during it**. A decode bomb is a
+    //    denial of service under NFR-19, and checking dimensions after handing bytes to a
+    //    decoder is checking them too late.
+    if let Some(bound) = exceeds_a_bound(position, transferred) {
+        return Some(Reason::Bounds(bound));
+    }
+
+    // 3. May it be fetched now? The tier's answer does not depend on the message.
+    if !gate.tier_permits_fetch {
+        return Some(Reason::NetworkPolicy);
+    }
+
+    // 4. Has the user allowed this sender? Remote content is blocked **by default**.
+    // **A durable allowance is matched only for an origin that could have earned one.**
+    // Without the second condition a `From:` header alone matches a domain the user
+    // granted on an attested message, so a spoof inherits the real sender's allowances —
+    // which is the property `Origin` exists to hold and states in its own header.
+    let allowed = document.allowed_once
+        || (document.origin.can_carry_a_durable_allowance()
+            && document.origin.domain().is_some_and(|d| {
+                gate.allowed_origins
+                    .iter()
+                    .any(|a| a == &d.to_ascii_lowercase())
+            }));
+    let first_party = gate
+        .infrastructure
+        .is_first_party(&document.origin, host_of(&position.url));
+    if !allowed && !first_party {
+        return Some(Reason::NotAllowedBySender);
+    }
+
+    // 5. The authority. An absent one denies, and names the shed rather than a rule.
+    let source = document.origin.domain().unwrap_or("invalid.");
+    match gate
+        .authority
+        .decide(&position.url, source, &position.request_type)
+    {
+        Decision::AbsentAuthority => return Some(Reason::Shed),
+        d if !d.permits_fetch() => return Some(Reason::Rule(describe(&d))),
+        _ => {}
+    }
+
+    // 6. FR-29's heuristics, independent of filter-list coverage.
+    let findings = heuristic::examine(
+        &Candidate {
+            url: &position.url,
+            declared_width: position.declared_width,
+            declared_height: position.declared_height,
+            style: position.style.as_deref(),
+            alt: position.alt.as_deref(),
+            in_zero_height_container: position.in_zero_height_container,
+        },
+        &document.origin,
+    );
+    if !findings.is_empty() {
+        return Some(Reason::Heuristic(findings));
+    }
+    None
 }
 
 /// Every bound checked before a decoder sees a byte.
@@ -499,11 +571,66 @@ mod tests {
         assert_eq!(a, Answer::Blocked(Reason::NotAllowedBySender));
     }
 
+    #[test]
+    fn what_a_reader_is_told_was_withheld_is_what_a_request_is_answered() {
+        // The count and the disclosure are drawn from `withheld`, the fetches from `answer`.
+        // One disagreement is a reader told nothing was withheld over images that never load,
+        // which is what the count said while it came from the authority's verdicts alone.
+        let positions = vec![
+            position("https://cdn.other.test/x.png"),
+            position("https://tracker.test/p.gif"),
+        ];
+        for allow in [false, true] {
+            for loaded in [false, true] {
+                let (mut b, t) = broker_with(attested("sender.test"), positions.clone());
+                if allow {
+                    assert!(b.allow_once(t.as_str()));
+                }
+                let authority = if loaded {
+                    authority()
+                } else {
+                    Authority::Absent
+                };
+                let infrastructure = Infrastructure::default();
+                let told = b
+                    .withheld(t.as_str(), &authority, &infrastructure)
+                    .expect("live");
+                for (i, reason) in told.into_iter().enumerate() {
+                    let answered = b.answer(
+                        &Request {
+                            url: Address {
+                                token: t.clone(),
+                                position: i,
+                            }
+                            .to_url(),
+                            transferred_length: None,
+                        },
+                        &authority,
+                        &infrastructure,
+                    );
+                    match reason {
+                        Some(r) => assert_eq!(answered, Answer::Blocked(r)),
+                        None => assert!(matches!(answered, Answer::Bytes { .. }), "{answered:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_revoked_document_has_nothing_withheld_to_report() {
+        let (mut b, t) = broker_with(attested("sender.test"), vec![position("https://x.test/")]);
+        assert!(b.revoke(&t));
+        assert!(
+            b.withheld(t.as_str(), &authority(), &Infrastructure::default())
+                .is_none()
+        );
+    }
+
     /// FR-8's *load once*, at the layer that decides it.
     ///
-    /// Asserted here rather than through the document's `blocked` count, because that count
-    /// comes from the filter engine's verdicts and never consults the allowance state — a
-    /// test written against it passes whether `once` means once, forever, or nothing.
+    /// Asserted here, at the layer that decides it, rather than through a document's
+    /// `blocked` count — which is derived from [`Broker::withheld`] and so from this.
     #[test]
     fn loading_once_permits_this_document_and_no_other() {
         let origin = attested("sender.test");
