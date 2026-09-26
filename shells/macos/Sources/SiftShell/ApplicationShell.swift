@@ -8,7 +8,7 @@ import CSift
 /// nothing* — then scroll at scale, then memory, which D-1 itself calls the weakest of the
 /// three and a hypothesis rather than a measurement.
 ///
-/// It owns the tray item, the application menu, notification delivery and D-67's six host
+/// It owns the tray item, the application menu, notification delivery and D-67's seven host
 /// callbacks. It holds **no view hierarchy, no window, and nothing authoritative** — which is
 /// what makes L3 safe: destroying every window shell loses nothing only the network could
 /// restore.
@@ -42,6 +42,16 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// generation to be discarded by — which is precisely why the set is closed and
     /// unregistered only at shutdown.
     static let shared = ApplicationShell()
+
+    /// A notification activation that arrived before the layer existed to answer it — FR-23 on
+    /// a process launched *by* the notification. Opened as soon as there is a layer.
+    private var pendingActivation: (account: SiftId, message: SiftId)?
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // FR-23: the notification centre's delegate, set before launch finishes, because a
+        // notification that launched the process is delivered to the delegate present by then.
+        NewMailNotifier.shared.install()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // FR-22's always-on surface. Not late polish: FR-25 distinguishes closing a window
@@ -144,7 +154,18 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         // Both branches open a window; what differs is what the window is *for*. The
         // account-less state *is* the add-account flow rather than an empty inbox, because an
         // empty inbox tells a new user the product is broken.
-        if hasAnyAccount() {
+        //
+        // **Except a launch a notification caused.** That person asked for one message, and
+        // D-97's standalone reader exists so that the answer is that message rather than the
+        // whole main window restoring its folders around it.
+        let launchedByNotification =
+            notification.userInfo?[NSApplication.launchUserNotificationUserInfoKey] != nil
+        if let pending = pendingActivation {
+            pendingActivation = nil
+            openNotifiedMessage(account: pending.account, message: pending.message)
+        } else if launchedByNotification && hasAnyAccount() {
+            // The activation itself follows on the delegate, and opens the reader.
+        } else if hasAnyAccount() {
             openMainWindow()
         } else {
             beginAddAccount()
@@ -369,13 +390,8 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             quit()
             return
         case "read.open-in-standalone-reader":
-            guard let app, let row = windows.first?.selectedRow else { return }
-            // A window per message rather than one that retargets: D-97 makes this its own
-            // window kind, and a second message opening in the first would be the retarget
-            // this exists instead of.
-            let reader = StandaloneReader(app: app, row: row)
-            standaloneReaders.append(reader)
-            reader.showWindow(nil)
+            guard let row = windows.first?.selectedRow else { return }
+            openStandaloneReader(row)
             return
         case "app.open-message-debug-view":
             guard let app, let row = windows.first?.selectedRow else { return }
@@ -655,6 +671,51 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// D-97's standalone reader over one row. A window per message rather than one that
+    /// retargets: a second message opening in the first would be the retarget this window
+    /// kind exists instead of.
+    private func openStandaloneReader(_ row: MessageRow) {
+        guard let app else { return }
+        let reader = StandaloneReader(app: app, row: row)
+        standaloneReaders.append(reader)
+        // Raised before it is ordered in, for the reason `openMainWindow` gives: a window
+        // ordered in while the process is an accessory belongs to something the user cannot
+        // switch to. A reader opened from a notification may be the only window there is.
+        NSApp.setActivationPolicy(.regular)
+        reader.showWindow(nil)
+        DispatchQueue.main.async { NSApp.activate(ignoringOtherApps: true) }
+    }
+
+    /// FR-23's activation: **open that message**, which may mean opening a window on a process
+    /// that has none.
+    ///
+    /// The row is read back by identity rather than carried in the notification, because a
+    /// notification survives a relaunch and a row copied into it would be the row as it was
+    /// when posted. A message the list no longer shows — archived since, or removed by the
+    /// server — opens Sift instead: the person asked to see their mail, and a reader over
+    /// something they put away would be the one surface that disagreed with the list.
+    func openNotifiedMessage(account: SiftId, message: SiftId) {
+        guard let app else {
+            pendingActivation = (account, message)
+            return
+        }
+        if let open = standaloneReaders.first(where: {
+            $0.message.same(as: message) && $0.window?.isVisible == true
+        }) {
+            open.showWindow(nil)
+            DispatchQueue.main.async { NSApp.activate(ignoringOtherApps: true) }
+            return
+        }
+        var raw = SiftMessageRow()
+        guard sift_message_row(UnsafeMutablePointer(app), message, &raw) == Ok else {
+            openMainWindow()
+            return
+        }
+        // Copied inside the call's lifetime, as D-66 requires: the layer holds the text only
+        // until the next lookup.
+        openStandaloneReader(MessageRow(raw))
+    }
+
     @objc func openMainWindow() {
         // "Open Sift" means *show me Sift*, and it is reachable from the tray, from the
         // application menu and from FR-23's notification. Windows are plural by design, but a
@@ -843,6 +904,11 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         let window = AddAccountWindow(
             app: app,
             onAdded: { [weak self] in
+                // FR-23's permission, asked **here**: the account's first sync has just been
+                // requested, so the prompt arrives attached to the mail it is about rather than
+                // at a launch that has nothing to say yet. Asked once; an answer either way is
+                // never asked again.
+                NewMailNotifier.shared.requestAuthorizationIfUndecided()
                 self?.openMainWindow()
                 // The sidebar is where the account has to appear, and it is asked rather
                 // than told: the list it draws is the layer's.
@@ -964,12 +1030,12 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     }
 }
 
-// MARK: - D-67's six host callbacks
+// MARK: - D-67's seven host callbacks
 //
 // Registered once, at initialization. Not scoped to any view, not cancellable, and they
 // survive the destruction of every window — which is the whole reason they exist rather than
-// being observations. Three of them *must* work with no window open, and a window-scoped
-// mechanism could deliver none of the three.
+// being observations. Four of them *must* work with no window open, and a window-scoped
+// mechanism could deliver none of the four.
 //
 // Delivery is under D-48's rules: on this shell's main loop, and **not reentrant**. The rule
 // inside one of these is *receive, record, return; act on the next turn of the loop.*
@@ -993,10 +1059,14 @@ private func hostCallbacks() -> SiftHostCallbacks {
             // what this prevents.
             DispatchQueue.main.async { ApplicationShell.shared.raiseRestartPrompt() }
         },
-        notification_activated: { _, _, _ in
+        notification_activated: { _, account, message in
             // FR-23. Opens that message — which under FR-25 may mean opening a window on a
-            // process that has none.
-            DispatchQueue.main.async { ApplicationShell.shared.openMainWindow() }
+            // process that has none. The platform's own notification response reaches the same
+            // function through `NewMailNotifier`, so the two routes cannot open different
+            // things.
+            DispatchQueue.main.async {
+                ApplicationShell.shared.openNotifiedMessage(account: account, message: message)
+            }
         },
         account_condition_changed: { _, _, _ in
             // D-49. One condition per account, from an enumerated precedence-ordered set, and
@@ -1012,6 +1082,15 @@ private func hostCallbacks() -> SiftHostCallbacks {
             // parameter is doing real work: a callback matching no flow in progress is
             // discarded **without comment**, since reporting it would turn this into a way to
             // make Sift say things.
+        },
+        new_mail: { _, account, delivered, newest in
+            // FR-23 — the seventh, and the one that exists for when nobody is looking. The row
+            // is borrowed for this call only (D-66), so it is copied here and acted on a turn
+            // later, which is the rule inside every one of these.
+            let row = newest.len > 0 ? newest.ptr.map { MessageRow($0.pointee) } : nil
+            DispatchQueue.main.async {
+                NewMailNotifier.shared.announce(account: account, delivered: delivered, newest: row)
+            }
         }
     )
 }

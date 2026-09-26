@@ -14,9 +14,13 @@ import CSift
 final class StandaloneReader: NSWindowController {
     private let reader = ReaderViewController()
     private let app: OpaquePointer
+    /// The message this window shows — so a second activation of the same notification raises
+    /// this window rather than opening another over the same message.
+    let message: SiftId
 
     init(app: OpaquePointer, row: MessageRow) {
         self.app = app
+        self.message = row.id
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 860),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
