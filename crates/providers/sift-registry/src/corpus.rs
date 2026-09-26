@@ -122,6 +122,68 @@ pub fn gmail() -> Replay {
     r
 }
 
+/// The Graph corpus — #40's recorded exchanges, assembled into one mailbox.
+///
+/// The same files the adapter's own replay tests read, so there is one scrubbed corpus for this
+/// provider rather than two that drift. It answers what adding an account does: the folder
+/// walk and its well-known names, a two-page backfill of the inbox that then goes live on its
+/// delta link, the envelopes each page names, and a body and attachment listing for each
+/// message. Everything under `example.invalid`, per NFR-22.
+///
+/// The batch endpoint answers in the order an add performs it — well-known names, then each
+/// page's envelopes — and repeats the last answer after that, so a second sync that finds
+/// nothing new asks for nothing it would need a different answer to.
+#[must_use]
+pub fn graph() -> Replay {
+    use sift_graph::wire;
+    use sift_provider::adapter::{RemoteFolderId, RemoteMessageId};
+
+    const FOLDERS_1: &[u8] = include_bytes!("../../sift-graph/fixtures/folders-page-1.json");
+    const FOLDERS_2: &[u8] = include_bytes!("../../sift-graph/fixtures/folders-page-2.json");
+    const CHILD_FOLDERS: &[u8] = include_bytes!("../../sift-graph/fixtures/child-folders.json");
+    const WELL_KNOWN: &[u8] = include_bytes!("../../sift-graph/fixtures/well-known.json");
+    const DELTA_1: &[u8] = include_bytes!("../../sift-graph/fixtures/delta-backfill-1.json");
+    const DELTA_2: &[u8] = include_bytes!("../../sift-graph/fixtures/delta-backfill-2.json");
+    const DELTA_QUIET: &[u8] = include_bytes!("../../sift-graph/fixtures/delta-quiet.json");
+    const ENVELOPES_1: &[u8] =
+        include_bytes!("../../sift-graph/fixtures/envelopes-backfill-1.json");
+    const ENVELOPES_2: &[u8] =
+        include_bytes!("../../sift-graph/fixtures/envelopes-backfill-2.json");
+    const ATTACHMENTS: &[u8] = include_bytes!("../../sift-graph/fixtures/attachments.json");
+    const BODY: &[u8] = include_bytes!("../../sift-graph/fixtures/body.json");
+
+    let inbox = RemoteFolderId("AAMk-inbox".into());
+    let delta = |query: &str| format!("/v1.0/me/mailFolders/AAMk-inbox/messages/delta?{query}");
+    let mut r = Replay::new();
+    r.on("GET", &wire::rooted(&wire::folders_target()), FOLDERS_1);
+    r.on(
+        "GET",
+        "/v1.0/me/mailFolders?$select=id,displayName,parentFolderId,childFolderCount&$top=100&$skip=4",
+        FOLDERS_2,
+    );
+    r.on(
+        "GET",
+        &wire::rooted(&wire::child_folders_target("AAMk-projects")),
+        CHILD_FOLDERS,
+    );
+    r.on("POST", &wire::batch_target(), WELL_KNOWN);
+    r.on("POST", &wire::batch_target(), ENVELOPES_1);
+    r.on("POST", &wire::batch_target(), ENVELOPES_2);
+    r.on("GET", &wire::rooted(&wire::delta_target(&inbox)), DELTA_1);
+    r.on("GET", &delta("$skiptoken=page2"), DELTA_2);
+    r.on("GET", &delta("$deltatoken=round1"), DELTA_QUIET);
+    for id in ["AAMk-m1", "AAMk-m2", "AAMk-m3"] {
+        let id = RemoteMessageId(id.into());
+        r.on("GET", &wire::rooted(&wire::body_target(&id)), BODY);
+        r.on(
+            "GET",
+            &wire::rooted(&wire::attachments_target(&id)),
+            ATTACHMENTS,
+        );
+    }
+    r
+}
+
 /// A message's MIME structure: a plain alternative, an HTML body, and an attachment that is
 /// **not** fetched to render it.
 ///
@@ -243,5 +305,26 @@ mod tests {
             .unwrap();
         let text = String::from_utf8_lossy(&answer.body).into_owned();
         assert!(text.contains("example.test"), "{text}");
+    }
+
+    #[test]
+    fn the_graph_corpus_carries_no_real_mail() {
+        let mut replay = graph();
+        let answer = replay
+            .exchange(&sift_provider::transport::Request::new(
+                "POST",
+                &sift_graph::wire::batch_target(),
+            ))
+            .unwrap();
+        // The first batch is the well-known names; the second carries addresses.
+        let answer_2 = replay
+            .exchange(&sift_provider::transport::Request::new(
+                "POST",
+                &sift_graph::wire::batch_target(),
+            ))
+            .unwrap();
+        assert!(answer.is_success());
+        let text = String::from_utf8_lossy(&answer_2.body).into_owned();
+        assert!(text.contains("example.invalid"), "{text}");
     }
 }
