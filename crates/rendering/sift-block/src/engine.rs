@@ -105,7 +105,28 @@ impl core::fmt::Debug for Blocker {
     }
 }
 
+/// FR-27's bundled email list, as it ships — D-111 puts every list inside the binary.
+///
+/// Compiled in rather than read from disk, because a list read from a path at run time is a
+/// list something other than the build can change, and D-111's whole argument is that the
+/// integrity of list content is the integrity of the build.
+pub const BUNDLED_EMAIL_LIST: &str = include_str!("../lists/email.txt");
+
 impl Blocker {
+    /// The authority this build ships: every bundled list, parsed into both layers.
+    ///
+    /// Today that is the email list alone. EasyList and EasyPrivacy are D-112's to carry in
+    /// the Cask and Flatpak builds and are not vendored yet; when they are, they join here, so
+    /// the one caller that loads the engine does not change.
+    ///
+    /// This is the 40 MB NFR-42 budgets, and it is **not** built on demand: the application
+    /// builds it only when the governor says the engine may return and a window is open.
+    #[must_use]
+    pub fn bundled() -> Self {
+        let rules: Vec<String> = BUNDLED_EMAIL_LIST.lines().map(str::to_owned).collect();
+        Self::from_rules(&rules)
+    }
+
     /// Build both layers from one rule source.
     ///
     /// FR-27's lists are uBlock-syntax, which is what makes the mature public lists
@@ -396,6 +417,39 @@ mod tests {
             !gap.permits_fetch(),
             "the authority said block and the fetch went ahead anyway"
         );
+    }
+
+    #[test]
+    fn the_bundled_list_blocks_an_open_report_and_nothing_a_reader_wants() {
+        // FR-27's email list, as it ships. An open-report pixel stays blocked after a sender
+        // is allowed; the same service's content, and an unlisted host, do not.
+        let b = Blocker::bundled();
+        for tracker in [
+            "https://mailtrack.io/trace/mail/abc.png",
+            "https://us1.list-manage.com/track/open.php?u=1&id=2",
+            "https://u123.ct.sendgrid.net/wf/open?upn=xyz",
+            "https://abc.r.us-east-1.awstrack.me/I0/0100/xyz",
+        ] {
+            let d = b.decide(tracker, "sender.test", "image");
+            assert!(!d.permits_fetch(), "{tracker} was allowed: {d:?}");
+        }
+        for content in [
+            "https://cdn.sender.test/logo.png",
+            "https://mcusercontent.com/abc/images/hero.jpg",
+            "https://us1.list-manage.com/images/banner.png",
+        ] {
+            let d = b.decide(content, "sender.test", "image");
+            assert!(d.permits_fetch(), "{content} was blocked: {d:?}");
+        }
+    }
+
+    #[test]
+    fn every_bundled_rule_reaches_the_backstop() {
+        // A rule the conversion drops is one the backstop never hears of. Zero today, and a
+        // list change that breaks that is one somebody should look at rather than absorb.
+        let b = Blocker::bundled();
+        assert_eq!(b.unconverted_rules(), 0);
+        assert!(!b.compiled_rules().is_empty());
     }
 
     #[test]

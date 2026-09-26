@@ -1,0 +1,35 @@
+! Title: Sift email tracking list
+! Written by the Sift project, which is its curator (D-37), under Sift's own licence.
+! FR-27's bundled email-specific list. It MUST NOT be derived from a copyleft list (D-112),
+! so every rule here is written from the tracking service's own documented address shape
+! rather than copied from EasyList, EasyPrivacy or any other list.
+!
+! D-111: this file is the list. It ships inside the binary and changes only when the binary
+! does; Sift fetches no list from anywhere at run time.
+!
+! Scope: resources whose only purpose is reporting that a message was opened. Remote
+! content is already blocked by default (FR-8), so these rules decide what still stays
+! blocked **after** a user allows a sender: an allowance is consent to the sender's images,
+! not to a third party learning when they were looked at.
+!
+! Prefer a path-anchored rule over a whole host wherever the service also serves content a
+! reader wants, so that blocking the report does not also block the message's pictures.
+
+! --- Open-report pixels of bulk-mail senders, anchored on the report path.
+||list-manage.com/track/open.php
+||mandrillapp.com/track/open.php
+||awstrack.me/I0/
+||pstmrk.it/open
+||exct.net/open.aspx
+||rs6.net/on.jsp
+/wf/open?upn=
+
+! --- Services whose purpose is telling a sender their message was read.
+||mailtrack.io^
+||t.yesware.com^
+||mailfoogae.appspot.com^
+||bl-1.com^
+||getnotify.com^
+||readnotify.com^
+||didtheyreadit.com^
+||r.superhuman.com^
