@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+#MISE description="P0 spike (NFR-50, R-14) — the body view's accessibility tree, read by a second process as a screen reader reads it."
+#
+# Builds the macOS shell, then runs the bundle's own `--probe-accessibility` mode: a fixture in
+# the hardened body view, read across WebKit's content process by a separate assistive client.
+# Exits non-zero if the body is not in the reader's tree, if a heading, alternative text, table
+# structure or reading order is missing, or if reading or pressing anything made the body view
+# load, navigate or run script. `AccessibilityProbe.swift` says what it can and cannot observe.
+#
+# Not part of `mise run ci`: it needs the platform's assistive-access grant for the terminal that
+# launches it, which is a property of the machine rather than of the change. Without one it
+# exits 3 and says so.
+set -euo pipefail
+
+cd "${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
+
+[[ "$(uname -s)" == "Darwin" ]] || {
+    echo "accessibility-probe: this is the macOS half. The Linux half needs the GTK shell's body view, which is not built yet." >&2
+    exit 1
+}
+
+mise run macos --release
+
+exec shells/macos/.build/xcode/Build/Products/Release/Sift.app/Contents/MacOS/Sift \
+    --probe-accessibility
