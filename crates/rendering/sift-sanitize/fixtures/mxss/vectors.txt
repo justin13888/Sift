@@ -233,3 +233,6 @@
 
 @ mx-069 | clean | NFR-40 method 4 fuzzing, minimized: the adoption agency nests a heading inside a heading, which a reparse closes (I8)
 <a><h1><a><h6><a>
+
+@ mx-070 | clean | NFR-40 method 4 fuzzing, minimized: unbalanced braces in a declaration value swallow one rebuilt `}` per pass, so the stylesheet never settles within L-35 (I8, D-121)
+<style>a{color:{{{{</style>

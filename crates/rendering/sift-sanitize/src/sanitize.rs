@@ -882,6 +882,20 @@ fn filter_style(value: &str) -> (String, Vec<Removal>) {
             continue;
         }
 
+        // I8: a brace is block structure, not a value. Kept, it lets the sender decide what
+        // the regenerated stylesheet's blocks are: an unterminated `a{color:{{{{` swallows
+        // the `}` the rebuild closes the rule with, so each pass adds one more and the output
+        // settles only when the sender's count is balanced — a pass count the sender picks,
+        // which L-35 cannot bound. Dropped, every block the rebuild emits is balanced by
+        // construction, and a second pass reproduces it.
+        if v.contains(['{', '}']) {
+            dropped.push(Removal {
+                rule: "I8 parse stability — a brace in a declaration value",
+                what: property,
+            });
+            continue;
+        }
+
         // I5: containment. Fixed and sticky positioning leave the flow; viewport units are
         // measured against the viewport rather than the body view's box. Either lets a
         // message draw outside the area the reader gave it.
@@ -1625,5 +1639,34 @@ mod invariants {
     fn an_unterminated_stylesheet_does_not_hang_or_leak() {
         let out = clean("<style>p{color:red");
         assert!(!out.html.contains("<script"), "{}", out.html);
+    }
+
+    #[test]
+    fn an_unbalanced_brace_in_a_declaration_value_settles_within_l35() {
+        // I8, D-121. Kept, each `{` in the value swallowed one `}` the rebuild appended, so
+        // the pass count was the sender's to pick and no value of L-35 was enough. `clean`
+        // fails on `SanitizeError::Unstable`, so reaching the assertions is the fixed point.
+        for braces in 1..=16 {
+            let opens = "{".repeat(braces);
+            for html in [
+                format!("<style>a{{color:{opens}</style>"),
+                format!("<style>a{{color:red;background-color:{opens}</style><p>x</p>"),
+                format!("<style>@media screen{{a{{color:{opens}</style>"),
+                format!("<p style=\"color:{opens}\">x</p>"),
+            ] {
+                let out = clean(&html);
+                // No brace the sender wrote in a value survives into the output.
+                assert!(!out.html.contains(":{"), "{html} -> {}", out.html);
+                assert!(!out.html.contains("{{"), "{html} -> {}", out.html);
+            }
+        }
+        // The declarations beside the brace survive; only the one carrying it goes.
+        let out = clean("<style>a{color:red;background-color:{{</style><p>x</p>");
+        assert!(out.html.contains("a{color:red}"), "{}", out.html);
+        assert!(!out.html.contains("background-color"), "{}", out.html);
+        // A closing brace in an attribute's value is refused the same way.
+        let out = clean("<p style=\"color:red;background-color:}\">x</p>");
+        assert!(out.html.contains("color:red"), "{}", out.html);
+        assert!(!out.html.contains('}'), "{}", out.html);
     }
 }
