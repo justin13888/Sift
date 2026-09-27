@@ -511,6 +511,17 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_body_tag_adds_only_the_attributes_the_first_lacks() {
+        // A second `<body>` goes through `add_attrs_if_missing`: the first value of a name
+        // stands, and a new name is appended after the existing ones.
+        let dom = parse("<body a=1><body b=2 a=3>x");
+        assert_eq!(
+            serialized(&dom),
+            r#"<html><head></head><body a="1" b="2">x</body></html>"#
+        );
+    }
+
+    #[test]
     fn a_meta_content_ending_in_a_bare_charset_token_does_not_panic() {
         // The input the fuzz target minimized for the 0.39 tree builder (NFR-19).
         let dom = parse(r#"<meta http-equiv="Content-Type"content="charset">"#);
