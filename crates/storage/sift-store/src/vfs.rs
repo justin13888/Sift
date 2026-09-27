@@ -11,7 +11,8 @@
 //!
 //! ```text
 //! offset 0    64 bytes   the crypto header: magic, format version, key id, counter high-water,
-//!                        and the retiring generation while a key rotation is in progress
+//!                        the retiring generation while a key rotation is in progress, and the
+//!                        file's salt
 //! offset 64  88 bytes   the sealed meta block: the file's exact logical length
 //! offset 152  4120 each  sealed blocks, one per 4096 bytes of logical file
 //! ```
@@ -59,6 +60,7 @@
 //! somebody set them, because each one fails silently and none of them fails a test.
 
 use rusqlite::ffi;
+use sift_crypto::derive::{Part, part_key};
 use sift_crypto::page::{Header, KeyId, PageCipher, PageKey, Retiring};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -109,7 +111,10 @@ fn keys() -> &'static Mutex<HashMap<PathBuf, Presented>> {
 /// Lend a key to the VFS for the duration of an open.
 ///
 /// The write-ahead log and the rollback journal are named by adding a suffix to the database's
-/// own path, so one entry covers all three files.
+/// own path, so one entry covers all three files — but no file is sealed under this key itself.
+/// Each file seals under a key derived from it for that file's part and that file's salt
+/// (D-106, `sift_crypto::derive::part_key`), because each file keeps a counter of its own and
+/// one key over two counters is nonce reuse.
 ///
 /// The identifier travels with the key rather than being derived here, because D-106 derives
 /// both from the account key together and a second derivation is a second answer.
@@ -214,17 +219,67 @@ fn key_ids_of(database: &Path) -> Option<(KeyId, Option<KeyId>)> {
 /// `header` names the current key and any retiring generation. The retiring key is lent to the
 /// cipher only where the header's retiring generation is the one this database was presented
 /// with; otherwise the cipher recognises that generation's pages and refuses them.
-fn cipher_for(database: &Path, header: &Header) -> Option<PageCipher> {
+///
+/// Neither registered key is used as it stands: both generations are narrowed to this file's
+/// `part` and its header's salt, so no two files — and no two incarnations of one file — share
+/// a key. See `sift_crypto::derive::part_key`.
+fn cipher_for(database: &Path, header: &Header, part: Part) -> Option<PageCipher> {
     let map = keys().lock().ok()?;
     let presented = map.get(database)?;
+    let current = part_key(&presented.key, part, &header.salt);
     let retiring = match (&presented.retiring, header.retiring) {
-        (Some((key, id)), Some(r)) if *id == r.key_id => Some(key),
+        (Some((key, id)), Some(r)) if *id == r.key_id => Some(part_key(key, part, &header.salt)),
         _ => None,
     };
     Some(match retiring {
-        Some(old) => PageCipher::with_retiring(&presented.key, header, old),
-        None => PageCipher::new(&presented.key, header),
+        Some(old) => PageCipher::with_retiring(&current, header, &old),
+        None => PageCipher::new(&current, header),
     })
+}
+
+/// Which of a database's files SQLite is opening, from the flags it opens it with.
+fn part_of(flags: c_int) -> Option<Part> {
+    if flags & ffi::SQLITE_OPEN_MAIN_DB != 0 {
+        Some(Part::Database)
+    } else if flags & ffi::SQLITE_OPEN_WAL != 0 {
+        Some(Part::WriteAheadLog)
+    } else if flags & ffi::SQLITE_OPEN_MAIN_JOURNAL != 0 {
+        Some(Part::RollbackJournal)
+    } else {
+        None
+    }
+}
+
+/// `N` bytes from SQLite's own generator, which the default VFS seeds from the operating
+/// system's randomness. No second generator, and no new dependency, for a value whose job is to
+/// be unique rather than secret.
+fn random<const N: usize>() -> [u8; N] {
+    let mut out = [0u8; N];
+    // SAFETY: `out` is `N` writable bytes, and SQLite writes exactly the count it is given.
+    unsafe {
+        ffi::sqlite3_randomness(
+            c_int::try_from(N).unwrap_or(0),
+            out.as_mut_ptr().cast::<c_void>(),
+        );
+    }
+    out
+}
+
+/// The header a file starts its life with: a fresh salt, and a counter that starts at a random
+/// point rather than at zero.
+///
+/// The salt makes a new incarnation of a file a new key. The random start is the margin on top
+/// of it: the salt is six bytes, because that is what the header had left, and a rollback
+/// journal is created and deleted once per transaction. For two incarnations to reissue a nonce
+/// they would have to draw the same salt **and** counter windows that overlap somewhere in
+/// 2^62. The counter still only rises from there, and the nonce is still `page ‖ counter` —
+/// D-76's rule is unchanged; only where a new file's counter begins is.
+fn fresh_header(key_id: KeyId) -> Header {
+    Header {
+        salt: random(),
+        counter_high_water: u64::from_be_bytes(random()) >> 2,
+        ..Header::new(key_id)
+    }
 }
 
 /// What this layer keeps for one open file.
@@ -429,16 +484,17 @@ unsafe extern "C" fn x_open(
 ///
 /// A file with no key is passed through. That is not a hole: with `temp_store=MEMORY` and
 /// `locking_mode=EXCLUSIVE` the only files SQLite opens for an account are the database, its
-/// write-ahead log and its rollback journal, and all three resolve to the same key.
+/// write-ahead log and its rollback journal, and all three resolve to the same registry entry —
+/// each then sealing under its own key derived from it.
 unsafe fn sealed_state(
     name: ffi::sqlite3_filename,
     inner: *mut ffi::sqlite3_file,
     flags: c_int,
 ) -> Result<*mut Sealed, c_int> {
-    let sealable = flags
-        & (ffi::SQLITE_OPEN_MAIN_DB | ffi::SQLITE_OPEN_WAL | ffi::SQLITE_OPEN_MAIN_JOURNAL)
-        != 0;
-    if !sealable || name.is_null() {
+    let Some(part) = part_of(flags) else {
+        return Ok(std::ptr::null_mut());
+    };
+    if name.is_null() {
         return Ok(std::ptr::null_mut());
     }
     // SAFETY: SQLite hands a NUL-terminated path for every named open.
@@ -460,9 +516,12 @@ unsafe fn sealed_state(
         // A key identifier derived from the key rather than zeroed, so that D-22's rotation
         // and FR-4's "recognisable rather than merely unreadable" both hold from the first
         // write. The caller registered the key under this path, so the two agree.
-        let header = Header::new(key_id);
+        //
+        // A fresh salt, whatever was at this path before: a write-ahead log deleted on close
+        // and created again here on the next open is a new file, and must be a new key.
+        let header = fresh_header(key_id);
         Sealed {
-            cipher: cipher_for(&database, &header).ok_or(ffi::SQLITE_NOTADB)?,
+            cipher: cipher_for(&database, &header, part).ok_or(ffi::SQLITE_NOTADB)?,
             reserved: 0,
             logical: 0,
             initialized: false,
@@ -474,7 +533,7 @@ unsafe fn sealed_state(
         let on_disk = Header::decode(&bytes).map_err(|_| ffi::SQLITE_NOTADB)?;
         // SAFETY: as above.
         let header = unsafe { rotate(inner, on_disk, key_id, retiring_id, size) }?;
-        let cipher = cipher_for(&database, &header).ok_or(ffi::SQLITE_NOTADB)?;
+        let cipher = cipher_for(&database, &header, part).ok_or(ffi::SQLITE_NOTADB)?;
 
         let mut meta = vec![0u8; META_BLOCK as usize];
         // SAFETY: as above.
