@@ -14,10 +14,10 @@
 //! would be a view of a document nobody displays, and the gap between the two is exactly
 //! where I8's parse differentials live.
 
+use crate::dom::{Dom, Handle, NodeData};
 use html5ever::driver::ParseOpts;
 use html5ever::tendril::TendrilSink;
 use html5ever::{ns, parse_document};
-use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 /// One element, flat, with its parent's index.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -115,7 +115,7 @@ fn break_line(out: &mut Document) {
 /// Read a sanitized document back.
 #[must_use]
 pub fn read(html: &str) -> Document {
-    let dom = parse_document(RcDom::default(), ParseOpts::default()).one(html);
+    let dom = parse_document(Dom::default(), ParseOpts::default()).one(html);
     let mut document = Document::default();
     walk(&dom.document, None, &mut document, true);
     document

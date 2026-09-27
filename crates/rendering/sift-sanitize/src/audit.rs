@@ -20,10 +20,10 @@
 //! that is not in the tree cannot execute, whatever the bytes look like.
 
 use crate::allowlist;
+use crate::dom::{Dom, Handle, NodeData};
 use html5ever::driver::ParseOpts;
 use html5ever::parse_document;
 use html5ever::tendril::TendrilSink;
-use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 /// Something present in the re-parsed tree that an invariant forbids.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +38,7 @@ pub struct Violation {
 /// sense in which "clean" means anything.
 #[must_use]
 pub fn audit(html: &str) -> Vec<Violation> {
-    let dom = parse_document(RcDom::default(), ParseOpts::default()).one(html);
+    let dom = parse_document(Dom::default(), ParseOpts::default()).one(html);
     let mut found = Vec::new();
     inspect(&dom.document, &mut found);
     found

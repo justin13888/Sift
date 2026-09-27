@@ -236,3 +236,6 @@
 
 @ mx-070 | clean | NFR-40 method 4 fuzzing, minimized: unbalanced braces in a declaration value swallow one rebuilt `}` per pass, so the stylesheet never settles within L-35 (I8, D-121)
 <style>a{color:{{{{</style>
+
+@ mx-071 | clean | NFR-40 method 4 fuzzing, minimized: a meta content value ending in a bare charset token indexed past its end in the 0.39 tree builder, a panic rather than a render (NFR-19)
+<meta http-equiv="Content-Type"content="charset">
