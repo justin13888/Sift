@@ -1113,9 +1113,15 @@ fn search(app: &mut App, args: &[&str]) -> Output {
         "{} result(s){}{}",
         report.hits.len(),
         if report.delegable_accounts == 0 {
-            ", all from this machine — nothing was asked of a provider"
+            ", all from this machine — nothing was asked of a provider".to_owned()
         } else {
-            ""
+            // FR-21: this command is the local half. Saying how many providers the server half
+            // would ask keeps the absence of server results from implying none could.
+            format!(
+                ", all from this machine — nothing was asked of a provider, though {} could \
+                 search its server",
+                report.delegable_accounts
+            )
         },
         if report.hits.len() > SEARCH_SHOWN {
             format!(", the newest {SEARCH_SHOWN} shown")

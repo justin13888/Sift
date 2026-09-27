@@ -69,7 +69,18 @@ pub fn gmail() -> Replay {
         ("m2", "t1", "Re: A receipt", 1_700_000_002_000, true),
         ("m3", "t2", "A newsletter", 1_700_000_003_000, true),
         ("m4", "t3", "Something new", 1_700_000_004_000, false),
+        // Archived long ago, so no folder lists it and no backfill reaches it: only a
+        // server-side search finds it, by a word in a body nobody has opened — FR-21.
+        ("m5", "t5", "Last year's statement", 1_690_000_000_000, true),
     ];
+    // FR-21: the provider's own search, for a word that is in m5's body and nowhere in any
+    // envelope. It also names m2, which the store already holds, so the merge has a row to
+    // deduplicate to.
+    r.on(
+        "GET",
+        &wire::search_target("\"quokka\"", 50),
+        br#"{"messages":[{"id":"m5","threadId":"t5"},{"id":"m2","threadId":"t1"}],"resultSizeEstimate":2}"#,
+    );
     for (id, thread, subject, received, read) in envelopes {
         r.on(
             "GET",
@@ -194,9 +205,13 @@ fn structure(id: &str) -> String {
     if id == "m1" {
         return hostile();
     }
-    let html = "<style>p{color:#111111;background-color:#ffffff}</style>\
-                <p>Hello from a fixture. <img src=\"https://tracker.test/pixel.gif\" width=\"1\" height=\"1\"> \
-                <a href=\"https://example.test/read\">read more</a></p>";
+    let html = if id == "m5" {
+        "<p>Your quokka sanctuary statement for last year is attached.</p>"
+    } else {
+        "<style>p{color:#111111;background-color:#ffffff}</style>\
+         <p>Hello from a fixture. <img src=\"https://tracker.test/pixel.gif\" width=\"1\" height=\"1\"> \
+         <a href=\"https://example.test/read\">read more</a></p>"
+    };
     let encoded = sift_provider::oauth::base64url(html.as_bytes());
     format!(
         r#"{{"id":"{id}","payload":{{"partId":"","mimeType":"multipart/mixed","body":{{"size":0}},
@@ -255,7 +270,10 @@ fn batch(envelopes: &[(&str, &str, &str, u64, bool)]) -> Response {
     let mut body = String::new();
     // Deliberately answered back to front.
     for (position, (id, thread, subject, received, read)) in envelopes.iter().enumerate().rev() {
-        let labels = if *read {
+        // An archived message carries no location label at all.
+        let labels = if *id == "m5" {
+            ""
+        } else if *read {
             r#""INBOX""#
         } else {
             r#""INBOX","UNREAD""#

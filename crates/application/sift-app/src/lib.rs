@@ -342,6 +342,13 @@ pub struct App {
     /// Private, and changed only by [`App::reconcile_filter_engine`] and the shed, so that
     /// no caller can load forty megabytes in response to a pressure signal.
     filter: sift_block::engine::Authority,
+    /// D-58's network-derived policy tier, as the shell last reported it.
+    ///
+    /// **Conservative until told otherwise**, which is NFR-30's rule for an unknown metered
+    /// state: never Unrestricted on a guess. The per-account half of the tier — the user's
+    /// pause, D-95 — is the account's own setting and is read beside this rather than folded
+    /// into it. FR-21's server-side search is the first thing that asks.
+    network: sift_net::tier::Tier,
 }
 
 impl std::fmt::Debug for App {
@@ -398,7 +405,21 @@ impl App {
             allowed_once_message: None,
             // Absent until a window opens: no window means no body view and so no caller.
             filter: sift_block::engine::Authority::Absent,
+            network: sift_net::tier::Tier::Conservative,
         }
+    }
+
+    /// The network-derived policy tier, as detection or the user's per-network override
+    /// resolved it — D-14, FR-35. Recorded rather than detected here: the platform monitor is
+    /// the shell's, and the layer only plans against its answer.
+    pub const fn set_network_tier(&mut self, tier: sift_net::tier::Tier) {
+        self.network = tier;
+    }
+
+    /// The tier last recorded by [`App::set_network_tier`].
+    #[must_use]
+    pub const fn network_tier(&self) -> sift_net::tier::Tier {
+        self.network
     }
 
     /// Open the installation container, and everything the last run left in it.

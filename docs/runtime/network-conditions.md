@@ -41,6 +41,17 @@ detection is found wanting.
 Mutations flush in every tier above offline, **including Paused**. They are tiny, and a triage action that
 does not take effect because the user is on cellular is a broken product.
 
+**Server-side search follows on-demand fetching.** [FR-21](../storage/search.md) puts it under this table,
+and it is sent in Unrestricted, Conservative and Minimal: it is one request a person asked for, bounded by
+L-32 in [limits](../limits.md), which NFR-31 excludes from Minimal's steady-state figure exactly as it
+excludes opening a message. It is **not** sent while Paused — pause stops fetching, and a search is a
+fetch — nor behind a captive portal, where D-96's one reattempt belongs to the account's own next
+operation, nor with no path, where NFR-38 allows zero attempts. A search held back by any of the three
+returns its local results with a caveat naming the account whose server half was skipped, never a
+silently smaller set. The tier consulted is the account's: the network's row, and the account's own
+pause under D-95. Until the platform reports a tier, the application plans against Conservative, which
+is NFR-30's rule for an unknown metered state.
+
 No tier mentions filter-list updates, which earlier revisions ran only when unrestricted. Under
 [D-111](../rendering/content-blocking.md) every list ships in the binary, so there is no list traffic for a
 tier to allow or defer.

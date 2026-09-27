@@ -4320,10 +4320,11 @@ mod tests {
         let _ = unsafe { sift_shutdown(app) };
     }
 
-    /// FR-21's label. Nothing delegates yet, and the count says so rather than the absence of
-    /// server results implying it.
+    /// FR-21's count. This call is the local half and asks no provider; the count is how many
+    /// accounts the server half would ask, so a shell knows there is a second half to run
+    /// rather than inferring it from the absence of server results.
     #[test]
-    fn a_search_says_that_nothing_was_asked_of_a_provider() {
+    fn a_search_says_how_many_providers_its_server_half_would_ask() {
         let app = start(run_inline, scratch_str());
         let _ = hostile_message(app);
         let query = "receipt";
@@ -4343,7 +4344,10 @@ mod tests {
                 &raw mut found,
             )
         };
-        assert_eq!(found.delegable_accounts, 0);
+        assert_eq!(
+            found.delegable_accounts, 1,
+            "the replayed account's provider searches text, and was not counted"
+        );
         assert!(!found.rows.is_empty(), "the local search found nothing");
         let _ = unsafe { sift_shutdown(app) };
     }
