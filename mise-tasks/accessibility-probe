@@ -22,6 +22,15 @@ cd "${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
 mise run macos --release
 
 # The exported Developer ID bundle — where a Release build lands since D-45's signing (see
-# `mise-tasks/macos`) — so the probe runs the sandboxed, hardened binary that ships.
-exec shells/macos/.build/export/Sift.app/Contents/MacOS/Sift \
+# `mise-tasks/macos`) — so the probe runs the sandboxed, hardened binary that ships. An ad-hoc
+# build (`--ad-hoc`, or CI) writes no export and clears any earlier one, because its bundle
+# cannot launch; this refuses rather than running nothing or something stale.
+binary="shells/macos/.build/export/Sift.app/Contents/MacOS/Sift"
+[[ -x "$binary" ]] || {
+    echo "accessibility-probe: no exported bundle at $binary." >&2
+    echo "       An ad-hoc build (--ad-hoc, or CI=true) exports nothing and cannot launch;" >&2
+    echo "       the probe needs a team-signed Release build." >&2
+    exit 1
+}
+exec "$binary" \
     --probe-accessibility

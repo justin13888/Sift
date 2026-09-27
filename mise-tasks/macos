@@ -243,6 +243,12 @@ if [[ "$ad_hoc" == true ]]; then
     # unsigned and `codesign` applies the committed entitlements file and the runtime flag —
     # the same two inputs `project.yml` gives Xcode, which is what makes the readback below
     # meaningful here too.
+    #
+    # **The Release export is cleared too**, though this path never writes it. The probes run
+    # `.build/export/Sift.app`, and an ad-hoc build that left an earlier team-signed export in
+    # place would have them exercise that stale bundle as though it were this one. With it gone
+    # they find nothing, and refuse by name.
+    rm -rf shells/macos/.build/Sift.xcarchive shells/macos/.build/export
     xcode CODE_SIGNING_ALLOWED=NO build
     app="shells/macos/.build/xcode/Build/Products/$configuration/Sift.app"
     codesign --force --sign - --options runtime \
