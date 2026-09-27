@@ -306,7 +306,7 @@ mod tests {
             delta: DeltaMechanism::FullScan,
             push: PushMechanism::PollOnly,
             id_stability: IdStability::StablePerFolder,
-            server_search: true,
+            server_search: sift_provider::capability::ServerSearch::ALL,
             max_batch_size: Magnitude::Unknown,
             request_budget: Magnitude::Unknown,
             snippet_source: SnippetSource::ClientDerived,

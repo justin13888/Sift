@@ -1,0 +1,1 @@
+{"@odata.context":"https://graph.microsoft.com/v1.0/$metadata#users('example.invalid')/messages(id)","value":[{"@odata.etag":"W/\"CQAAABYAAAB\"","id":"AAMk-m7"},{"@odata.etag":"W/\"CQAAABYAAAC\"","id":"AAMk-m2"},{"@odata.etag":"W/\"CQAAABYAAAD\""}],"@odata.nextLink":"https://graph.microsoft.com/v1.0/me/messages?$search=%22quokka%22&$top=50&$select=id&$skiptoken=MSZZVlJ"}

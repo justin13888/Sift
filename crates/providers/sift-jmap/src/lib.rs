@@ -35,7 +35,8 @@ pub fn capabilities() -> Capabilities {
         delta: DeltaMechanism::ChangesQuery,
         push: PushMechanism::EventStream,
         id_stability: IdStability::StableGlobally,
-        server_search: true,
+        // The query's filter conditions cover every FR-20 operator, including a mailbox.
+        server_search: sift_provider::capability::ServerSearch::ALL,
         // Q-9. Declared unknown with a source rather than left absent, which is what lets
         // the planner batch conservatively instead of refusing to batch.
         max_batch_size: Magnitude::Unknown,

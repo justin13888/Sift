@@ -1,10 +1,12 @@
 //! The adapter itself: six responsibilities over one transport.
 
 use core::cell::RefCell;
-use sift_foundation::limits::{L1_BODY_PART_BYTES, L2_MIME_PARTS, L26_BACKFILL_PAGE};
+use sift_foundation::limits::{
+    L1_BODY_PART_BYTES, L2_MIME_PARTS, L26_BACKFILL_PAGE, L32_SERVER_SEARCH_HITS,
+};
 use sift_provider::adapter::{
     Adapter, Cursor, Delta, Envelope, Failure, MutationOutcome, Operation, PartDescriptor,
-    RemoteFolder, RemoteFolderId, RemoteMessageId, SpecialUse, WireMutation,
+    RemoteFolder, RemoteFolderId, RemoteMessageId, SearchTerm, SpecialUse, WireMutation,
 };
 use sift_provider::capability::Capabilities;
 use sift_provider::transport::{Request, Response, Transport, TransportError};
@@ -659,6 +661,35 @@ impl<T: Transport> Adapter for Graph<T> {
         Err(GraphError::Unsupported(
             "this provider's change notifications need a listening endpoint, which Sift never opens",
         ))
+    }
+
+    /// FR-21, over `$search` on the whole mailbox: one request, identifiers only.
+    ///
+    /// Every folder, because a search is not scoped to where sync happens to be watching —
+    /// and identifiers that are unstable on move are still the right thing to answer with: the
+    /// caller joins them to the store the way a delta's are joined, at the moment they are
+    /// current.
+    fn search(
+        &self,
+        terms: &[SearchTerm],
+        limit: usize,
+    ) -> Result<Vec<RemoteMessageId>, Self::Error> {
+        if terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let query = wire::search_query(terms).map_err(GraphError::Unsupported)?;
+        // Every value was punctuation: nothing to ask, which is the local reading too.
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let bound = limit.min(usize::try_from(L32_SERVER_SEARCH_HITS).unwrap_or(limit));
+        let target = wire::rooted(&wire::search_target(
+            &query,
+            u32::try_from(bound).unwrap_or(u32::MAX),
+        ));
+        let ids = wire::parse_search(&self.get(&target, None)?)?;
+        // `$top` is a request, not a promise; an answer past it is not believed.
+        Ok(ids.into_iter().take(bound).collect())
     }
 
     fn present_credential(&self, secret: &str) {

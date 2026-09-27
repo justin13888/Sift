@@ -2,7 +2,7 @@
 #
 # metadata: https://graph.microsoft.com/v1.0/$metadata
 # transcribed: 2026-09-26
-# endpoints used here: 10
+# endpoints used here: 11
 #
 # D-13 requires that where a client is hand-written, CI diff the hand-written types against
 # the current published schema and fail on drift. This file is the hand-written side of that
@@ -31,6 +31,7 @@ GET    /me/mailFolders                                         # nav:user.mailFo
 GET    /me/mailFolders/{id}                                    # nav:user.mailFolders
 GET    /me/mailFolders/{id}/childFolders                       # nav:mailFolder.childFolders
 GET    /me/mailFolders/{id}/messages/delta                     # documented:message.delta
+GET    /me/messages                                            # nav:user.messages
 GET    /me/messages/{id}                                       # nav:user.messages
 PATCH  /me/messages/{id}                                       # nav:user.messages
 POST   /me/messages/{id}/move                                  # action:message.move

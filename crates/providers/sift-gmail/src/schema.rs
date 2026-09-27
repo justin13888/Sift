@@ -100,6 +100,7 @@ mod tests {
                 "GET",
                 wire::history_target("1", &RemoteFolderId("INBOX".into()), None, 500),
             ),
+            ("GET", wire::search_target("\"quokka\" from:\"a\"", 50)),
             ("GET", wire::envelope_target(&message())),
             ("GET", wire::structure_target(&message())),
             ("GET", wire::attachment_target(&message(), "ANGjdJ")),

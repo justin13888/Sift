@@ -42,8 +42,8 @@ pub use adapter::{Graph, GraphError};
 use sift_provider::adapter::Envelope;
 use sift_provider::capability::{
     ArchiveSemantics, Capabilities, DeltaMechanism, IdStability, JunkReporting,
-    LocationCardinality, Magnitude, PushMechanism, SnippetSource, TagSupport, ThreadOperations,
-    TrashSemantics,
+    LocationCardinality, Magnitude, PushMechanism, ServerSearch, SnippetSource, TagSupport,
+    ThreadOperations, TrashSemantics,
 };
 
 /// What a Graph account declares.
@@ -68,7 +68,20 @@ pub fn capabilities() -> Capabilities {
         delta: DeltaMechanism::DeltaLink,
         push: PushMechanism::PollOnly,
         id_stability: IdStability::UnstableOnMove,
-        server_search: true,
+        // Words, the address and subject properties and attachment presence — what the
+        // keyword language searches mail properties by. Not a phrase: adjacency inside a
+        // quoted `$search` value depends on nested quoting this adapter will not trust typed
+        // text to. Not read state or a folder, which the language has no property for; and not
+        // dates, whose comparison syntax is not one this adapter has verified. Each of those is
+        // applied locally to what the search returns.
+        server_search: ServerSearch {
+            text: true,
+            sender: true,
+            recipient: true,
+            subject: true,
+            attachment: true,
+            ..ServerSearch::NONE
+        },
         max_batch_size: Magnitude::Unknown,
         request_budget: Magnitude::Unknown,
         snippet_source: SnippetSource::ProviderSupplied,

@@ -1,10 +1,10 @@
 //! The adapter itself: six responsibilities over one transport.
 
 use core::cell::RefCell;
-use sift_foundation::limits::L26_BACKFILL_PAGE;
+use sift_foundation::limits::{L26_BACKFILL_PAGE, L32_SERVER_SEARCH_HITS};
 use sift_provider::adapter::{
     Adapter, Change, Cursor, Delta, Envelope, Failure, MutationOutcome, Operation, PartDescriptor,
-    RemoteFolder, RemoteFolderId, RemoteMessageId, WireMutation,
+    RemoteFolder, RemoteFolderId, RemoteMessageId, SearchTerm, WireMutation,
 };
 use sift_provider::capability::Capabilities;
 use sift_provider::transport::{Request, Response, Transport, TransportError};
@@ -490,6 +490,28 @@ impl<T: Transport> Adapter for Gmail<T> {
         Err(GmailError::Unsupported(
             "this provider offers no change notification that does not also authorize sending",
         ))
+    }
+
+    /// FR-21, over the list endpoint's own query parameter: one request, identifiers only.
+    ///
+    /// Envelopes for what the store does not hold are the caller's next request, through the
+    /// metadata-only batch — so a search, like a backfill, never fetches a body.
+    fn search(
+        &self,
+        terms: &[SearchTerm],
+        limit: usize,
+    ) -> Result<Vec<RemoteMessageId>, Self::Error> {
+        if terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let query = wire::search_query(terms).map_err(GmailError::Unsupported)?;
+        let bound =
+            u32::try_from(limit.min(usize::try_from(L32_SERVER_SEARCH_HITS).unwrap_or(limit)))
+                .unwrap_or(u32::MAX);
+        let page = wire::parse_list(&self.get(&wire::search_target(&query, bound))?)?;
+        // The page size is a request, not a promise, and an answer longer than it asked for is
+        // not one to believe past the bound.
+        Ok(page.ids.into_iter().take(bound as usize).collect())
     }
 
     fn present_credential(&self, secret: &str) {

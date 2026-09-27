@@ -13,7 +13,7 @@ use sift_graph::adapter::Position;
 use sift_graph::{Departed, Graph, MoveOutcome, rejoin, wire};
 use sift_provider::adapter::{
     Adapter, Change, Cursor, Envelope, Failure, MutationOutcome, Operation, Provenance,
-    RemoteFolderId, RemoteMessageId, SpecialUse, WireMutation,
+    RemoteFolderId, RemoteMessageId, SearchTerm, SpecialUse, WireMutation,
 };
 use sift_provider::transport::{Replay, Response, TransportError};
 
@@ -1502,4 +1502,83 @@ fn an_account_is_added_backfilled_kept_live_and_triaged_through_the_harness() {
     );
     // Nothing on the replay harness costs anybody's data plan.
     assert_eq!(g.wire_bytes(), (0, 0));
+}
+
+// ---------------------------------------------------------------------------
+// Server-side search — FR-21.
+// ---------------------------------------------------------------------------
+
+const SEARCH: &[u8] = include_bytes!("../fixtures/search.json");
+
+#[test]
+fn a_search_is_one_request_for_identifiers_across_every_folder() {
+    let terms = [
+        SearchTerm::Word("quokka".into()),
+        SearchTerm::Sender("ops@example.invalid".into()),
+        SearchTerm::HasAttachment(true),
+    ];
+    let query = wire::search_query(&terms).unwrap();
+    assert_eq!(query, "quokka from:ops@example.invalid hasAttachments:true");
+    let target = wire::rooted(&wire::search_target(&query, 50));
+    assert!(target.starts_with("/v1.0/me/messages?$search="));
+    assert!(target.ends_with("&$top=50&$select=id"), "{target}");
+    let mut r = Replay::new();
+    r.on("GET", &target, SEARCH);
+    let g = graph(r);
+
+    // The identifiers it named, in its order; an element with no identifier is not one, and
+    // the next link is not followed — L-32 is one page.
+    let ids = g.search(&terms, 50).unwrap();
+    assert_eq!(ids, vec![id("AAMk-m7"), id("AAMk-m2")]);
+    assert_eq!(g.transport().performed.len(), 1);
+}
+
+#[test]
+fn only_the_characters_a_word_is_made_of_reach_the_query_language() {
+    // The keyword language has operators, grouping and wildcards of its own. None of them can
+    // be typed into it: a value is cut into runs, and a run is only letters, digits and the
+    // punctuation an address carries.
+    let query = wire::search_query(&[
+        SearchTerm::Word("a\"b".into()),
+        SearchTerm::Subject("(x OR y*)".into()),
+        SearchTerm::Word("--".into()),
+    ])
+    .unwrap();
+    assert_eq!(query, "a b subject:x subject:or subject:y");
+    // Punctuation alone asks nothing, and asking nothing sends nothing.
+    let g = graph(Replay::new());
+    assert!(
+        g.search(&[SearchTerm::Word("--".into())], 50)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(g.transport().performed.is_empty());
+}
+
+#[test]
+fn the_declared_operators_are_exactly_the_ones_that_translate() {
+    let caps = sift_graph::capabilities().server_search;
+    for term in [
+        SearchTerm::Word("w".into()),
+        SearchTerm::Phrase("p q".into()),
+        SearchTerm::Sender("s".into()),
+        SearchTerm::Recipient("r".into()),
+        SearchTerm::Subject("t".into()),
+        SearchTerm::HasAttachment(false),
+        SearchTerm::Unread(true),
+        SearchTerm::Location("inbox".into()),
+        SearchTerm::Before(0),
+        SearchTerm::After(0),
+    ] {
+        assert_eq!(
+            wire::search_query(core::slice::from_ref(&term)).is_ok(),
+            caps.evaluates(&term),
+            "{term:?}: the capability and the translation disagree"
+        );
+    }
+    // Handed one it did not declare, it refuses and sends nothing.
+    let g = graph(Replay::new());
+    let refused = g.search(&[SearchTerm::Unread(true)], 50).unwrap_err();
+    assert_eq!(g.classify(&refused), Failure::Permanent);
+    assert!(g.transport().performed.is_empty());
 }

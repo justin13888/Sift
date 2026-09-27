@@ -17,7 +17,9 @@
 //!    absolute URLs; one naming any other host is refused rather than fetched, because the
 //!    bearer token travels with every request this adapter makes.
 
-use sift_provider::adapter::{Change, Envelope, Provenance, RemoteFolderId, RemoteMessageId};
+use sift_provider::adapter::{
+    Change, Envelope, Provenance, RemoteFolderId, RemoteMessageId, SearchTerm,
+};
 
 use crate::folder::Folder;
 
@@ -152,6 +154,94 @@ pub fn delta_target(folder: &RemoteFolderId) -> String {
         encode(&folder.0),
         select(DELTA_SELECT)
     )
+}
+
+/// A server-side search across the whole mailbox — FR-21. Identifiers only, one page of at
+/// most `limit`.
+///
+/// `$search` takes the provider's keyword query language, quoted as one value; the value is
+/// built by [`search_query`] and nothing a person typed reaches it unfiltered.
+#[must_use]
+pub fn search_target(query: &str, limit: u32) -> String {
+    format!(
+        "/me/messages?$search={}&$top={limit}&{}",
+        encode(&format!("\"{query}\"")),
+        select(SEARCH_SELECT)
+    )
+}
+
+/// What a search answer is asked to carry: the identifier, and nothing else. Envelopes follow
+/// through the batch for the ones the store does not hold.
+pub const SEARCH_SELECT: &[&str] = &["id"];
+
+/// FR-20's terms, written in the provider's keyword query language.
+///
+/// **Only the characters a word is made of survive.** The language has operators, grouping,
+/// wildcards and its own quoting inside the quoted `$search` value, and its escaping rules are
+/// not ones worth trusting a person's typing to; so each value is cut into runs of letters,
+/// digits and the punctuation an address carries, and each run becomes one term. That is also
+/// what the local index's tokenizer does with the same text, so the two halves of a search
+/// read a query the same way. A value with nothing left in it asks nothing, exactly as it does
+/// locally.
+///
+/// # Errors
+/// A term this provider's declared capability does not cover — a phrase, read state, a
+/// location or a date. The caller applies those locally and was told not to send them, and
+/// refusing is how a term is kept from being silently dropped.
+pub fn search_query(terms: &[SearchTerm]) -> Result<String, &'static str> {
+    let runs = |value: &str| -> Vec<String> {
+        value
+            .split(|c: char| !(c.is_alphanumeric() || matches!(c, '@' | '.' | '_' | '-' | '\'')))
+            .map(|run| run.trim_matches(|c: char| matches!(c, '.' | '-' | '\'')))
+            .filter(|run| !run.is_empty())
+            // The language's own `AND`, `OR` and `NOT` are upper case, and its matching is not
+            // case-sensitive, so lower case keeps a typed one from being read as an operator.
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let mut parts = Vec::with_capacity(terms.len());
+    for term in terms {
+        let (property, value) = match term {
+            SearchTerm::Word(t) => ("", t.as_str()),
+            SearchTerm::Sender(t) => ("from:", t.as_str()),
+            SearchTerm::Recipient(t) => ("to:", t.as_str()),
+            SearchTerm::Subject(t) => ("subject:", t.as_str()),
+            SearchTerm::HasAttachment(want) => {
+                parts.push(format!("hasAttachments:{want}"));
+                continue;
+            }
+            SearchTerm::Phrase(_)
+            | SearchTerm::Unread(_)
+            | SearchTerm::Location(_)
+            | SearchTerm::Before(_)
+            | SearchTerm::After(_) => {
+                return Err("this provider's search does not evaluate that operator");
+            }
+        };
+        parts.extend(
+            runs(value)
+                .into_iter()
+                .map(|run| format!("{property}{run}")),
+        );
+    }
+    Ok(parts.join(" "))
+}
+
+/// Read a search answer: the identifiers it names, in its order. A next link is ignored —
+/// L-32 is one page — and so is anything that is not an identifier.
+///
+/// # Errors
+/// [`Refusal::Malformed`] where the answer is not a message collection.
+pub fn parse_search(body: &[u8]) -> Result<Vec<RemoteMessageId>, Refusal> {
+    let value = json(body)?;
+    let items = value
+        .get("value")
+        .and_then(|v| v.as_array())
+        .ok_or(Refusal::Malformed("the answer carried no messages"))?;
+    Ok(items
+        .iter()
+        .filter_map(|m| string(m, "id").map(RemoteMessageId))
+        .collect())
 }
 
 /// One envelope. **Named fields only** — the rule this module exists to keep.

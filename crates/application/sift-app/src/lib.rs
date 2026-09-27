@@ -31,8 +31,8 @@ use sift_foundation::identity::{AccountId, AccountOrdinal, LocalId, LocalIdGener
 use sift_mutations::queue::Queue;
 use sift_provider::capability::{
     ArchiveSemantics, Capabilities, DeltaMechanism, IdStability, JunkReporting,
-    LocationCardinality, Magnitude, PushMechanism, SnippetSource, TagSupport, ThreadOperations,
-    TrashSemantics,
+    LocationCardinality, Magnitude, PushMechanism, ServerSearch, SnippetSource, TagSupport,
+    ThreadOperations, TrashSemantics,
 };
 use sift_provider::erased::ErasedAdapter;
 use sift_store::account::{Account, AccountPaths};
@@ -844,7 +844,7 @@ fn intersect(a: &Capabilities, b: &Capabilities) -> Capabilities {
         delta: a.delta,
         push: a.push,
         id_stability: a.id_stability,
-        server_search: a.server_search && b.server_search,
+        server_search: a.server_search.intersection(b.server_search),
         // The smaller batch, because the larger would be refused by half the selection.
         max_batch_size: match (a.max_batch_size, b.max_batch_size) {
             (Magnitude::Known { value: x, source }, Magnitude::Known { value: y, .. }) => {
@@ -878,7 +878,7 @@ fn shape_named(shape: &str) -> Result<Capabilities, String> {
         delta: DeltaMechanism::ChangesQuery,
         push: PushMechanism::EventStream,
         id_stability: IdStability::StableGlobally,
-        server_search: true,
+        server_search: ServerSearch::ALL,
         max_batch_size: Magnitude::Unknown,
         request_budget: Magnitude::Unknown,
         snippet_source: SnippetSource::ProviderSupplied,

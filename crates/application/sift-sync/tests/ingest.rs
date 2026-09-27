@@ -114,7 +114,7 @@ fn shape() -> Capabilities {
         delta: DeltaMechanism::HistoryCursor,
         push: PushMechanism::PollOnly,
         id_stability: IdStability::StableGlobally,
-        server_search: true,
+        server_search: sift_provider::capability::ServerSearch::ALL,
         max_batch_size: Magnitude::Unknown,
         request_budget: Magnitude::Unknown,
         snippet_source: SnippetSource::ProviderSupplied,
@@ -173,6 +173,14 @@ impl Adapter for Scripted {
 
     fn watch(&self, _folders: &[RemoteFolderId]) -> Result<(), Self::Error> {
         Ok(())
+    }
+
+    fn search(
+        &self,
+        _terms: &[sift_provider::adapter::SearchTerm],
+        _limit: usize,
+    ) -> Result<Vec<RemoteMessageId>, Self::Error> {
+        Ok(Vec::new())
     }
 
     fn classify(&self, error: &Self::Error) -> Failure {
