@@ -162,6 +162,137 @@ pub fn by_key(key: &str) -> Option<&'static Setting> {
     SETTINGS.iter().find(|s| s.key == key)
 }
 
+/// The key FR-23's per-folder rules are stored under.
+pub const FOLDER_RULES: &str = "notify.per-folder-rules";
+
+/// FR-23's per-folder notification rule for one account — what `notify.per-folder-rules`
+/// holds.
+///
+/// # The grammar
+///
+/// Comma-separated, case-insensitive, surrounding space ignored:
+///
+/// - `none` — nothing this account receives is announced;
+/// - `all` — anything that arrives in any watched folder is;
+/// - otherwise a list of folders, each either a special use (`inbox`, `archive`, `sent`,
+///   `trash`, `spam`, `drafts`) or `folder:N`, a folder's local identity under D-83.
+///
+/// Special uses rather than display names, for FR-5's reason: a display name is the provider's
+/// and the locale's, and a rule keyed on one would stop matching when either changed. A
+/// folder's local identity is Sift's own and survives a rename, which is what makes it the
+/// key a rule for one particular folder is written against.
+///
+/// **Empty text is no rule at all**, and the account takes the installation default — which is
+/// what an account that existed before rules were recorded holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderRule {
+    None,
+    All,
+    /// A non-empty list.
+    Only(Vec<FolderSelector>),
+}
+
+/// One folder a [`FolderRule`] names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderSelector {
+    /// A special use, as the store records it — `Inbox`, `Archive`, and so on.
+    SpecialUse(&'static str),
+    /// A folder's local identity.
+    Folder(i64),
+}
+
+/// The special uses a rule may name, as the store records them. The same six D-83's folder
+/// reconciliation writes; a seventh there that is not added here is a folder no rule can name.
+const SPECIAL_USES: [&str; 6] = ["Inbox", "Archive", "Sent", "Trash", "Spam", "Drafts"];
+
+impl FolderRule {
+    /// Read a stored rule. `Ok(None)` is empty text: no rule, so the installation default.
+    ///
+    /// # Errors
+    /// A token that is none of the grammar's, or `none` or `all` beside anything else — a rule
+    /// that says both "nothing" and "the inbox" says neither.
+    pub fn parse(text: &str) -> Result<Option<Self>, String> {
+        let tokens: Vec<&str> = text
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .collect();
+        match tokens.as_slice() {
+            [] => return Ok(None),
+            [only] if only.eq_ignore_ascii_case("none") => return Ok(Some(Self::None)),
+            [only] if only.eq_ignore_ascii_case("all") => return Ok(Some(Self::All)),
+            _ => {}
+        }
+        let mut selected = Vec::with_capacity(tokens.len());
+        for token in tokens {
+            let lower = token.to_ascii_lowercase();
+            let selector = if let Some(id) = lower.strip_prefix("folder:") {
+                FolderSelector::Folder(
+                    id.trim()
+                        .parse()
+                        .map_err(|_| format!("`{token}` does not name a folder by its identity"))?,
+                )
+            } else if let Some(name) = SPECIAL_USES
+                .iter()
+                .find(|name| name.eq_ignore_ascii_case(token))
+            {
+                FolderSelector::SpecialUse(name)
+            } else if lower == "none" || lower == "all" {
+                return Err(format!("`{token}` cannot be combined with anything else"));
+            } else {
+                return Err(format!("`{token}` is not a folder a rule can name"));
+            };
+            if !selected.contains(&selector) {
+                selected.push(selector);
+            }
+        }
+        Ok(Some(Self::Only(selected)))
+    }
+
+    /// The rule a new account inherits, from the installation's `notify.new-mail-in-inbox` —
+    /// D-101's *notify on new mail in the inbox only*, or, turned off, nothing.
+    #[must_use]
+    pub fn installation_default(new_mail_in_inbox: bool) -> Self {
+        if new_mail_in_inbox {
+            Self::Only(vec![FolderSelector::SpecialUse("Inbox")])
+        } else {
+            Self::None
+        }
+    }
+
+    /// The text [`Self::parse`] reads back as this rule.
+    #[must_use]
+    pub fn as_text(&self) -> String {
+        match self {
+            Self::None => "none".to_owned(),
+            Self::All => "all".to_owned(),
+            Self::Only(selected) => selected
+                .iter()
+                .map(|s| match s {
+                    FolderSelector::SpecialUse(name) => name.to_ascii_lowercase(),
+                    FolderSelector::Folder(id) => format!("folder:{id}"),
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        }
+    }
+
+    /// Whether mail arriving in this folder is announced.
+    #[must_use]
+    pub fn admits(&self, folder: i64, special_use: Option<&str>) -> bool {
+        match self {
+            Self::None => false,
+            Self::All => true,
+            Self::Only(selected) => selected.iter().any(|s| match s {
+                FolderSelector::Folder(id) => *id == folder,
+                FolderSelector::SpecialUse(name) => {
+                    special_use.is_some_and(|u| u.eq_ignore_ascii_case(name))
+                }
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +348,87 @@ mod tests {
         assert_eq!(keys.len(), before, "two settings share a key");
         assert!(SETTINGS.iter().any(|s| s.scope == Scope::Installation));
         assert!(SETTINGS.iter().any(|s| s.scope == Scope::Account));
+    }
+
+    /// FR-23: D-101's default is "quiet off; notify on new mail in the inbox only", and an
+    /// account with no rule of its own takes that.
+    #[test]
+    fn the_notification_defaults_are_quiet_off_and_the_inbox_only() {
+        assert_eq!(
+            by_key("notify.quiet-mode").map(|s| s.default.clone()),
+            Some(Value::Flag(false))
+        );
+        assert_eq!(
+            by_key("notify.new-mail-in-inbox").map(|s| s.default.clone()),
+            Some(Value::Flag(true))
+        );
+        assert_eq!(
+            by_key(FOLDER_RULES).map(|s| (s.scope, s.default.clone())),
+            Some((Scope::Account, Value::Text(String::new())))
+        );
+        assert_eq!(
+            FolderRule::parse(""),
+            Ok(None),
+            "empty is no rule, not `none`"
+        );
+
+        let inbox_only = FolderRule::installation_default(true);
+        assert!(inbox_only.admits(7, Some("Inbox")));
+        assert!(!inbox_only.admits(8, Some("Archive")));
+        assert!(!inbox_only.admits(9, None), "a folder with no special use");
+        assert_eq!(FolderRule::installation_default(false), FolderRule::None);
+    }
+
+    #[test]
+    fn a_rule_names_folders_by_special_use_or_by_identity_and_nothing_else() {
+        let rule = FolderRule::parse(" Inbox , folder:12,SPAM,inbox ")
+            .expect("valid")
+            .expect("a rule");
+        assert_eq!(
+            rule,
+            FolderRule::Only(vec![
+                FolderSelector::SpecialUse("Inbox"),
+                FolderSelector::Folder(12),
+                FolderSelector::SpecialUse("Spam"),
+            ])
+        );
+        assert!(rule.admits(1, Some("Inbox")));
+        assert!(rule.admits(12, None));
+        assert!(rule.admits(3, Some("Spam")));
+        assert!(!rule.admits(4, Some("Sent")));
+
+        assert_eq!(FolderRule::parse("none"), Ok(Some(FolderRule::None)));
+        assert_eq!(FolderRule::parse("ALL"), Ok(Some(FolderRule::All)));
+        assert!(FolderRule::All.admits(99, None));
+        assert!(!FolderRule::None.admits(1, Some("Inbox")));
+
+        for refused in [
+            "Posteingang",
+            "folder:x",
+            "none,inbox",
+            "inbox,all",
+            "folder:",
+        ] {
+            assert!(
+                FolderRule::parse(refused).is_err(),
+                "`{refused}` was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rule_round_trips_through_the_text_it_is_stored_as() {
+        for rule in [
+            FolderRule::None,
+            FolderRule::All,
+            FolderRule::installation_default(true),
+            FolderRule::Only(vec![
+                FolderSelector::Folder(3),
+                FolderSelector::SpecialUse("Archive"),
+            ]),
+        ] {
+            assert_eq!(FolderRule::parse(&rule.as_text()), Ok(Some(rule.clone())));
+        }
     }
 
     /// A value read back from storage is text, so every kind has to survive the round trip.
