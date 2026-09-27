@@ -32,7 +32,9 @@ import MachO
 /// limitation rather than implying D-35's guarantee covers it.
 enum Diagnostics {
     /// `sift_observe::log::DIRECTORY`, `CRASH_REPORT` and `BUDGET_BYTES` (L-33). The Rust log
-    /// and this shell name the same files; the spellings change together.
+    /// and this shell name the same files; the spellings change together, and
+    /// `sift-observe`'s `agrees_with_the_macos_shell` tests fail when these lines stop saying
+    /// what the register enforces.
     static let directoryName = "Diagnostics"
     static let reportName = "crash-report.txt"
     static let logNames = ["diagnostic.log", "diagnostic.log.1"]

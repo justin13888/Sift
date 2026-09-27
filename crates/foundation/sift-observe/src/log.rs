@@ -756,3 +756,62 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod agrees_with_the_macos_shell {
+    //! The macOS shell restates L-33, L-34 and the file names in Swift, for the runtime panel
+    //! and the Help menu, because it has them before the core is initialised. Two statements of
+    //! one number drift apart silently, so this reads the shell's source and fails when it no
+    //! longer says what the register enforces. Compiled in with `include_str!`, like the
+    //! register's own check against `docs/limits.md`, so moving the file fails the build.
+
+    use super::*;
+
+    const SHELL: &str =
+        include_str!("../../../../shells/macos/Sources/SiftShell/Diagnostics.swift");
+    const MIB: u64 = 1024 * 1024;
+    const DAY: u64 = 24 * 60 * 60;
+
+    fn says(declaration: &str) {
+        assert!(
+            SHELL.lines().any(|line| line.trim() == declaration),
+            "Diagnostics.swift no longer declares `{declaration}`; \
+             the shell and the register disagree"
+        );
+    }
+
+    #[test]
+    fn the_shell_states_l33_as_the_register_does() {
+        assert_eq!(
+            BUDGET_BYTES % MIB,
+            0,
+            "L-33 is no longer whole MiB; restate it"
+        );
+        says(&format!(
+            "static let logBudgetBytes: Int64 = {} * 1024 * 1024",
+            BUDGET_BYTES / MIB
+        ));
+    }
+
+    #[test]
+    fn the_shell_states_l34_as_the_register_does() {
+        assert_eq!(
+            RETENTION.as_secs() % DAY,
+            0,
+            "L-34 is no longer whole days; restate it"
+        );
+        says(&format!(
+            "static let logRetentionDays = {}",
+            RETENTION.as_secs() / DAY
+        ));
+    }
+
+    #[test]
+    fn the_shell_names_the_same_files() {
+        says(&format!("static let directoryName = \"{DIRECTORY}\""));
+        says(&format!("static let reportName = \"{CRASH_REPORT}\""));
+        says(&format!(
+            "static let logNames = [\"{CURRENT}\", \"{PREVIOUS}\"]"
+        ));
+    }
+}
