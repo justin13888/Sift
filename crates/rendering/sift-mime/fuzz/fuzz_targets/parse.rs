@@ -63,5 +63,9 @@ fuzz_target!(|data: &[u8]| {
 
 /// Levels below the root, counted the way L-3 counts them: the root is level zero.
 fn depth(part: &Part) -> u64 {
-    part.children.iter().map(|c| 1 + depth(c)).max().unwrap_or(0)
+    part.children
+        .iter()
+        .map(|c| 1 + depth(c))
+        .max()
+        .unwrap_or(0)
 }

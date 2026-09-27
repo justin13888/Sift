@@ -2,7 +2,7 @@
 
 use crate::allowlist;
 use html5ever::driver::ParseOpts;
-use html5ever::tendril::TendrilSink;
+use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::{parse_document, serialize};
 use markup5ever_rcdom::{Handle, NodeData, RcDom, SerializableHandle};
 use sift_foundation::limits::{L6_DOM_DEPTH, L7_DOM_NODES, L8_ATTRS_PER_ELEMENT};
@@ -91,7 +91,7 @@ pub fn sanitize(html: &str) -> Result<Sanitized, SanitizeError> {
         elements: 0,
     });
 
-    walk(&dom.document, 0, &state)?;
+    walk(&dom.document, 0, false, &state)?;
     drop_leading_whitespace(&dom.document);
 
     let mut serialized = Vec::new();
@@ -124,7 +124,14 @@ struct State {
     elements: usize,
 }
 
-fn walk(node: &Handle, depth: u64, state: &RefCell<State>) -> Result<(), SanitizeError> {
+/// `in_anchor` is whether a kept `a` encloses `node` — the one piece of ancestry the policy
+/// needs, for [`classify`]'s nested-anchor rule.
+fn walk(
+    node: &Handle,
+    depth: u64,
+    in_anchor: bool,
+    state: &RefCell<State>,
+) -> Result<(), SanitizeError> {
     if depth > L6_DOM_DEPTH {
         return Err(SanitizeError::TooDeep);
     }
@@ -143,7 +150,7 @@ fn walk(node: &Handle, depth: u64, state: &RefCell<State>) -> Result<(), Sanitiz
     let mut keep: Vec<Handle> = Vec::new();
 
     for child in children {
-        let verdict = classify(&child, state)?;
+        let verdict = classify(&child, in_anchor, state)?;
         match verdict {
             Verdict::Drop => {}
             Verdict::Unwrap => {
@@ -151,7 +158,7 @@ fn walk(node: &Handle, depth: u64, state: &RefCell<State>) -> Result<(), Sanitiz
                 // forbidden but the text inside it is the user's mail — I9 permits removal
                 // and forbids invention, and discarding readable text is closer to
                 // invention of an empty message than removal is.
-                walk(&child, depth + 1, state)?;
+                walk(&child, depth + 1, in_anchor, state)?;
 
                 // `mem::take` rather than `clone`, and the reason is not tidiness.
                 //
@@ -175,7 +182,8 @@ fn walk(node: &Handle, depth: u64, state: &RefCell<State>) -> Result<(), Sanitiz
                 }
             }
             Verdict::Keep => {
-                walk(&child, depth + 1, state)?;
+                let anchor = in_anchor || is_element(&child, "a");
+                walk(&child, depth + 1, anchor, state)?;
                 keep.push(child);
             }
         }
@@ -201,6 +209,15 @@ fn walk(node: &Handle, depth: u64, state: &RefCell<State>) -> Result<(), Sanitiz
 /// "Whitespace" is the HTML parser's — tab, LF, FF, CR and space — not Unicode's. A
 /// no-break space or an ideographic space is text to the tree builder: a reparse puts it in
 /// the body and the engine renders it, so a node holding one is content and stays.
+///
+/// The same holds for the whitespace **prefix** of the first text that is content. The tree
+/// builder discards whitespace before the document's first element whatever follows it, so
+/// the leading tab of `"\t<"` is gone on a reparse even though the node is not whitespace
+/// alone. The first pass keeps it only when something invisible preceded it — a NUL, which
+/// the builder ignores in the body but which still moved it past the point where whitespace
+/// is discarded — and the two passes then write different bytes (found by NFR-40's fuzzing).
+/// A leading run of whitespace at the start of the body is collapsed by layout and never
+/// rendered, so trimming it loses nothing I9 protects.
 fn drop_leading_whitespace(document: &Handle) {
     let mut children = document.children.borrow_mut();
     let mut i = 0;
@@ -212,6 +229,16 @@ fn drop_leading_whitespace(document: &Handle) {
             NodeData::Element { name, .. } if name.local.eq_str_ignore_ascii_case("style") => {
                 i += 1;
             }
+            NodeData::Text { contents } => {
+                let mut text = contents.borrow_mut();
+                let content = text.trim_start_matches(is_html_whitespace_char).len();
+                let prefix = text.len() - content;
+                if prefix > 0 {
+                    // Whole characters, all of them one byte, so the cut is on a boundary.
+                    *text = StrTendril::from_slice(&text[prefix..]);
+                }
+                break;
+            }
             _ => break,
         }
     }
@@ -219,8 +246,11 @@ fn drop_leading_whitespace(document: &Handle) {
 
 /// Whether `text` is nothing but the tree builder's whitespace: tab, LF, FF, CR and space.
 fn is_html_whitespace(text: &str) -> bool {
-    text.bytes()
-        .all(|b| matches!(b, b'\t' | b'\n' | b'\x0C' | b'\r' | b' '))
+    text.chars().all(is_html_whitespace_char)
+}
+
+fn is_html_whitespace_char(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\x0C' | '\r' | ' ')
 }
 
 enum Verdict {
@@ -229,7 +259,15 @@ enum Verdict {
     Unwrap,
 }
 
-fn classify(node: &Handle, state: &RefCell<State>) -> Result<Verdict, SanitizeError> {
+fn is_element(node: &Handle, tag: &str) -> bool {
+    matches!(&node.data, NodeData::Element { name, .. } if name.local.eq_str_ignore_ascii_case(tag))
+}
+
+fn classify(
+    node: &Handle,
+    in_anchor: bool,
+    state: &RefCell<State>,
+) -> Result<Verdict, SanitizeError> {
     match &node.data {
         NodeData::Text { .. } => Ok(Verdict::Keep),
         // I4: no document control. A comment additionally carries the legacy conditional
@@ -268,6 +306,21 @@ fn classify(node: &Handle, state: &RefCell<State>) -> Result<Verdict, SanitizeEr
                 });
                 // Unwrap rather than drop: the text inside an unknown element is still the
                 // user's mail.
+                return Ok(Verdict::Unwrap);
+            }
+
+            // I8: an anchor inside an anchor has no markup that reparses into it. The tree
+            // builder can produce one — foster parenting moves an `a` out of a table and into
+            // the `a` enclosing that table — but the serialized `<a><a>` meets the adoption
+            // agency on the way back in, which closes the outer anchor and yields a different
+            // tree (found by NFR-40's fuzzing, from `<a><table><a>`). The inner one is
+            // unwrapped: its text stays, and a click on it follows the enclosing link, which
+            // is what the reader already saw it inside.
+            if tag == "a" && in_anchor {
+                state.borrow_mut().removals.push(Removal {
+                    rule: "I8 no anchor inside an anchor",
+                    what: "<a>".to_owned(),
+                });
                 return Ok(Verdict::Unwrap);
             }
 
@@ -890,6 +943,10 @@ mod invariants {
             "<html>\n<head>\n<style>p{color:red}</style>\n</head>\n<body>\n<p>x</p>\n</body></html>",
             "<html><head></head><body>\n<style>p{color:red}</style>\n<style>b{color:blue}</style>\n<p>x</p></body></html>",
             "\n\n<p>x</p>",
+            // Found by NFR-40's fuzzing, minimized: an ignored NUL carries the tab past the
+            // point where the tree builder discards leading whitespace, and a reparse does not.
+            "\0\t<",
+            "\0 x",
         ] {
             let once = clean(html);
             let twice = clean(&once.html);

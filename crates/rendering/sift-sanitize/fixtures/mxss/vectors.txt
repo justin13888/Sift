@@ -221,3 +221,9 @@
 
 @ mx-065 | clean | input autofocus onfocus, fires without interaction (PortSwigger XSS cheat sheet)
 <input autofocus onfocus=alert(1)>
+
+@ mx-066 | clean | NFR-40 method 4 fuzzing, minimized: foster parenting nests an anchor in an anchor, which the adoption agency undoes on a reparse (I8)
+<a><table><a>
+
+@ mx-067 | clean | variant of mx-066 carrying both links, the shape a sender would use
+<a href="https://a.example.test/"><table><tr><td>x</td></tr><a href="https://b.example.test/">y</a></table></a>
