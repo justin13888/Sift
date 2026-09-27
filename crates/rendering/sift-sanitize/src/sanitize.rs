@@ -1197,6 +1197,65 @@ mod invariants {
         );
     }
 
+    #[test]
+    fn nfr50_direction_and_language_on_the_root_reach_the_content() {
+        let out = clean(r#"<html dir="rtl" lang="he"><body><p>שלום</p></body></html>"#);
+        assert_eq!(
+            out.html,
+            r#"<div dir="rtl" lang="he" data-sift-element="0"><p data-sift-element="1">שלום</p></div>"#
+        );
+    }
+
+    #[test]
+    fn nfr50_the_body_declaration_overrides_the_root_one_attribute_by_attribute() {
+        // `dir` from the body, `lang` from the root; an empty `lang` on the body is a
+        // declaration ("unknown") and still wins.
+        let out = clean(r#"<html dir="rtl" lang="he"><body dir="auto"><p>x</p></body></html>"#);
+        assert!(
+            out.html.starts_with(r#"<div dir="auto" lang="he" "#),
+            "{}",
+            out.html
+        );
+        let out = clean(r#"<html lang="he"><body lang=""><p>x</p></body></html>"#);
+        assert!(out.html.starts_with(r#"<div lang="" "#), "{}", out.html);
+    }
+
+    #[test]
+    fn nfr50_no_other_scaffolding_attribute_is_carried() {
+        let out = clean(
+            r#"<html dir="rtl" xmlns="http://www.w3.org/1999/xhtml" class="x"><body onload="alert(1)" bgcolor="red" style="color:red" background="https://t.example/p.gif"><p>x</p></body></html>"#,
+        );
+        assert_eq!(
+            out.html,
+            r#"<div dir="rtl" data-sift-element="0"><p data-sift-element="1">x</p></div>"#
+        );
+        assert!(out.positions.is_empty(), "{:?}", out.positions);
+    }
+
+    #[test]
+    fn a_root_with_nothing_to_carry_is_unwrapped_as_before() {
+        let out = clean(r#"<html><body class="b"><p>x</p></body></html>"#);
+        assert_eq!(out.html, r#"<p data-sift-element="0">x</p>"#);
+    }
+
+    #[test]
+    fn i6_the_carried_root_declarations_are_idempotent() {
+        for html in [
+            r#"<html dir="rtl" lang="he"><head><style>p{color:red}</style></head><body><p>a</p> <p>b</p></body></html>"#,
+            r#"<html lang="ja"><body dir="auto">text before <b>bold</b></body></html>"#,
+            r#"<body dir="rtl"></body>"#,
+        ] {
+            let once = clean(html);
+            let twice = clean(&once.html);
+            assert_eq!(once.html, twice.html, "not idempotent for {html}");
+            assert!(
+                once.html.starts_with("<style") || once.html.starts_with("<div dir"),
+                "the root declaration was not carried: {}",
+                once.html
+            );
+        }
+    }
+
     // ---- The stripping that another decision depends on ----
 
     #[test]
