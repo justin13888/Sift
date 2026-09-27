@@ -375,27 +375,67 @@ fn nfr50_accessibility_structure_survives_across_the_corpus() {
 #[test]
 fn direction_and_language_survive_on_sender_content() {
     // A right-to-left message rendered left-to-right, or a Japanese one shaped with a
-    // Chinese font, is a message the reader was not sent. Checked on sender content below the
-    // scaffolding: `dir` and `lang` on `html` and `body` are lost when the walk unwraps
-    // them — a known NFR-50 gap, #91, which removes this exclusion when it lands.
+    // Chinese font, is a message the reader was not sent.
+    //
+    // Declarations on the scaffolding included: the sanitizer unwraps `html` and `body`, and
+    // carries the `dir` and `lang` in effect at the body — the body's own where it declares
+    // one, the root's otherwise — onto a `div` that holds the whole body, ahead of every
+    // element the sender wrote. So that is where they are expected, and nowhere else.
     let scaffolding = ["html", "head", "body"];
-    for m in messages() {
-        let pick = |doc: &Document| -> Vec<(String, String, String)> {
+    let declared = |doc: &Document| -> Vec<(String, String, String)> {
+        doc.elements
+            .iter()
+            .filter(|e| !scaffolding.contains(&e.tag.as_str()))
+            .flat_map(|e| {
+                ["dir", "lang"].into_iter().filter_map(|a| {
+                    e.attribute(a)
+                        .map(|v| (e.tag.clone(), a.to_owned(), v.to_owned()))
+                })
+            })
+            .collect()
+    };
+    let at_root = |doc: &Document, attribute: &str| -> Option<String> {
+        ["body", "html"].into_iter().find_map(|tag| {
             doc.elements
                 .iter()
-                .filter(|e| !scaffolding.contains(&e.tag.as_str()))
-                .flat_map(|e| {
-                    ["dir", "lang"].into_iter().filter_map(|a| {
-                        e.attribute(a)
-                            .map(|v| (e.tag.clone(), a.to_owned(), v.to_owned()))
-                    })
-                })
-                .collect()
-        };
-        let before = pick(&document::read(&m.source));
-        let after = pick(&document::read(&clean(&m.file, &m.source).html));
-        assert_eq!(before, after, "{}: dir or lang was lost", m.file);
+                .find(|e| e.tag == tag)
+                .and_then(|e| e.attribute(attribute))
+                .map(str::to_owned)
+        })
+    };
+    let mut carried = 0;
+    for m in messages() {
+        let source = document::read(&m.source);
+        let mut before: Vec<(String, String, String)> = ["dir", "lang"]
+            .into_iter()
+            .filter_map(|a| at_root(&source, a).map(|v| ("div".to_owned(), a.to_owned(), v)))
+            .collect();
+        carried += before.len();
+        before.extend(declared(&source));
+
+        let output = document::read(&clean(&m.file, &m.source).html);
+        for a in ["dir", "lang"] {
+            assert_eq!(
+                at_root(&output, a),
+                None,
+                "{}: the scaffolding kept {a}, which the sanitizer unwraps",
+                m.file
+            );
+        }
+        assert_eq!(
+            before,
+            declared(&output),
+            "{}: dir or lang was lost",
+            m.file
+        );
     }
+    // The corpus holds root-level declarations — `rtl-hebrew-arabic.html` and
+    // `mailing-list-reply.html` among them — so this test is not vacuous over the case it
+    // exists for.
+    assert!(
+        carried > 0,
+        "no message in the corpus declares dir or lang on its root"
+    );
 }
 
 #[test]
