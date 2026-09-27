@@ -76,9 +76,13 @@ because neither may be the silent consequence of the other.
 
 ## The OAuth client, and the two things that must agree about it
 
-The client is per-installation configuration and is not committed. `mise run macos` reads it
-from `oauth-client.txt` or `$SIFT_OAUTH_CLIENT_ID`, derives the callback scheme from it, and
-writes both into `OAuthClient.xcconfig`, which the generated project reads. **In a file rather
+There is one client per provider kind, each per-installation configuration and none committed.
+`mise run macos` reads them from `oauth-client.<kind>.txt` or `$SIFT_OAUTH_CLIENT_ID_<KIND>`
+(`oauth-client.txt` and `$SIFT_OAUTH_CLIENT_ID` still configure the Google one), derives the
+callback scheme the Google client requires, and writes all of it into `OAuthClient.xcconfig`,
+which the generated project reads. The bundle carries the clients as a `SiftOAuthClients`
+dictionary keyed by the core's opaque kind strings; the shell copies it across the boundary
+without reading it, and asks the core which providers it can offer. **In a file rather
 than in the environment, and that is not stylistic.** The spec used to set these to
 `${VAR:-default}`; XcodeGen implements no such operator and passed the token through verbatim,
 so the values reached a bundle only because `xcodebuild` inherits the environment this task had

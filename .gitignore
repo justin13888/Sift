@@ -41,6 +41,7 @@ mise.local.toml
 # and a committed one would make every checkout share one client, one quota and one consent
 # screen. See `mise-tasks/macos`.
 shells/macos/oauth-client.txt
+shells/macos/oauth-client.*.txt
 
 # A relevance corpus is someone's real queries against their real mailbox, keyed on its
 # message identifiers (docs/product/relevance-corpus.md). It is recorded outside the tree; this

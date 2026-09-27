@@ -42,14 +42,46 @@ final class AddAccountWindow: NSWindowController {
     /// mailboxes apart in the sidebar they both appear in.
     private let nameField = NSTextField(string: "")
 
-    /// The OAuth client this build was configured with, from the bundle.
+    /// One provider this build can add, as the core listed it.
     ///
-    /// Absent is a legitimate state and is stated rather than hidden: a build with no client
+    /// **The kind is opaque and the label is looked up, never reasoned about.** The core owns
+    /// which providers exist and which have a client; this screen renders `displayKey` through
+    /// a string table and hands `kind` back to begin the flow. No branch here depends on which
+    /// provider a choice is.
+    private struct Choice {
+        let kind: String
+        let displayKey: String
+    }
+
+    /// Every provider the core offers — only those with a client configured.
+    ///
+    /// Empty is a legitimate state and is stated rather than hidden: a build with no client
     /// runs against the recorded corpus, which is how Sift is meant to be looked at before a
     /// real mailbox is connected.
-    private static var clientID: String? {
-        let value = ApplicationShell.configuredClientID
-        return value.isEmpty ? nil : value
+    private let choices: [Choice]
+
+    /// Sift's prose for a provider's display key — D-56 and D-68 keep it out of the core.
+    ///
+    /// A key this table does not know is shown as itself rather than hidden: a provider a newer
+    /// core offers is still one a person can choose.
+    private static func label(for displayKey: String) -> String {
+        switch displayKey {
+        case "provider.gmail": return "Google"
+        case "provider.graph": return "Microsoft"
+        default: return displayKey
+        }
+    }
+
+    private static func offered(app: OpaquePointer) -> [Choice] {
+        var rows = SiftRows_SiftProvider()
+        guard sift_providers(UnsafeMutablePointer(app), &rows) == Ok, let ptr = rows.ptr else {
+            return []
+        }
+        return (0..<rows.len).map { i in
+            Choice(
+                kind: SiftText.string(ptr[i].kind),
+                displayKey: SiftText.string(ptr[i].display_key))
+        }
     }
 
     /// Held for the life of the flow, because the session is cancelled when it is released.
@@ -63,6 +95,7 @@ final class AddAccountWindow: NSWindowController {
         self.app = app
         self.onAdded = onAdded
         self.onDismissed = onDismissed
+        self.choices = AddAccountWindow.offered(app: app)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 620, height: 560),
             styleMask: [.titled, .closable, .miniaturizable],
@@ -171,10 +204,18 @@ final class AddAccountWindow: NSWindowController {
         status.lineBreakMode = .byWordWrapping
         status.preferredMaxLayoutWidth = 560
 
-        let connect = NSButton(
-            title: "Connect a Google Account…", target: self, action: #selector(connect))
-        connect.bezelStyle = .rounded
-        connect.keyEquivalent = "\r"
+        // FR-1's provider choice: one button per provider the core offers, in its order. The
+        // tag is the choice's index, so the action needs no knowledge of which one it is.
+        let connects: [NSButton] = choices.enumerated().map { index, choice in
+            let button = NSButton(
+                title: "Connect a \(AddAccountWindow.label(for: choice.displayKey)) Account…",
+                target: self, action: #selector(connect(_:)))
+            button.bezelStyle = .rounded
+            button.tag = index
+            return button
+        }
+        // Return starts the first, as it did when there was one; a second is a click away.
+        connects.first?.keyEquivalent = "\r"
 
         let fixtures = NSButton(
             title: "Look Around First", target: self, action: #selector(useFixtures))
@@ -185,8 +226,7 @@ final class AddAccountWindow: NSWindowController {
         dismissButton.action = #selector(dismissWithoutAdding)
         dismissButton.isHidden = true
 
-        if AddAccountWindow.clientID == nil {
-            connect.isEnabled = false
+        if choices.isEmpty {
             status.stringValue = """
                 This build has no OAuth client configured, so it cannot connect to a real \
                 account. "Look Around First" opens Sift with a recorded mailbox — no network, \
@@ -197,11 +237,17 @@ final class AddAccountWindow: NSWindowController {
                 "Sift will open your browser to sign in. The reply comes back to Sift directly."
         }
 
-        let buttons = NSStackView(views: [dismissButton, fixtures, connect])
+        // The providers on a row of their own, so a third does not push the window wider.
+        let providers = NSStackView(views: connects)
+        providers.orientation = .horizontal
+        providers.spacing = 12
+
+        let buttons = NSStackView(views: [dismissButton, fixtures])
         buttons.orientation = .horizontal
         buttons.spacing = 12
 
-        let stack = NSStackView(views: [heading, body, disclosure, naming, status, buttons])
+        let stack = NSStackView(
+            views: [heading, body, disclosure, naming, status, providers, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 18
@@ -219,22 +265,31 @@ final class AddAccountWindow: NSWindowController {
         return container
     }
 
-    @objc private func connect() {
-        guard AddAccountWindow.clientID != nil else { return }
+    @objc private func connect(_ sender: NSButton) {
+        guard choices.indices.contains(sender.tag) else { return }
+        // A second click while a browser is open would begin a second flow, and the first
+        // one's verifier would be discarded under it.
+        guard session == nil else { return }
+        let choice = choices[sender.tag]
 
-        // The scheme the callback will arrive on, derived by the layer from the configured
-        // client. Not derived here: D-17 exists to stop the two shells growing two answers to
-        // which scheme a provider accepts, and this one is not the obvious answer — the client
-        // identifier reversed, for the only client type compatible with NFR-24.
+        // The scheme the callback will arrive on, derived by the layer from the client
+        // configured for this kind. Not derived here: D-17 exists to stop the two shells
+        // growing two answers to which scheme a provider accepts, and it is not the same
+        // answer for every provider.
         var schemeOut = SiftStr()
-        guard sift_callback_scheme(UnsafeMutablePointer(app), &schemeOut) == Ok else {
+        let asked = SiftText.withBytes(choice.kind) { ptr, len in
+            sift_callback_scheme(UnsafeMutablePointer(app), ptr, len, &schemeOut) == Ok
+        }
+        guard asked else {
             status.stringValue = "Sift could not work out where this sign-in would come back to."
             return
         }
         let scheme = SiftText.string(schemeOut)
 
         var url = SiftStr()
-        let began = sift_begin_authorization(UnsafeMutablePointer(app), &url) == Ok
+        let began = SiftText.withBytes(choice.kind) { ptr, len in
+            sift_begin_authorization(UnsafeMutablePointer(app), ptr, len, &url) == Ok
+        }
         guard began, let address = URL(string: SiftText.string(url)) else {
             // D-36 and D-71: the layer refuses to begin where the bundle does not claim the
             // scheme this client requires, and it refuses *here*, before the user goes

@@ -135,18 +135,45 @@ impl Descriptor {
 
 /// Everything a user can add.
 ///
-/// The four adapters D-12 names; three are not yet buildable and are absent rather than
-/// listed-and-broken, which is the same rule the capability model applies to affordances.
-pub static KINDS: &[Descriptor] = &[Descriptor {
-    kind: ProviderKind("gmail"),
-    display_key: "provider.gmail",
-    authentication: Authentication::OAuth,
-    needs_manual_configuration: false,
-    profile: Some(sift_gmail::oauth::profile),
-    api_host: sift_gmail::oauth::API_HOST,
-    live: connect_gmail,
-    replay: replay_gmail,
-}];
+/// Two of the four adapters D-12 names; the other two are not yet buildable and are absent
+/// rather than listed-and-broken, which is the same rule the capability model applies to
+/// affordances.
+///
+/// **Order is not meaning.** Nothing may treat a position here as a provider. The one place
+/// order is read is an account the container recorded before a second kind existed, which can
+/// only have been the first — and that is resolved by [`by_persisted`], here, rather than by a
+/// caller indexing the slice.
+pub static KINDS: &[Descriptor] = &[
+    Descriptor {
+        kind: ProviderKind("gmail"),
+        display_key: "provider.gmail",
+        authentication: Authentication::OAuth,
+        needs_manual_configuration: false,
+        profile: Some(sift_gmail::oauth::profile),
+        api_host: sift_gmail::oauth::API_HOST,
+        live: connect_gmail,
+        replay: replay_gmail,
+    },
+    Descriptor {
+        kind: ProviderKind("graph"),
+        display_key: "provider.graph",
+        authentication: Authentication::OAuth,
+        needs_manual_configuration: false,
+        profile: Some(sift_graph::oauth::profile),
+        api_host: sift_graph::oauth::API_HOST,
+        live: connect_graph,
+        replay: replay_graph,
+    },
+];
+
+/// The kind the container recorded for every real account before the kind itself was
+/// recorded.
+///
+/// Until a second provider existed an account was persisted as *a provider*, not as which one,
+/// and the only one there was is the first descriptor. A container written then is still
+/// opened now, so the value is resolved rather than refused — refusing would turn every
+/// existing account into one that cannot be reached, for a fact nobody lost.
+pub const LEGACY_PROVIDER_KIND: &str = "provider";
 
 fn connect_gmail(host: &str, access_token: &str) -> Connected {
     let api = sift_http::Https::to(host)?;
@@ -157,6 +184,15 @@ fn replay_gmail() -> Box<dyn ErasedAdapter> {
     Box::new(sift_gmail::Gmail::new(corpus::gmail(), "a-fixture-token"))
 }
 
+fn connect_graph(host: &str, access_token: &str) -> Connected {
+    let api = sift_http::Https::to(host)?;
+    Ok(Box::new(sift_graph::Graph::new(api, access_token)))
+}
+
+fn replay_graph() -> Box<dyn ErasedAdapter> {
+    Box::new(sift_graph::Graph::new(corpus::graph(), "a-fixture-token"))
+}
+
 /// Resolve a persisted kind.
 ///
 /// Returns `None` for a kind this build does not have, which is what an account added by a
@@ -165,6 +201,17 @@ fn replay_gmail() -> Box<dyn ErasedAdapter> {
 #[must_use]
 pub fn by_id(id: &str) -> Option<&'static Descriptor> {
     KINDS.iter().find(|d| d.kind.0 == id)
+}
+
+/// Resolve the kind an account row records, including the one written before kinds were.
+///
+/// See [`LEGACY_PROVIDER_KIND`]. Every other value resolves exactly as [`by_id`] does.
+#[must_use]
+pub fn by_persisted(id: &str) -> Option<&'static Descriptor> {
+    if id == LEGACY_PROVIDER_KIND {
+        return KINDS.first();
+    }
+    by_id(id)
 }
 
 #[cfg(test)]
@@ -219,5 +266,70 @@ mod tests {
         let d = by_id("gmail").expect("gmail is registered");
         let replayed = d.replayed();
         assert_eq!(replayed.capabilities(), &sift_gmail::capabilities());
+        let d = by_id("graph").expect("graph is registered");
+        assert_eq!(d.replayed().capabilities(), &sift_graph::capabilities());
+    }
+
+    #[test]
+    fn two_kinds_authorize_against_their_own_endpoints() {
+        // The token endpoint is what a refresh is sent to. Two kinds sharing one would send
+        // one provider's refresh token to the other.
+        let gmail = by_id("gmail")
+            .and_then(Descriptor::profile)
+            .expect("profile");
+        let graph = by_id("graph")
+            .and_then(Descriptor::profile)
+            .expect("profile");
+        assert_ne!(gmail.token, graph.token);
+        assert_ne!(gmail.authorize, graph.authorize);
+    }
+
+    #[test]
+    fn every_kind_is_distinct_and_so_is_every_display_key() {
+        for (i, a) in KINDS.iter().enumerate() {
+            for b in &KINDS[i + 1..] {
+                assert_ne!(a.kind, b.kind);
+                assert_ne!(a.display_key, b.display_key);
+            }
+        }
+    }
+
+    #[test]
+    fn an_account_recorded_before_kinds_were_resolves_to_the_first() {
+        assert_eq!(
+            by_persisted(LEGACY_PROVIDER_KIND).map(|d| d.kind),
+            KINDS.first().map(|d| d.kind)
+        );
+        assert!(
+            by_id(LEGACY_PROVIDER_KIND).is_none(),
+            "not a kind of its own"
+        );
+        assert_eq!(
+            by_persisted("graph").map(|d| d.kind.as_str()),
+            Some("graph")
+        );
+        assert!(by_persisted("a-provider-from-the-future").is_none());
+    }
+
+    #[test]
+    fn a_replayed_graph_account_walks_its_folders_and_its_inbox() {
+        // The recorded corpus is what a shell with no network is handed, so it has to answer
+        // the whole of what adding an account asks, in the order it asks it.
+        use sift_provider::adapter::{RemoteFolderId, SpecialUse};
+        let adapter = by_id("graph").expect("graph").replayed();
+        let folders = adapter.enumerate_folders().expect("folders");
+        let inbox = folders
+            .iter()
+            .find(|f| f.special_use == Some(SpecialUse::Inbox))
+            .expect("an inbox");
+        assert_eq!(inbox.id, RemoteFolderId("AAMk-inbox".into()));
+        let first = adapter.delta(&inbox.id, None).expect("page one");
+        assert!(first.more);
+        let second = adapter
+            .delta(&inbox.id, Some(&first.next))
+            .expect("page two");
+        assert!(!second.more);
+        let quiet = adapter.delta(&inbox.id, Some(&second.next)).expect("live");
+        assert!(quiet.changes.is_empty());
     }
 }
