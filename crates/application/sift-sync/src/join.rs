@@ -195,9 +195,203 @@ pub fn resolve(incoming: (&[u8; 32], u32), candidates: &[(&[u8], u32)]) -> Resol
     }
 }
 
+/// One side of a move, as the store holds it: what D-44 scopes, narrows and corroborates on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Side<'a> {
+    /// The provider's conversation identifier — D-44's scope. `None` is no scope at all.
+    pub conversation: Option<&'a str>,
+    /// `Message-ID`. Narrows, never keys.
+    pub internet_message_id: Option<&'a str>,
+    /// The stored digest.
+    pub digest: &'a [u8],
+    /// The rule version stored beside it — D-104.
+    pub rule_version: u32,
+}
+
+/// Rejoin the messages that arrived in a window to the messages that departed from it —
+/// D-44's move join, for an account whose identifiers do not survive a move.
+///
+/// One [`Resolution`] per arrival, in order. `One(d)` names the index in `departed` whose
+/// identity the arrival takes.
+///
+/// 1. **Scope.** Only a departure in the arrival's own conversation is a candidate. An
+///    arrival with no conversation has no scope, and a join with no scope is a scan.
+/// 2. **Narrow.** Where both carry a `Message-ID`, a different one is a different message.
+///    Where either lacks one, nothing is narrowed: absence is neither a match nor a mismatch.
+/// 3. **Corroborate, then resolve** — [`resolve`], so ambiguity is distinct messages.
+/// 4. **A departure claimed twice is claimed by nobody.** Two arrivals each resolving to the
+///    same departure is the same ambiguity seen from the other side, and choosing between them
+///    would be the guess D-44 forbids.
+#[must_use]
+pub fn rejoin(arrivals: &[Side<'_>], departed: &[Side<'_>]) -> Vec<Resolution> {
+    let mut resolved: Vec<(Resolution, usize)> = arrivals
+        .iter()
+        .map(|arrival| {
+            let Some(scope) = arrival.conversation else {
+                return (Resolution::Distinct { near_misses: 0 }, 0);
+            };
+            let in_scope: Vec<usize> = departed
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.conversation == Some(scope))
+                .filter(
+                    |(_, d)| match (arrival.internet_message_id, d.internet_message_id) {
+                        (Some(arriving), Some(left)) => arriving == left,
+                        _ => true,
+                    },
+                )
+                .map(|(index, _)| index)
+                .collect();
+            // A digest of the wrong width is not a digest this rule wrote, and corroborates
+            // nothing.
+            let Ok(digest) = <&[u8; 32]>::try_from(arrival.digest) else {
+                return (
+                    Resolution::Distinct {
+                        near_misses: in_scope.len(),
+                    },
+                    in_scope.len(),
+                );
+            };
+            let candidates: Vec<(&[u8], u32)> = in_scope
+                .iter()
+                .map(|&i| (departed[i].digest, departed[i].rule_version))
+                .collect();
+            let resolution = match resolve((digest, arrival.rule_version), &candidates) {
+                Resolution::One(k) => Resolution::One(in_scope[k]),
+                distinct @ Resolution::Distinct { .. } => distinct,
+            };
+            (resolution, in_scope.len())
+        })
+        .collect();
+
+    let mut claims = vec![0usize; departed.len()];
+    for (resolution, _) in &resolved {
+        if let Resolution::One(d) = resolution {
+            claims[*d] += 1;
+        }
+    }
+    for (resolution, in_scope) in &mut resolved {
+        if let Resolution::One(d) = resolution
+            && claims[*d] > 1
+        {
+            *resolution = Resolution::Distinct {
+                near_misses: *in_scope,
+            };
+        }
+    }
+    resolved.into_iter().map(|(r, _)| r).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn side<'a>(
+        conversation: Option<&'a str>,
+        message_id: Option<&'a str>,
+        digest: &'a [u8],
+    ) -> Side<'a> {
+        Side {
+            conversation,
+            internet_message_id: message_id,
+            digest,
+            rule_version: DIGEST_RULE_VERSION,
+        }
+    }
+
+    #[test]
+    fn an_unambiguous_move_rejoins_the_departure_it_corroborates() {
+        let d = digest(&envelope());
+        let other = [9u8; 32];
+        let departed = [
+            side(Some("c1"), Some("<a@x>"), &d),
+            // Same conversation, different message: narrowed out.
+            side(Some("c1"), Some("<b@x>"), &d),
+            // Same message identifier, different conversation: out of scope, never scanned.
+            side(Some("c2"), Some("<a@x>"), &d),
+            // In scope, and the digest refuses it.
+            side(Some("c1"), None, &other),
+        ];
+        assert_eq!(
+            rejoin(&[side(Some("c1"), Some("<a@x>"), &d)], &departed),
+            vec![Resolution::One(0)]
+        );
+    }
+
+    #[test]
+    fn a_duplicated_message_in_one_conversation_resolves_to_distinct_messages() {
+        // Two departures both match and both corroborate: choosing one is a guess.
+        let d = digest(&envelope());
+        let departed = [
+            side(Some("c1"), Some("<a@x>"), &d),
+            side(Some("c1"), Some("<a@x>"), &d),
+        ];
+        let arrival = side(Some("c1"), Some("<a@x>"), &d);
+        assert_eq!(
+            rejoin(&[arrival, arrival], &departed),
+            vec![
+                Resolution::Distinct { near_misses: 2 },
+                Resolution::Distinct { near_misses: 2 }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_departure_two_arrivals_claim_is_claimed_by_neither() {
+        // The same ambiguity from the other side: one message left, two identical ones came.
+        let d = digest(&envelope());
+        let departed = [side(Some("c1"), Some("<a@x>"), &d)];
+        let arrival = side(Some("c1"), Some("<a@x>"), &d);
+        assert_eq!(
+            rejoin(&[arrival, arrival], &departed),
+            vec![
+                Resolution::Distinct { near_misses: 1 },
+                Resolution::Distinct { near_misses: 1 }
+            ]
+        );
+    }
+
+    #[test]
+    fn an_arrival_with_no_conversation_is_never_rejoined() {
+        let d = digest(&envelope());
+        let departed = [side(Some("c1"), Some("<a@x>"), &d)];
+        assert_eq!(
+            rejoin(&[side(None, Some("<a@x>"), &d)], &departed),
+            vec![Resolution::Distinct { near_misses: 0 }]
+        );
+    }
+
+    #[test]
+    fn a_departure_under_another_rule_version_is_a_near_miss_not_a_join() {
+        // D-104: not comparable is not evidence.
+        let d = digest(&envelope());
+        let mut old = side(Some("c1"), Some("<a@x>"), &d);
+        old.rule_version = DIGEST_RULE_VERSION - 1;
+        assert_eq!(
+            rejoin(&[side(Some("c1"), Some("<a@x>"), &d)], &[old]),
+            vec![Resolution::Distinct { near_misses: 1 }]
+        );
+    }
+
+    #[test]
+    fn a_missing_message_identifier_narrows_nothing() {
+        let d = digest(&envelope());
+        let departed = [side(Some("c1"), None, &d)];
+        assert_eq!(
+            rejoin(&[side(Some("c1"), Some("<a@x>"), &d)], &departed),
+            vec![Resolution::One(0)]
+        );
+    }
+
+    #[test]
+    fn a_digest_of_the_wrong_width_corroborates_nothing() {
+        let d = digest(&envelope());
+        let departed = [side(Some("c1"), None, &d)];
+        assert_eq!(
+            rejoin(&[side(Some("c1"), None, &d[..16])], &departed),
+            vec![Resolution::Distinct { near_misses: 1 }]
+        );
+    }
 
     fn envelope() -> Envelope {
         Envelope {
