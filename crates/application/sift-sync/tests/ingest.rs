@@ -997,3 +997,93 @@ fn a_subject_is_normalized_once_before_it_is_stored() {
         "a right-to-left override reached the store raw"
     );
 }
+
+// ---------------------------------------------------------------------------
+// What a server-side search found — FR-21.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_found_message_is_discovered_moves_no_cursor_and_keeps_an_identity_already_held() {
+    let s = Scratch::new("found");
+    let mut account = s.open();
+    ingest::reconcile_folders(&account.store, &[inbox(), archive()]).unwrap();
+    let folder = ingest::folder_local_id(&account.store, &RemoteFolderId("INBOX".into())).unwrap();
+    let ids = ids();
+    ingest::apply_page(
+        &mut account.store,
+        folder,
+        &page(vec![present("m1", Provenance::Delivered)], "c1", false).unwrap(),
+        &[envelope("m1", "held", 100)],
+        &ids,
+    )
+    .unwrap();
+    let held: Vec<u8> = account
+        .store
+        .query_row("SELECT id FROM message WHERE remote_id = 'm1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+
+    // One held, one in two folders, one in a folder nobody enumerated.
+    let mut two = envelope("m2", "in two places", 200);
+    two.folders = vec![
+        RemoteFolderId("INBOX".into()),
+        RemoteFolderId("ARCH".into()),
+    ];
+    let mut nowhere = envelope("m3", "nowhere known", 300);
+    nowhere.folders = vec![RemoteFolderId("UNSEEN-FOLDER".into())];
+    let found = ingest::ingest_found(
+        &mut account.store,
+        &[envelope("m1", "held", 100), two, nowhere],
+        &ids,
+    )
+    .unwrap();
+
+    assert_eq!(found.len(), 3);
+    assert_eq!(
+        found[0].1.to_bytes().to_vec(),
+        held,
+        "a message already held was given a second identity"
+    );
+    let count = |sql: &str| -> i64 { account.store.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count("SELECT count(*) FROM message"), 3);
+    assert_eq!(
+        count(
+            "SELECT count(*) FROM message_location l JOIN message m ON m.id = l.message_id
+             WHERE m.remote_id = 'm2'"
+        ),
+        2
+    );
+    assert_eq!(
+        count(
+            "SELECT count(*) FROM message_location l JOIN message m ON m.id = l.message_id
+             WHERE m.remote_id = 'm3'"
+        ),
+        0,
+        "a folder nobody enumerated was invented"
+    );
+    // FR-23: a search is never an arrival, and a held message keeps what it arrived with.
+    assert_eq!(
+        count("SELECT count(*) FROM message WHERE provenance = 'Discovered'"),
+        2
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM message WHERE remote_id = 'm1' AND provenance = 'Delivered'"),
+        1
+    );
+    // D-82: no folder's position moved, because a search is not a delta.
+    let cursor: Vec<u8> = account
+        .store
+        .query_row(
+            "SELECT cursor FROM folder_sync_state WHERE folder_id = ?1",
+            [folder],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(cursor, b"c1");
+    assert_eq!(
+        count("SELECT count(*) FROM folder_sync_state"),
+        1,
+        "a search wrote a folder's sync state"
+    );
+}
