@@ -63,9 +63,9 @@ settings:
     # These are what a development build carries. A release candidate's come from
     # `mise run release-rc`, which overrides all three on the command line — the version it is
     # given, a build number derived from the revision, and the revision itself — and reads each
-    # back from the bundle. `SiftSourceRevision` is empty here, and an Info.plist key whose
-    # expansion is empty is removed, so a development bundle claims no revision rather than a
-    # wrong one; the About panel names it only where it is present.
+    # back from the bundle. `SiftSourceRevision` is empty here, so a development bundle carries
+    # an empty revision rather than a wrong one, and the About panel names a revision only where
+    # one is non-empty.
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
     SIFT_SOURCE_REVISION: ""
