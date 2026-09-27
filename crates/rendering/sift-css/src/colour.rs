@@ -136,12 +136,11 @@ impl Rgb {
     }
 }
 
-/// The contrast ratio between two colours.
+/// The contrast ratio between two colours — NFR-47's metric.
 ///
-/// **The threshold this is compared against is not recorded anywhere**, which is why NFR-47
-/// is registered as an outstanding gate value: the number has to be calibrated against
-/// fidelity-corpus pairs already agreed to render acceptably, and that corpus does not
-/// exist yet. [`ACCEPTABLE_CONTRAST`] is a stated starting value and says so.
+/// The WCAG 2 ratio. Its thresholds, [`ACCEPTABLE_CONTRAST`] and
+/// [`INCREASED_CONTRAST_THRESHOLD`], and how they were derived are recorded under NFR-47 in
+/// [dark mode](../../../../docs/rendering/dark-mode.md).
 #[must_use]
 pub fn contrast_ratio(a: Rgb, b: Rgb) -> f64 {
     let (x, y) = (a.relative_luminance(), b.relative_luminance());
@@ -149,23 +148,26 @@ pub fn contrast_ratio(a: Rgb, b: Rgb) -> f64 {
     (lighter + 0.05) / (darker + 0.05)
 }
 
-/// Provisional. See NFR-47's outstanding-value issue: this is a starting point, not a
-/// derived threshold, and moving it is an amendment rather than a tuning.
+/// NFR-47's threshold: the ratio step 5 repairs every text-on-background pair toward.
+///
+/// **Derived, not chosen:** the metric is the WCAG 2 ratio, and this is the minimum level that
+/// ratio's own definition sets for body text. The fidelity corpus is what the gate measures
+/// against it, not where it came from — see NFR-47 in
+/// [dark mode](../../../../docs/rendering/dark-mode.md). Moving it is an amendment there,
+/// never a tuning here.
 pub const ACCEPTABLE_CONTRAST: f64 = 4.5;
 
 /// The raised contrast threshold, for a reader whose system asks for increased contrast.
 ///
 /// [The UI shell](../../../../docs/architecture/ui-shell.md) requires the dark transform's
-/// repair target to move under that preference —
-/// a user who asked the system for more contrast has not asked for it everywhere except
-/// inside the message — and does not say to what. This is the third value of the same
-/// unrecorded set as [`ACCEPTABLE_CONTRAST`] and [`NEAR_NEUTRAL_CHROMA`], registered in
-/// issue #26 and blocked on the fidelity corpus (Q-10).
+/// repair target to move under that preference — a user who asked the system for more
+/// contrast has not asked for it everywhere except inside the message.
 ///
-/// **Provisional.** A stated starting value rather than a derived one: the enhanced-contrast
-/// ratio accessibility guidance already names for body text. It MUST stay above
+/// **Derived the same way as [`ACCEPTABLE_CONTRAST`]:** the enhanced level the WCAG 2 ratio's
+/// definition sets for body text, recorded under NFR-47 in
+/// [dark mode](../../../../docs/rendering/dark-mode.md). It MUST stay above
 /// [`ACCEPTABLE_CONTRAST`], or the preference would lower the bar it exists to raise; the
-/// build holds that. Moving it is an amendment rather than a tuning.
+/// build holds that.
 pub const INCREASED_CONTRAST_THRESHOLD: f64 = 7.0;
 
 // An amendment that moved either value past the other fails to compile rather than shipping
@@ -174,8 +176,8 @@ const _: () = assert!(INCREASED_CONTRAST_THRESHOLD > ACCEPTABLE_CONTRAST);
 
 /// The threshold step 5 of the dark transform repairs toward.
 ///
-/// One place decides which of the two provisional values applies, so the transform and
-/// anything that later reports against NFR-47 cannot disagree about it.
+/// One place decides which of the two values applies, so the transform and NFR-47's gate
+/// cannot disagree about it.
 #[must_use]
 pub const fn contrast_threshold(increased_contrast: bool) -> f64 {
     if increased_contrast {
@@ -191,8 +193,14 @@ pub const fn contrast_threshold(increased_contrast: bool) -> f64 {
 /// when all of its stops are below it, so a mixed-stop gradient is excluded by construction
 /// rather than by a special case. The same threshold governs borders, shadows and outlines.
 ///
-/// Also provisional, and from the same unrecorded set.
-pub const NEAR_NEUTRAL_CHROMA: f64 = 0.04;
+/// **Derived:** one just-noticeable difference in Oklab — the space step 4 works in — as CSS
+/// Color 4's gamut mapping takes it. A colour within one such difference of the grey at its
+/// own lightness cannot be told from that grey, so calling it neutral changes nothing a reader
+/// could recognise as a brand colour. The fidelity corpus falsifies it rather than choosing
+/// it: the value must fall above every neutral decoration colour the corpus draws and below
+/// every brand colour, which the tests below hold. Recorded, with the corpus figures, in
+/// [dark mode](../../../../docs/rendering/dark-mode.md).
+pub const NEAR_NEUTRAL_CHROMA: f64 = 0.02;
 
 /// Parse a CSS colour.
 ///
@@ -340,10 +348,170 @@ mod tests {
         assert!(rgb(250, 250, 250).to_oklab().chroma() < NEAR_NEUTRAL_CHROMA);
     }
 
+    /// Every document the fidelity corpus's manifest admits, by file name.
+    fn corpus_documents() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../sift-sanitize/fixtures/messages");
+        let manifest = std::fs::read_to_string(dir.join("manifest.txt"))
+            .unwrap_or_else(|e| panic!("cannot read the corpus manifest: {e}"));
+        manifest
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|line| {
+                let file = line.split('|').next().unwrap_or_default().trim().to_owned();
+                let body = std::fs::read_to_string(dir.join(&file))
+                    .unwrap_or_else(|e| panic!("manifest names {file}, which cannot be read: {e}"));
+                (file, body)
+            })
+            .collect()
+    }
+
+    /// The parts of a document a CSS colour can be written in — `<style>` blocks and the
+    /// values of `style`, `bgcolor` and `color` attributes — as declaration text. An
+    /// attribute that holds a bare colour becomes a declaration of its own.
+    fn style_text(doc: &str) -> String {
+        // ASCII lowercasing keeps every byte offset, so offsets found in `lower` index `doc`.
+        let lower = doc.to_ascii_lowercase();
+        let mut out = String::new();
+        let mut from = 0;
+        while let Some(open) = lower[from..].find("<style") {
+            let tag = from + open;
+            let Some(gt) = lower[tag..].find('>') else {
+                break;
+            };
+            let body = tag + gt + 1;
+            let end = lower[body..]
+                .find("</style")
+                .map_or(lower.len(), |e| body + e);
+            out.push_str(&doc[body..end]);
+            out.push(';');
+            from = end;
+        }
+        for (name, bare) in [("style", false), ("bgcolor", true), ("color", true)] {
+            for quote in ['"', '\''] {
+                let needle = format!("{name}={quote}");
+                let mut from = 0;
+                while let Some(found) = lower[from..].find(&needle) {
+                    let at = from + found;
+                    let start = at + needle.len();
+                    let Some(len) = lower[start..].find(quote) else {
+                        break;
+                    };
+                    // `color=` inside `bgcolor=` or `data-color=` is not this attribute.
+                    if at == 0 || lower.as_bytes()[at - 1].is_ascii_whitespace() {
+                        if bare {
+                            out.push_str("colour:");
+                        }
+                        out.push_str(&doc[start..start + len]);
+                        out.push(';');
+                    }
+                    from = start + len + 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Every value token in declaration text that [`parse`] reads as a colour, as written.
+    fn colours_in(style: &str) -> Vec<(String, Rgb)> {
+        let mut found = Vec::new();
+        for declaration in style.split(['{', '}', ';']) {
+            let Some((_, value)) = declaration.split_once(':') else {
+                continue;
+            };
+            let mut depth = 0_usize;
+            let mut token = String::new();
+            for ch in value.chars().chain(std::iter::once(' ')) {
+                match ch {
+                    '(' => {
+                        depth += 1;
+                        token.push(ch);
+                    }
+                    ')' => {
+                        depth = depth.saturating_sub(1);
+                        token.push(ch);
+                    }
+                    c if depth == 0 && (c.is_whitespace() || c == ',' || c == '!') => {
+                        if let Some(colour) = parse(&token) {
+                            found.push((token.clone(), colour));
+                        }
+                        token.clear();
+                    }
+                    c => token.push(c),
+                }
+            }
+        }
+        found
+    }
+
+    /// A colour's identity at the precision a corpus can write it in.
+    fn hex(c: Rgb) -> String {
+        let byte = |v: f64| (v * 255.0).round() as u8;
+        format!("#{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b))
+    }
+
+    #[test]
+    fn the_near_neutral_threshold_separates_the_fidelity_corpus_neutrals_from_its_brand_colours() {
+        // NFR-47's falsifier for the chroma threshold, over every colour the fidelity corpus
+        // (`sift-sanitize/fixtures/messages`, as its manifest admits it) writes. The corpus
+        // bounds the value; the just-noticeable difference picks it inside the bound. Every
+        // colour is a neutral unless it is named below as a brand colour, so a newly admitted
+        // colour on the wrong side of the threshold fails here — and reopens the derivation in
+        // docs/rendering/dark-mode.md rather than moving the constant.
+        const BRAND: [&str; 1] = [
+            "#1a5d3a", // marketing-newsletter: the call-to-action ground
+        ];
+        let mut seen = std::collections::BTreeMap::new();
+        for (file, doc) in corpus_documents() {
+            for (written, colour) in colours_in(&style_text(&doc)) {
+                seen.entry(hex(colour))
+                    .or_insert_with(|| (file.clone(), written, colour));
+            }
+        }
+
+        // The scan's floor: the colours it must find, one from each place colours are written,
+        // so a scanner that stopped reading a context cannot pass by measuring nothing.
+        for expected in [
+            "#d0d7de", // transactional-receipt: a style attribute, the item-row border
+            "#cccccc", // mailing-list-reply: `rgb(204,204,204)` and `#ccc`, the quote rules
+            "#f4f4f4", // marketing-newsletter: a <style> block and a `bgcolor` attribute
+            "#121212", // marketing-newsletter: the sender's own dark-mode rules
+            "#555555", // cjk-japanese
+        ] {
+            assert!(
+                seen.contains_key(expected),
+                "the corpus scan missed {expected}"
+            );
+        }
+        for brand in BRAND {
+            assert!(
+                seen.contains_key(brand),
+                "{brand} is declared a brand colour, and the corpus no longer draws it"
+            );
+        }
+
+        for (key, (file, written, colour)) in &seen {
+            let chroma = colour.to_oklab().chroma();
+            if BRAND.contains(&key.as_str()) {
+                assert!(
+                    chroma > NEAR_NEUTRAL_CHROMA,
+                    "brand colour {written} in {file} has chroma {chroma}, not above the threshold"
+                );
+            } else {
+                assert!(
+                    chroma < NEAR_NEUTRAL_CHROMA,
+                    "{written} in {file} has chroma {chroma}, not below the threshold: a neutral \
+                     there reopens the derivation, and a brand colour belongs in BRAND"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_increased_contrast_preference_raises_the_bar_rather_than_lowering_it() {
         // The UI shell's requirement: a user who asked the system for more contrast has not
-        // asked for it everywhere except inside the message. A provisional value that fell
+        // asked for it everywhere except inside the message. A value that fell
         // below the ordinary one would invert that request; the ordering itself is held at
         // compile time beside the constant, and this holds the selection.
         assert!(contrast_threshold(true) > contrast_threshold(false));

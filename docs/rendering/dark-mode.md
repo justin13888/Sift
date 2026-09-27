@@ -112,8 +112,8 @@ reader who thinks the budget is unachievable should say so before the cascade is
    chroma to avoid neon artefacts, preserve hue. A perceptual space is chosen over the naive
    hue-saturation-lightness inversion used by browser extensions specifically because that approach
    muddies mid-tones and shifts hues.
-5. **Repair contrast.** After transforming, check every text-on-background pair against a perceptual
-   contrast model and nudge lightness until it passes. **This step is what separates "usable" from
+5. **Repair contrast.** After transforming, check every text-on-background pair against the contrast
+   metric NFR-47 records below and nudge lightness until it passes. **This step is what separates "usable" from
    "technically inverted".** The threshold is raised where the system's increased-contrast preference is
    set — see [UI shell](../architecture/ui-shell.md), which owns the rest of that request.
 6. **Classify images, which is where Sift can do better than an extension.** An extension cannot reliably
@@ -129,9 +129,58 @@ reader who thinks the budget is unachievable should say so before the cascade is
 
 ## NFR-47 — Contrast gate
 
-Transform output MUST meet the perceptual contrast threshold for at least 95% of the
+Transform output MUST meet the contrast threshold for at least 95% of the
 [fidelity corpus](../product/reference-environment.md). Failures MUST be surfaced in the
 [debug view](../runtime/observability.md) rather than silently shipped.
+
+### The gate's metric, its thresholds, and how they were derived
+
+*Amended to record the values [D-64](../build/verification.md) registered as outstanding. The gate now
+blocks.*
+
+**Metric.** The WCAG 2 contrast ratio between a text-bearing element's resolved foreground and
+background, after step 4 has transformed both and step 5 has repaired the foreground. A message **meets**
+the gate when the transform ran and left no such pair below the threshold. The share is taken over the
+messages the transform ran on: a message whose sender declared their own dark mode is outside it, because
+FR-32 stops the pass before it produces anything to measure, and counting it either way would score Sift
+on the sender's palette. A message whose styles were refused counts as a failure — the reader asked for
+dark and was given the light original. A corpus on which the transform ran on no message leaves the gate
+**unperformed**, which fails rather than passing vacuously.
+
+**Why this metric, and why the word "perceptual" left the requirement.** As first written, NFR-47 and
+step 5 asked for a *perceptual* contrast threshold and model, before any metric had been chosen; the
+[requirements](../requirements.md) row already read "the contrast threshold". The WCAG 2 ratio is computed
+from relative luminance — a photometric quantity weighted to the eye's response, not a perceptually
+uniform one — so keeping the word beside it would have claimed a property the metric does not have. It is
+chosen anyway because it is the only contrast metric with published, normative thresholds for body text,
+which is what lets the gate's numbers be derived rather than chosen; the perceptual lightness-contrast
+models publish no settled threshold, and adopting one now would mean picking its pass level here. The
+requirement and step 5 are amended to name the recorded metric instead of a model class, and the
+perceptual model stays the named way to reopen it, below. The transform itself still works in the
+perceptual space of step 4; only the check against it is the ratio.
+
+**Thresholds.** **4.5** ordinarily, and **7** where the system's increased-contrast preference is set.
+
+**How they were derived.** Both are the body-text levels the metric's own definition publishes — the
+minimum and the enhanced — so neither is a number chosen here. The alternative was to derive them from the
+corpus, as the smallest ratio any corpus text pair has as its sender sent it, on the rule D-64 applies to
+NFR-26: the worst thing anybody accepted. It is rejected because the population is wrong. NFR-26's pairs
+are ones a person reviewed and agreed; a sender's footer is not an agreement, and low-contrast footers are
+part of what step 5 exists to repair. A threshold read off senders' worst pairs would certify the defect.
+The corpus's role for these two values is the gate itself — at them, at least 95% of it must pass.
+
+**Measured.** Over the corpus as admitted when this was recorded — seven constructed messages, one per
+category and two for CJK — the sender of one declared their own dark mode, the transform ran on the other
+six, and all six met both thresholds. **That result discriminates nothing yet, and is recorded as such:**
+none of the six resolves an element carrying both a foreground and a background, so step 5 was presented
+with no pair to repair at either threshold. Elements keep no class names through sanitization, so
+stylesheet rules keyed on them match nothing, and the corpus's declared backgrounds sit on the one message that honours its own dark
+mode. The gate gains evidence as captured messages are admitted beside the constructed ones under
+[D-115](../product/reference-environment.md); a failure then is resolved by repairing the transform, not
+by moving either threshold, and never in the run that failed.
+
+**What would reopen it.** A contrast metric other than the WCAG 2 ratio — a perceptual lightness-contrast
+model is the likely candidate — replaces both numbers with that metric's own, by amendment here.
 
 ## Gradients and CSS-drawn decoration
 
@@ -151,8 +200,22 @@ CSS-drawn decoration step 3 enumerates — borders, shadows, and outlines.
 A gradient supplied as an **image** is not covered by this rule at all. It reaches step 6's classifier
 instead, and is handled as whatever the classifier decides it is.
 
-The threshold itself is a number to be validated against the
-[fidelity corpus](../product/reference-environment.md) under NFR-47, not a constant to be asserted here.
+**The threshold is a chroma of 0.02 in the perceptual space of step 4**, amended from a stated starting
+value of 0.04. It is one just-noticeable difference in that space, as CSS Color 4's gamut mapping takes
+it: a colour within one such difference of the grey at its own lightness cannot be told from that grey, so
+calling it neutral changes nothing a reader could recognise as a brand colour, and anything above it is
+visibly tinted and falls to the asymmetry above, which favours leaving it. The move is a consequence of the
+derivation, not of a measurement: 0.04 was twice the difference with no reason for the factor, and lowering
+it errs in the direction this section already chose.
+
+**The [fidelity corpus](../product/reference-environment.md) falsifies it rather than choosing it.** The
+value MUST fall above the chroma of every neutral colour the corpus draws and below that of every brand
+colour. When this was recorded, the most tinted neutral was a cool-grey table border at 0.012 and the least
+tinted brand colour a green call-to-action ground at 0.089, so the corpus bounds the value without picking
+it — 0.04 satisfied it too — and the just-noticeable difference picks it inside the bound. A corpus colour
+on the wrong side reopens the derivation rather than moving the number. No gradient, shadow or outline in
+the corpus survives sanitization to reach the transform, so the falsifier was performed over plain colours
+and borders only; a gradient admitted later is measured against it on arrival.
 
 Legacy word-processor conditional content does **not** reach this pass. It is removed by the sanitizer,
 which [sanitizer invariants](sanitizer-invariants.md) now states directly and asserts as a regression
