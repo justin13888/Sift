@@ -168,6 +168,35 @@ pub enum PageError {
     FailedAuthentication,
     /// Too short to contain what it claims.
     Truncated,
+    /// The page is sealed under a key generation this cipher does not hold.
+    ///
+    /// **Recognised, not corrupt.** D-76's identifier exists so that a page under a destroyed
+    /// key reads as *that* rather than as tampering: the page's counter places it in a
+    /// generation the header names, and the key for that generation was not supplied. The
+    /// identifier is the generation's, so the caller can say which key it would need.
+    KeyNotHeld(KeyId),
+}
+
+/// The previous key generation of a file part-way through D-22's lazy rotation.
+///
+/// **The boundary is a counter, and that is what makes the rotation lazy rather than a
+/// flag day.** A page does not carry its key identifier on disk, but it does carry its write
+/// counter, in the clear and bound into both the nonce and the additional data. The counter
+/// is monotonic across the file's life and resumes above the header's high-water mark, so
+/// when a rotation begins every counter the old key ever issued is at or below that mark and
+/// every counter the new key issues is above it. One number therefore says which generation
+/// sealed any page, without a trial decryption and without a per-page table.
+///
+/// Editing the boundary in the clear header cannot make a page open under the wrong key: the
+/// key identifier is in the additional data and the two keys differ, so a misrouted page
+/// fails authentication. It is a refusal an attacker can cause, not a forgery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retiring {
+    /// The identifier of the key being retired.
+    pub key_id: KeyId,
+    /// The highest counter the retiring key may have issued. Pages whose counter is at or
+    /// below this are under the retiring key; pages above it are under the current one.
+    pub through: u64,
 }
 
 /// The file header.
@@ -179,6 +208,11 @@ pub struct Header {
     ///
     /// Nonce derivation resumes **above** this, which is what makes it safe across a crash.
     pub counter_high_water: u64,
+    /// The generation still being retired, while any page may carry it.
+    ///
+    /// Stored in bytes the first header left zero, so a file that has never rotated encodes
+    /// exactly as it did before rotation existed — the byte-for-byte fixture still holds.
+    pub retiring: Option<Retiring>,
 }
 
 impl Header {
@@ -188,6 +222,7 @@ impl Header {
             format_version: FORMAT_VERSION,
             key_id,
             counter_high_water: 0,
+            retiring: None,
         }
     }
 
@@ -198,6 +233,10 @@ impl Header {
         out[8..10].copy_from_slice(&self.format_version.to_be_bytes());
         out[10..26].copy_from_slice(&self.key_id.0);
         out[26..34].copy_from_slice(&self.counter_high_water.to_be_bytes());
+        if let Some(retiring) = self.retiring {
+            out[34..50].copy_from_slice(&retiring.key_id.0);
+            out[50..58].copy_from_slice(&retiring.through.to_be_bytes());
+        }
         out
     }
 
@@ -218,18 +257,56 @@ impl Header {
         key_id.copy_from_slice(&bytes[10..26]);
         let mut hw = [0u8; 8];
         hw.copy_from_slice(&bytes[26..34]);
+        // An all-zero identifier is the "never rotated" encoding. A derived identifier is a
+        // BLAKE3 output, so zero is not one a real key has.
+        let mut retiring_id = [0u8; 16];
+        retiring_id.copy_from_slice(&bytes[34..50]);
+        let mut through = [0u8; 8];
+        through.copy_from_slice(&bytes[50..58]);
+        let retiring = (retiring_id != [0u8; 16]).then(|| Retiring {
+            key_id: KeyId(retiring_id),
+            through: u64::from_be_bytes(through),
+        });
         Ok(Self {
             format_version,
             key_id: KeyId(key_id),
             counter_high_water: u64::from_be_bytes(hw),
+            retiring,
         })
+    }
+
+    /// The generation a page with this stored counter was sealed under.
+    ///
+    /// Counter zero is never issued — [`PageCipher::seal`] pre-increments — so a zero counter
+    /// is space that was never sealed, and belongs to no generation.
+    #[must_use]
+    pub fn generation_of(&self, counter: u64) -> Option<KeyId> {
+        if counter == 0 {
+            return None;
+        }
+        match self.retiring {
+            Some(r) if counter <= r.through => Some(r.key_id),
+            _ => Some(self.key_id),
+        }
     }
 }
 
+/// The retiring generation, as a cipher holds it.
+struct Previous {
+    /// `None` where the retiring key was not supplied — destroyed, or simply not presented.
+    cipher: Option<backend::Aead>,
+    retiring: Retiring,
+}
+
 /// Seals and opens the pages of one file.
+///
+/// Seals only ever under the current key. Opens under the current key, or — for a page whose
+/// counter places it in the retiring generation — under the retiring key, which is how D-22's
+/// rotation leaves both generations readable while any page still carries the old one.
 pub struct PageCipher {
     cipher: backend::Aead,
     key_id: KeyId,
+    previous: Option<Previous>,
     counter: AtomicU64,
 }
 
@@ -237,18 +314,42 @@ impl core::fmt::Debug for PageCipher {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PageCipher")
             .field("key_id", &self.key_id)
+            .field("retiring", &self.retiring())
             .finish_non_exhaustive()
     }
 }
 
 impl PageCipher {
     /// Open a file's cipher, resuming the counter **above** the header's high-water mark.
+    ///
+    /// Where the header names a retiring generation, its pages are recognised and refused
+    /// with [`PageError::KeyNotHeld`]; [`with_retiring`](Self::with_retiring) is the
+    /// constructor that can open them.
     #[must_use]
     pub fn new(key: &PageKey, header: &Header) -> Self {
+        Self::build(key, header, None)
+    }
+
+    /// Open a file's cipher with both generations: the current key the header names, and the
+    /// retiring key its [`Retiring`] names.
+    ///
+    /// A header with no retiring generation ignores `retiring` — there is nothing for it to
+    /// open, and holding a key with no use is key material outliving its purpose.
+    #[must_use]
+    pub fn with_retiring(key: &PageKey, header: &Header, retiring: &PageKey) -> Self {
+        Self::build(key, header, Some(retiring))
+    }
+
+    fn build(key: &PageKey, header: &Header, retiring_key: Option<&PageKey>) -> Self {
         let cipher = backend::Aead::new(key.bytes());
+        let previous = header.retiring.map(|retiring| Previous {
+            cipher: retiring_key.map(|k| backend::Aead::new(k.bytes())),
+            retiring,
+        });
         Self {
             cipher,
             key_id: header.key_id,
+            previous,
             counter: AtomicU64::new(header.counter_high_water),
         }
     }
@@ -256,6 +357,24 @@ impl PageCipher {
     #[must_use]
     pub const fn key_id(&self) -> KeyId {
         self.key_id
+    }
+
+    /// The generation being retired, if this file is part-way through a rotation.
+    #[must_use]
+    pub fn retiring(&self) -> Option<Retiring> {
+        self.previous.as_ref().map(|p| p.retiring)
+    }
+
+    /// The header to write with a given high-water mark: this cipher's key identifier and
+    /// its retiring generation, so that writing a header can never forget a rotation.
+    #[must_use]
+    pub fn header(&self, counter_high_water: u64) -> Header {
+        Header {
+            format_version: FORMAT_VERSION,
+            key_id: self.key_id,
+            counter_high_water,
+            retiring: self.retiring(),
+        }
     }
 
     /// The counter to record in the header. Written **before** the pages it covers, so a
@@ -301,7 +420,8 @@ impl PageCipher {
     ///
     /// # Errors
     /// [`PageError::FailedAuthentication`] on any tampering, on a page presented under the
-    /// wrong number, or under the wrong key.
+    /// wrong number, or under the wrong key. [`PageError::KeyNotHeld`] for a page of the
+    /// retiring generation when the retiring key was not supplied.
     pub fn open(&self, page_number: u32, sealed: &[u8]) -> Result<Vec<u8>, PageError> {
         if sealed.len() < PAGE_OVERHEAD {
             return Err(PageError::Truncated);
@@ -310,11 +430,20 @@ impl PageCipher {
         c.copy_from_slice(&sealed[..COUNTER_LEN]);
         let counter = u64::from_be_bytes(c);
 
+        // Which generation sealed it, from the counter alone. See [`Retiring`].
+        let (cipher, key_id) = match &self.previous {
+            Some(p) if counter <= p.retiring.through => match &p.cipher {
+                Some(cipher) => (cipher, p.retiring.key_id),
+                None => return Err(PageError::KeyNotHeld(p.retiring.key_id)),
+            },
+            _ => (&self.cipher, self.key_id),
+        };
+
         let nonce = nonce_for(page_number, counter);
-        let aad = aad_for(self.key_id, page_number, counter);
+        let aad = aad_for(key_id, page_number, counter);
         let body = &sealed[COUNTER_LEN..];
         let mut out = vec![0u8; body.len() - TAG_LEN];
-        self.cipher
+        cipher
             .open(&nonce, &aad, body, &mut out)
             .map_err(|()| PageError::FailedAuthentication)?;
         Ok(out)
@@ -757,6 +886,134 @@ mod tests {
         // under a destroyed key reads as *that*, rather than as corrupt.
         let h = Header::new(key_id());
         assert_eq!(Header::decode(&h.encode()).unwrap().key_id, key_id());
+    }
+
+    fn old_key() -> PageKey {
+        PageKey::from_bytes([0x11; 32])
+    }
+    fn old_id() -> KeyId {
+        KeyId([0x01; 16])
+    }
+
+    /// A file written under the old key, then carried into a rotation to the new one: the
+    /// header the new cipher starts from, and a page sealed by the old generation.
+    fn rotated() -> (Header, Vec<u8>) {
+        let old = PageCipher::new(&old_key(), &Header::new(old_id()));
+        let sealed = old.seal(2, b"written before the rotation").unwrap();
+        let mut header = Header::new(key_id());
+        header.counter_high_water = old.high_water();
+        header.retiring = Some(Retiring {
+            key_id: old_id(),
+            through: old.high_water(),
+        });
+        (header, sealed)
+    }
+
+    #[test]
+    fn a_header_with_a_retiring_generation_round_trips() {
+        let (header, _) = rotated();
+        assert_eq!(Header::decode(&header.encode()).unwrap(), header);
+    }
+
+    #[test]
+    fn a_header_that_never_rotated_encodes_exactly_as_before() {
+        // The retiring fields live in bytes the first format left zero, which is why the
+        // byte-for-byte fixture did not have to move — asserted here too, from the other side.
+        let mut h = Header::new(key_id());
+        h.counter_high_water = 9;
+        assert!(h.encode()[34..].iter().all(|b| *b == 0));
+        assert_eq!(Header::decode(&h.encode()).unwrap().retiring, None);
+    }
+
+    #[test]
+    fn both_generations_open_while_a_rotation_is_in_progress() {
+        // D-22: "both generations are readable while any page carries the old identifier."
+        let (header, old_page) = rotated();
+        let c = PageCipher::with_retiring(&key(), &header, &old_key());
+        assert_eq!(
+            c.open(2, &old_page).unwrap(),
+            b"written before the rotation"
+        );
+
+        let new_page = c.seal(2, b"re-sealed").unwrap();
+        assert_eq!(c.open(2, &new_page).unwrap(), b"re-sealed");
+    }
+
+    #[test]
+    fn a_page_is_re_sealed_under_the_new_generation_and_its_counter_says_so() {
+        // Every seal is under the current key, and its counter lands above the boundary — so
+        // the next open, and the retirement scan, place it in the new generation.
+        let (header, _) = rotated();
+        let c = PageCipher::with_retiring(&key(), &header, &old_key());
+        let sealed = c.seal(2, b"re-sealed").unwrap();
+        let mut ctr = [0u8; 8];
+        ctr.copy_from_slice(&sealed[..8]);
+        let counter = u64::from_be_bytes(ctr);
+        assert!(counter > header.retiring.unwrap().through);
+        assert_eq!(header.generation_of(counter), Some(key_id()));
+
+        // And it is genuinely under the new key: a cipher holding only the old one refuses it.
+        let old_only = PageCipher::new(&old_key(), &Header::new(old_id()));
+        assert_eq!(
+            old_only.open(2, &sealed),
+            Err(PageError::FailedAuthentication)
+        );
+    }
+
+    #[test]
+    fn a_page_under_a_destroyed_old_key_is_recognised_rather_than_corrupt() {
+        // The difference D-76's identifier exists for. Without the retiring key, an old page is
+        // named as belonging to a key this cipher does not hold — not reported as tampering.
+        let (header, old_page) = rotated();
+        let c = PageCipher::new(&key(), &header);
+        assert_eq!(c.open(2, &old_page), Err(PageError::KeyNotHeld(old_id())));
+
+        // New pages still open without it.
+        let new_page = c.seal(3, b"after").unwrap();
+        assert_eq!(c.open(3, &new_page).unwrap(), b"after");
+    }
+
+    #[test]
+    fn a_tampered_old_page_is_still_refused_as_tampering() {
+        // Two generations must not become two chances: a flipped bit in an old page fails
+        // authentication under the retiring key exactly as it would have before the rotation.
+        let (header, old_page) = rotated();
+        let c = PageCipher::with_retiring(&key(), &header, &old_key());
+        let mut forged = old_page;
+        let last = forged.len() - 1;
+        forged[last] ^= 1;
+        assert_eq!(c.open(2, &forged), Err(PageError::FailedAuthentication));
+    }
+
+    #[test]
+    fn a_page_cannot_be_moved_across_the_boundary_by_editing_its_counter() {
+        // The counter is in the clear, so an attacker can relabel a new page as old. It then
+        // opens under the retiring key with a different nonce and fails, rather than opening.
+        let (header, _) = rotated();
+        let c = PageCipher::with_retiring(&key(), &header, &old_key());
+        let mut sealed = c.seal(2, b"new").unwrap();
+        sealed[..8].copy_from_slice(&1u64.to_be_bytes());
+        assert_eq!(c.open(2, &sealed), Err(PageError::FailedAuthentication));
+    }
+
+    #[test]
+    fn the_cipher_writes_its_rotation_into_every_header_it_produces() {
+        // A header written without the retiring generation would, after a restart, route every
+        // old page to the new key — and D-73 would discard a store that was merely rotating.
+        let (header, _) = rotated();
+        let c = PageCipher::with_retiring(&key(), &header, &old_key());
+        assert_eq!(c.header(77).retiring, header.retiring);
+        assert_eq!(c.header(77).key_id, key_id());
+        assert_eq!(c.header(77).counter_high_water, 77);
+    }
+
+    #[test]
+    fn counter_zero_belongs_to_no_generation() {
+        // Never issued, so a zero counter is space that was never sealed — which the
+        // retirement scan must not count as a page still carrying the old key.
+        let (header, _) = rotated();
+        assert_eq!(header.generation_of(0), None);
+        assert_eq!(header.generation_of(1), Some(old_id()));
     }
 
     /// The property this format deliberately does **not** have, asserted so that it is a
