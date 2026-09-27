@@ -112,8 +112,8 @@ reader who thinks the budget is unachievable should say so before the cascade is
    chroma to avoid neon artefacts, preserve hue. A perceptual space is chosen over the naive
    hue-saturation-lightness inversion used by browser extensions specifically because that approach
    muddies mid-tones and shifts hues.
-5. **Repair contrast.** After transforming, check every text-on-background pair against a perceptual
-   contrast model and nudge lightness until it passes. **This step is what separates "usable" from
+5. **Repair contrast.** After transforming, check every text-on-background pair against the contrast
+   metric NFR-47 records below and nudge lightness until it passes. **This step is what separates "usable" from
    "technically inverted".** The threshold is raised where the system's increased-contrast preference is
    set — see [UI shell](../architecture/ui-shell.md), which owns the rest of that request.
 6. **Classify images, which is where Sift can do better than an extension.** An extension cannot reliably
@@ -129,7 +129,7 @@ reader who thinks the budget is unachievable should say so before the cascade is
 
 ## NFR-47 — Contrast gate
 
-Transform output MUST meet the perceptual contrast threshold for at least 95% of the
+Transform output MUST meet the contrast threshold for at least 95% of the
 [fidelity corpus](../product/reference-environment.md). Failures MUST be surfaced in the
 [debug view](../runtime/observability.md) rather than silently shipped.
 
@@ -146,6 +146,18 @@ FR-32 stops the pass before it produces anything to measure, and counting it eit
 on the sender's palette. A message whose styles were refused counts as a failure — the reader asked for
 dark and was given the light original. A corpus on which the transform ran on no message leaves the gate
 **unperformed**, which fails rather than passing vacuously.
+
+**Why this metric, and why the word "perceptual" left the requirement.** As first written, NFR-47 and
+step 5 asked for a *perceptual* contrast threshold and model, before any metric had been chosen; the
+[requirements](../requirements.md) row already read "the contrast threshold". The WCAG 2 ratio is computed
+from relative luminance — a photometric quantity weighted to the eye's response, not a perceptually
+uniform one — so keeping the word beside it would have claimed a property the metric does not have. It is
+chosen anyway because it is the only contrast metric with published, normative thresholds for body text,
+which is what lets the gate's numbers be derived rather than chosen; the perceptual lightness-contrast
+models publish no settled threshold, and adopting one now would mean picking its pass level here. The
+requirement and step 5 are amended to name the recorded metric instead of a model class, and the
+perceptual model stays the named way to reopen it, below. The transform itself still works in the
+perceptual space of step 4; only the check against it is the ratio.
 
 **Thresholds.** **4.5** ordinarily, and **7** where the system's increased-contrast preference is set.
 
