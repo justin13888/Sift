@@ -59,8 +59,16 @@ settings:
 
     # D-62 — one user-facing version identifying a source revision, the same on every channel,
     # and a build number space that begins at 1 and is never reused or decreased.
+    #
+    # These are what a development build carries. A release candidate's come from
+    # `mise run release-rc`, which overrides all three on the command line — the version it is
+    # given, a build number derived from the revision, and the revision itself — and reads each
+    # back from the bundle. `SiftSourceRevision` is empty here, so a development bundle carries
+    # an empty revision rather than a wrong one, and the About panel names a revision only where
+    # one is non-empty.
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
+    SIFT_SOURCE_REVISION: ""
 
     SWIFT_VERSION: "5.9"
 
@@ -74,7 +82,9 @@ settings:
     OTHER_LDFLAGS: -lsift_abi
 
     # `cargo` builds one architecture, so the project builds the one it has. D-46's universal
-    # artefact is not addressed here and is not addressed anywhere else yet either.
+    # artefact is `mise run macos --universal` (which `mise run release-rc` uses): it builds the
+    # core for both architectures, joins them, and overrides these two and the link line on the
+    # command line, so an ordinary build stays one fast slice.
     #
     # `ARCHS` as well as `ONLY_ACTIVE_ARCH`, because an archive ignores the second: it builds
     # for a generic destination, asks for every architecture, and fails to link the one

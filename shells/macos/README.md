@@ -71,8 +71,9 @@ nor migrates; it keeps its own in the data-protection keychain, in the access gr
 same goes for `~/Library/Application Support/net.justinchung.sift`: a sandboxed build keeps its
 data inside `~/Library/Containers/net.justinchung.sift` instead, and starts empty.
 
-D-46's universal artefact is likewise not built here: `cargo` produces one architecture, so the
-project builds the one it has.
+An ordinary build is one architecture: `cargo` produces the host's, and the project builds the
+one it has. D-46's universal artefact is `mise run macos -- --universal`, which builds the core for
+both, joins the two with `lipo`, and links that archive by its path.
 
 ## What `--run` gives you
 
@@ -153,6 +154,15 @@ side by side.
 The Cask build is not reviewed by the platform, so it needs its own path: a distribution
 certificate under the same team identifier, the hardened runtime, and **notarization with
 stapling** — so a first launch does not depend on the user being online.
+
+`mise run release-rc -- <version>` is that path, on the release machine and nowhere else. It
+refuses a dirty worktree, a revision not on the default branch, a failing `mise run deny`, a
+missing Developer ID identity, a missing `sift-notary` notarytool profile, or a missing OAuth
+client, naming each; then builds universal, notarizes and staples the app, wraps it in
+`Sift-<version>.dmg` (itself signed, notarized and stapled), keeps the dSYM, and writes the DMG's
+sha256 into `packaging/homebrew/sift.rb`. The build number is the revision's position on the
+default branch's first-parent history, so it is never reused. **It publishes nothing**: the
+tag, the GitHub release and the Cask commit are printed for a person to run.
 
 **The hardened runtime is load-bearing rather than hygiene.** The threat model puts an
 in-address-space attacker out of scope *because the platform prevents it*; an entitlement
