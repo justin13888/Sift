@@ -434,7 +434,14 @@ impl App {
             // file — exactly what the constraint forbids by name.
             broker: sift_credentials::oauth::Broker::new(sift_credentials::store::Platform),
             pending_authorization: BTreeMap::new(),
-            resources: sift_broker::broker::Broker::new(),
+            // Under the tier below from the first request, not the broker's own default.
+            resources: {
+                let mut broker = sift_broker::broker::Broker::new();
+                let tier = sift_net::tier::Tier::Conservative;
+                broker.tier_permits_fetch = document::fetches_on_demand(tier);
+                broker.tier_permits_prefetch = tier.prefetch();
+                broker
+            },
             selection: Vec::new(),
             open_message: None,
             has_window: false,
@@ -464,6 +471,7 @@ impl App {
     /// the shell's, and the layer only plans against its answer.
     pub const fn set_network_tier(&mut self, tier: sift_net::tier::Tier) {
         self.network = tier;
+        self.resources_under_tier();
     }
 
     /// The tier last recorded by [`App::set_network_tier`].
