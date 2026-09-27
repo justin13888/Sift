@@ -34,8 +34,7 @@
 //! when a *new* window opens, which is the difference D-93's hysteresis makes.
 
 use adblock::Engine;
-use adblock::content_blocking::CbRule;
-use adblock::lists::{FilterSet, ParseOptions};
+use adblock::lists::{FilterSet, ParseOptions, ParsedLine, RuleTypes, parse_filter};
 use adblock::request::Request;
 
 /// What a layer said about one resource.
@@ -89,8 +88,14 @@ pub struct Blocker {
     /// nothing else.
     backstop: Engine,
     /// The artefact installed with the body view's configuration — the same bytes the web
-    /// engine enforces.
-    compiled: Vec<CbRule>,
+    /// engine enforces: the rules as the content-rule JSON both target engines compile.
+    ///
+    /// Held serialized rather than as parsed rules because that is NFR-42's largest line.
+    /// With EasyList and EasyPrivacy loaded the parsed form is several times the size of its
+    /// JSON and alone overruns the 40 MB, and the web engine consumes the JSON anyway.
+    compiled: String,
+    /// How many rules `compiled` holds.
+    compiled_count: usize,
     /// How many rules were dropped by the conversion. A non-zero count is not a fault; it
     /// is the size of the gap between the two layers, and FR-34 shows it.
     unconverted: usize,
@@ -99,7 +104,7 @@ pub struct Blocker {
 impl core::fmt::Debug for Blocker {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Blocker")
-            .field("compiled_rules", &self.compiled.len())
+            .field("compiled_rules", &self.compiled_count)
             .field("unconverted", &self.unconverted)
             .finish_non_exhaustive()
     }
@@ -115,19 +120,50 @@ impl core::fmt::Debug for Blocker {
 /// updating can block rendering, and a list compiled in can be stale but never absent.
 pub const BUNDLED_EMAIL_LIST: &str = include_str!("../lists/email.txt");
 
+/// FR-27's standard blocking list, EasyList, vendored at the upstream revision its header
+/// records and taken under GPL-3.0 (D-112). `lists/EASYLIST-NOTICE` is its notice, says
+/// which revision this is and how it is refreshed, and `lists/COPYING.GPL-3.0` is the licence.
+///
+/// **Only the Cask and Flatpak builds carry it**, through the `public-lists` feature: D-112
+/// keeps it out of a channel whose terms GPL-3.0 forbids, and the compiled rule form ships
+/// only where its list does. The test build reads it too, so the vendored text is exercised
+/// by `cargo test` whatever the shipped feature set is — the tests never enter a binary.
+#[cfg(any(test, feature = "public-lists"))]
+pub const BUNDLED_EASYLIST: &str = include_str!("../lists/easylist.txt");
+
+/// FR-27's standard privacy list, EasyPrivacy, under the same terms and gate as
+/// [`BUNDLED_EASYLIST`].
+#[cfg(any(test, feature = "public-lists"))]
+pub const BUNDLED_EASYPRIVACY: &str = include_str!("../lists/easyprivacy.txt");
+
+/// Every list this build carries, in the order they are parsed.
+///
+/// The email list is in every build. EasyList and EasyPrivacy join it only where the
+/// `public-lists` feature is on — the Cask and Flatpak builds D-112 allows.
+#[must_use]
+pub const fn bundled_lists() -> &'static [&'static str] {
+    #[cfg(feature = "public-lists")]
+    {
+        &[BUNDLED_EMAIL_LIST, BUNDLED_EASYLIST, BUNDLED_EASYPRIVACY]
+    }
+    #[cfg(not(feature = "public-lists"))]
+    {
+        &[BUNDLED_EMAIL_LIST]
+    }
+}
+
 impl Blocker {
     /// The authority this build ships: every bundled list, parsed into both layers.
     ///
-    /// Today that is the email list alone. EasyList and EasyPrivacy are D-112's to carry in
-    /// the Cask and Flatpak builds and are not vendored yet; when they are, they join here, so
-    /// the one caller that loads the engine does not change.
+    /// The email list everywhere, and EasyList and EasyPrivacy in the builds D-112 lets carry
+    /// them ([`bundled_lists`]). One call either way, so the one caller that loads the engine
+    /// does not know which build it is in.
     ///
     /// This is the 40 MB NFR-42 budgets, and it is **not** built on demand: the application
     /// builds it only when the governor says the engine may return and a window is open.
     #[must_use]
     pub fn bundled() -> Self {
-        let rules: Vec<String> = BUNDLED_EMAIL_LIST.lines().map(str::to_owned).collect();
-        Self::from_rules(&rules)
+        Self::from_lists(bundled_lists())
     }
 
     /// Build both layers from one rule source.
@@ -136,36 +172,54 @@ impl Blocker {
     /// consumable directly rather than through a translation nobody maintains.
     #[must_use]
     pub fn from_rules(rules: &[String]) -> Self {
-        let text = rules.join("\n");
+        Self::from_text(rules.join("\n"))
+    }
+
+    /// Build both layers from whole lists, concatenated into one rule source.
+    #[must_use]
+    pub fn from_lists(lists: &[&str]) -> Self {
+        Self::from_text(lists.join("\n"))
+    }
+
+    fn from_text(text: String) -> Self {
+        let total_network_rules = network_rules(text.lines());
 
         // Two sets from **one source**. The conversion consumes its set, so both are built
-        // from the same text rather than one being derived from the other.
-        let mut authority_set = FilterSet::new(true);
-        authority_set.add_filter_list(text.clone(), ParseOptions::default());
-
+        // from the same text rather than one being derived from the other. Only the
+        // conversion needs the engine's debug mode, which keeps each rule's original text:
+        // that text is how it reports which rules it used.
         let mut conversion_set = FilterSet::new(true);
-        conversion_set.add_filter_list(text, ParseOptions::default());
+        conversion_set.add_filter_list(text.clone(), ParseOptions::default());
 
-        let (compiled, converted) = conversion_set.into_content_blocking().unwrap_or_default();
+        // Converted and serialized first, so the parsed rules — the largest thing this
+        // builds — are gone before either engine is.
+        let (compiled, compiled_count, converted) = compile(conversion_set);
+
+        // The conversion reports every rule it used, cosmetic ones included, so only the
+        // network rules among them are set against the network rules of the source.
+        let converted_network_rules = network_rules(converted.iter().map(String::as_str));
+
+        let mut authority_set = FilterSet::new(false);
+        authority_set.add_filter_list(text, ParseOptions::default());
 
         // The backstop knows only what survived conversion. A rule the authority enforces
-        // and this one has never heard of is exactly the disagreement worth surfacing.
-        let mut backstop_set = FilterSet::new(true);
-        backstop_set.add_filter_list(converted.join("\n"), ParseOptions::default());
-
-        let total_network_rules = rules
-            .iter()
-            .filter(|r| {
-                let r = r.trim();
-                !r.is_empty() && !r.starts_with('!') && !r.contains("##")
-            })
-            .count();
+        // and this one has never heard of is exactly the disagreement worth surfacing. It
+        // only ever answers a network request, so it keeps only network rules.
+        let mut backstop_set = FilterSet::new(false);
+        backstop_set.add_filter_list(
+            converted.join("\n"),
+            ParseOptions {
+                rule_types: RuleTypes::NetworkOnly,
+                ..ParseOptions::default()
+            },
+        );
 
         Self {
             engine: Engine::new_with_filter_set(authority_set),
             backstop: Engine::new_with_filter_set(backstop_set),
             compiled,
-            unconverted: total_network_rules.saturating_sub(converted.len()),
+            compiled_count,
+            unconverted: total_network_rules.saturating_sub(converted_network_rules),
         }
     }
 
@@ -200,10 +254,20 @@ impl Blocker {
         }
     }
 
-    /// The rules installed with the body view's configuration.
+    /// The rules installed with the body view's configuration, as the content-rule JSON the
+    /// web engine compiles: one array, in the order the engine applies them.
     #[must_use]
-    pub fn compiled_rules(&self) -> &[CbRule] {
+    pub fn compiled_rules(&self) -> &str {
         &self.compiled
+    }
+
+    /// How many rules [`compiled_rules`](Self::compiled_rules) holds.
+    ///
+    /// Worth watching against the web engine's own cap on one rule list, which the three
+    /// standard lists approach.
+    #[must_use]
+    pub const fn compiled_rule_count(&self) -> usize {
+        self.compiled_count
     }
 
     /// How many network rules had no content-blocking equivalent.
@@ -214,6 +278,37 @@ impl Blocker {
     pub const fn unconverted_rules(&self) -> usize {
         self.unconverted
     }
+}
+
+/// Convert a set into the web engine's content-rule JSON, with how many rules it holds and
+/// the original text of every rule the conversion used.
+///
+/// A conversion or serialization that fails yields no rules and no used rules at all, so the
+/// backstop is empty rather than holding rules the compiled artefact does not.
+fn compile(set: FilterSet) -> (String, usize, Vec<String>) {
+    let Ok((rules, converted)) = set.into_content_blocking() else {
+        return (String::from("[]"), 0, Vec::new());
+    };
+    match serde_json::to_string(&rules) {
+        Ok(json) => (json, rules.len(), converted),
+        Err(_) => (String::from("[]"), 0, Vec::new()),
+    }
+}
+
+/// How many of these lines the engine parses as network rules.
+///
+/// Classified by the engine's own parser rather than by a guess at the syntax: the public
+/// lists carry cosmetic exceptions, scriptlets and header lines a prefix test miscounts, and
+/// the count is the size of the gap FR-34 shows.
+fn network_rules<'a>(lines: impl Iterator<Item = &'a str>) -> usize {
+    lines
+        .filter(|line| {
+            matches!(
+                parse_filter(line, false, ParseOptions::default()),
+                Ok(ParsedLine::Network(_))
+            )
+        })
+        .count()
 }
 
 fn verdict_of(engine: &Engine, request: &Request) -> Verdict {
@@ -300,9 +395,20 @@ mod tests {
         // syntax: the backstop is produced by the same library from the same text.
         let b = blocker();
         assert!(
-            !b.compiled_rules().is_empty(),
+            b.compiled_rule_count() > 0,
             "no backstop rules were compiled"
         );
+    }
+
+    #[test]
+    fn the_compiled_rules_are_the_content_rule_json_the_web_engine_takes() {
+        // One JSON array of trigger/action objects, holding as many rules as it says, and the
+        // listed host is in it.
+        let b = blocker();
+        let json = b.compiled_rules();
+        assert!(json.starts_with('[') && json.ends_with(']'), "{json}");
+        assert_eq!(json.matches("\"trigger\"").count(), b.compiled_rule_count());
+        assert!(json.contains("tracker"), "{json}");
     }
 
     #[test]
@@ -398,7 +504,7 @@ mod tests {
         // a fault.
         let b = Blocker::from_rules(&rules(&["||tracker.test^", "||ads.test/banner"]));
         let _: usize = b.unconverted_rules();
-        assert!(!b.compiled_rules().is_empty());
+        assert!(b.compiled_rule_count() > 0);
     }
 
     #[test]
@@ -422,11 +528,126 @@ mod tests {
         );
     }
 
+    /// The three lists, as the Cask and Flatpak builds carry them.
+    fn with_public_lists() -> Blocker {
+        Blocker::from_lists(&[BUNDLED_EMAIL_LIST, BUNDLED_EASYLIST, BUNDLED_EASYPRIVACY])
+    }
+
+    /// Open-report pixels the email list exists for.
+    const OPEN_REPORTS: [&str; 4] = [
+        "https://mailtrack.io/trace/mail/abc.png",
+        "https://us1.list-manage.com/track/open.php?u=1&id=2",
+        "https://u123.ct.sendgrid.net/wf/open?upn=xyz",
+        "https://abc.r.us-east-1.awstrack.me/I0/0100/xyz",
+    ];
+
+    /// Content a reader wants from the same services, and from an unlisted host.
+    const READER_CONTENT: [&str; 3] = [
+        "https://cdn.sender.test/logo.png",
+        "https://mcusercontent.com/abc/images/hero.jpg",
+        "https://us1.list-manage.com/images/banner.png",
+    ];
+
+    #[test]
+    fn this_build_bundles_the_lists_its_channel_may_carry() {
+        // D-112: the email list in every build, the two public lists only where the
+        // `public-lists` feature says the channel may carry them.
+        let lists = bundled_lists();
+        assert_eq!(lists.first(), Some(&BUNDLED_EMAIL_LIST));
+        let carries_public = lists.contains(&BUNDLED_EASYLIST);
+        assert_eq!(carries_public, cfg!(feature = "public-lists"));
+        assert_eq!(
+            lists.contains(&BUNDLED_EASYPRIVACY),
+            carries_public,
+            "one public list without the other"
+        );
+    }
+
+    #[test]
+    fn the_vendored_public_lists_are_the_published_ones() {
+        // EASYLIST-NOTICE records the upstream revision; each file's header records the
+        // same one. A refresh that updated only one of the three is caught here.
+        let notice = include_str!("../lists/EASYLIST-NOTICE");
+        for (list, title) in [
+            (BUNDLED_EASYLIST, "! Title: EasyList"),
+            (BUNDLED_EASYPRIVACY, "! Title: EasyPrivacy"),
+        ] {
+            assert!(list.contains(title), "{title} is not the list's own header");
+            for key in ["! Version: ", "! Commit: "] {
+                let value = list
+                    .lines()
+                    .find_map(|l| l.strip_prefix(key))
+                    .unwrap_or_else(|| panic!("{title} has no {key:?} header line"));
+                assert!(
+                    notice.contains(value.trim()),
+                    "{title}'s {key:?} {value} is not the revision EASYLIST-NOTICE records"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_public_lists_block_what_they_are_for_and_leave_the_email_list_whole() {
+        // FR-27's standard lists: an ad server and an analytics beacon are blocked, and
+        // adding them neither un-blocks an open report nor blocks content a reader wants.
+        let b = with_public_lists();
+        for listed in [
+            "https://securepubads.g.doubleclick.net/gampad/ads?iu=1",
+            "https://www.google-analytics.com/collect?v=1&t=pageview",
+        ] {
+            let d = b.decide(listed, "sender.test", "image");
+            assert!(!d.permits_fetch(), "{listed} was allowed: {d:?}");
+        }
+        for tracker in OPEN_REPORTS {
+            let d = b.decide(tracker, "sender.test", "image");
+            assert!(!d.permits_fetch(), "{tracker} was allowed: {d:?}");
+        }
+        for content in READER_CONTENT {
+            let d = b.decide(content, "sender.test", "image");
+            assert!(d.permits_fetch(), "{content} was blocked: {d:?}");
+        }
+    }
+
+    #[test]
+    fn the_public_lists_gap_is_counted_and_the_compiled_rules_fit_one_rule_list() {
+        // Some of EasyList's network rules have no content-blocking form; the count says how
+        // many rather than hiding them, and it is a fraction rather than most of the list.
+        // WebKit refuses a content rule list over 150,000 rules, and the three lists come
+        // close enough that a refresh crossing it should fail here rather than in the body
+        // view.
+        let b = with_public_lists();
+        let network = network_rules(
+            [BUNDLED_EMAIL_LIST, BUNDLED_EASYLIST, BUNDLED_EASYPRIVACY]
+                .iter()
+                .flat_map(|l| l.lines()),
+        );
+        assert!(b.unconverted_rules() > 0);
+        assert!(b.unconverted_rules() < network / 10, "{b:?} of {network}");
+        assert!(b.compiled_rule_count() > 10_000, "{b:?}");
+        assert!(b.compiled_rule_count() <= 150_000, "{b:?}");
+    }
+
+    #[test]
+    fn a_cosmetic_line_is_not_counted_as_a_network_rule() {
+        // The public lists' headers, cosmetic exceptions and scriptlets are not network
+        // rules, and counting them would inflate the gap FR-34 shows.
+        let lines = [
+            "[Adblock Plus 2.0]",
+            "! comment",
+            "example.com##.ad",
+            "example.com#@#.ad",
+            "example.com##+js(noop)",
+            "||tracker.test^",
+            "@@||tracker.test/allowed^",
+        ];
+        assert_eq!(network_rules(lines.into_iter()), 2);
+    }
+
     #[test]
     fn the_bundled_list_blocks_an_open_report_and_nothing_a_reader_wants() {
         // FR-27's email list, as it ships. An open-report pixel stays blocked after a sender
         // is allowed; the same service's content, and an unlisted host, do not.
-        let b = Blocker::bundled();
+        let b = Blocker::from_lists(&[BUNDLED_EMAIL_LIST]);
         for tracker in [
             "https://mailtrack.io/trace/mail/abc.png",
             "https://us1.list-manage.com/track/open.php?u=1&id=2",
@@ -450,9 +671,19 @@ mod tests {
     fn every_bundled_rule_reaches_the_backstop() {
         // A rule the conversion drops is one the backstop never hears of. Zero today, and a
         // list change that breaks that is one somebody should look at rather than absorb.
-        let b = Blocker::bundled();
+        let b = Blocker::from_lists(&[BUNDLED_EMAIL_LIST]);
         assert_eq!(b.unconverted_rules(), 0);
-        assert!(!b.compiled_rules().is_empty());
+        assert!(b.compiled_rule_count() > 0);
+    }
+
+    #[test]
+    fn the_bundled_authority_is_every_list_this_build_carries() {
+        // What the application loads: the email list decides in every build.
+        let b = Blocker::bundled();
+        for tracker in OPEN_REPORTS {
+            let d = b.decide(tracker, "sender.test", "image");
+            assert!(!d.permits_fetch(), "{tracker} was allowed: {d:?}");
+        }
     }
 
     #[test]

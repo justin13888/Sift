@@ -19,3 +19,19 @@ sift-foundation.workspace = true
 # that conversion, so both halves of D-10 come from one source and a disagreement between
 # them is a real signal rather than two parsers differing.
 adblock = { version = "0.13", default-features = false, features = ["content-blocking", "embedded-domain-resolver", "full-regex-handling"] }
+# The compiled rules are held as the content-rule JSON the web engine consumes, which is a
+# fraction of their parsed size (NFR-42). Already in the tree beneath the filter engine.
+serde_json = "1"
+
+[dev-dependencies]
+# NFR-42's budget test counts the engine's live bytes through D-24's allocator, installed as
+# the global allocator of that one test binary.
+sift-alloc.workspace = true
+sift-subsystem.workspace = true
+
+[features]
+# FR-27's standard lists, EasyList and EasyPrivacy, compiled into the binary (D-111). D-112
+# lets only the Homebrew Cask and the Flatpak carry them, under GPL-3.0, so this is off by
+# default and those two builds turn it on: `mise run macos` through sift-abi, and the Flatpak
+# manifest through sift-gtk. Registered in docs/build/workspace.md.
+public-lists = []
