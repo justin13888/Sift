@@ -225,10 +225,11 @@ the folder and not the message — is defensible and loses the thing users most 
 
 **Chosen:** a sync or a queue flush holds the application's state only across its store work — reading
 what to ask the provider, and writing what came back — and **never across a provider round trip**. For
-the length of one conversation, an account's adapter is *lent* to the one job that is having it, and
-the round trip runs with nothing else held.
+the length of one job — a sync's turn or a flush's batch — an account's adapter is *lent* to that job,
+and each of its round trips runs with nothing else held.
 **Rejected:** holding the application for a whole account's walk, which is what moving the work onto
-[D-19](overview.md)'s blocking pool left behind; a lock per account; one adapter shared between threads.
+[D-19](overview.md)'s blocking pool left behind; a lock per account; one adapter shared between threads; lending the adapter per round trip rather than
+per job.
 
 **Why.** Moving sync and the flush off the shell's loop removed the freeze nobody caused, and left the
 one a person causes. Every call a shell makes that reads or changes application state takes the same
@@ -250,22 +251,25 @@ do may happen. Each case is decided here rather than left to whichever interleav
 |---|---|
 | A second sync or flush of the **same account** is asked for | It is refused as busy. It does not reconnect — the adapter is lent, not lost — and it does not wait. One conversation per account at a time |
 | A gesture that **needs no provider** — selecting, observing, triaging, searching what is held | It proceeds at once. It never waits for a round trip |
-| A gesture that **needs the provider** — opening a message's body, listing or saving an attachment, the runtime panel's own flush | It waits for lent adapters to come back: at most the round trip in flight, not the walk |
+| A gesture that **needs the provider** — opening a message's body, listing or saving an attachment, the runtime panel's own flush | It waits for lent adapters to come back, which is **the job in flight, not only its current round trip**: a sync's whole turn, bounded by its per-folder page cap, or a flush's one batch. A job does not return its adapter between its round trips, for the reason the next paragraph gives |
 | The user **triages a message whose earlier intent is in flight** | [D-85](../mail/mutations.md)'s durable marker is written under the hold *before* the request leaves, exactly as before. The new intent — an undo included — is queued behind the issued one: coalescing considers only intents not yet issued, and the account has one flush out at a time, so the new intent cannot be sent until the issued one is answered. Per-message order holds |
 | The **account is removed** | Every held step finds the account again by identity. Finding none, the job stops: a page already fetched is discarded, an answer to a flush has no queue left to settle, and the adapter is dropped. Nothing is written for an account that no longer exists, and removal already discards its queue under FR-4 |
 | The job **fails inside a round trip** | The adapter is returned before the failure travels further, so an account is never left lent to a job that has ended |
 
 **Two things are not narrowed.** The page and its cursor are still written in one transaction, and the
 cursor a page is asked against is still the one read before asking: no other job can write that
-folder's cursor while the adapter is lent. And a reconnect — the token refresh an account the last run
+folder's cursor while the adapter is lent. That is why the lend spans the job rather than each round
+trip: an adapter returned between two pages could be lent to a second job, which could move the cursor
+the first is about to write past. And a reconnect — the token refresh an account the last run
 left behind needs before its first round trip — still runs under the hold, once per account per launch.
 
 **What it costs:** every held step has to tolerate the world having moved since the previous one. A
 step that assumed the account, its queue, or its selection were as it left them is a defect the old
 hold made impossible, and nothing but review prevents a new one.
 
-**Contestable because:** a gesture that needs the provider still waits for a round trip, so this
-narrows the stall rather than removing it; removing it would mean a second, independent conversation per
+**Contestable because:** a gesture that needs the provider still waits — for the whole job in flight,
+not one round trip — so this narrows the stall to the
+gestures that reach a provider rather than removing it; removing it would mean a second, independent conversation per
 account, which is a second connection's cost on every account at idle.
 
 ## Related

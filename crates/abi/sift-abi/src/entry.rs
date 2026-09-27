@@ -706,7 +706,8 @@ pub struct SiftFlush {
 /// an out-parameter for a call that has already returned. The flush a person never asked for —
 /// the wheel's, once a minute — runs on the worker (#49); this is the panel's deliberate one.
 ///
-/// It waits first for any round trip the worker has in flight, so that it finds its account's
+/// It waits first for any job the worker has in flight — a sync's whole turn, not only its
+/// current round trip — so that it finds its account's
 /// adapter home rather than lent, and then holds the session only across the queue work — its
 /// own round trip is made with the session released (D-122).
 ///
@@ -2429,8 +2430,9 @@ pub unsafe extern "C" fn sift_open_document(
             };
             let id = sift_foundation::identity::LocalId::from_u128(message.to_u128());
             let document = {
-                // The body comes from the provider, so this waits for a round trip the worker
-                // has in flight rather than finding the account's adapter out — D-122.
+                // The body comes from the provider, so this waits for the job the worker has in
+                // flight — its whole walk, not one round trip — rather than finding the
+                // account's adapter out — D-122.
                 let mut session = layer.session_settled()?;
                 let document = session
                     .app_mut()

@@ -1229,7 +1229,8 @@ impl App {
     }
 
     /// Whether any account's adapter is out — what a caller that needs a provider waits on
-    /// before it starts, so that it waits for one round trip rather than being refused.
+    /// before it starts, so that it waits for the job in flight — its whole walk, not one round
+    /// trip — rather than being refused.
     #[must_use]
     pub fn any_lent(&self) -> bool {
         self.accounts.values().any(|a| a.lent)

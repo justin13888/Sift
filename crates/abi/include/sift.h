@@ -1276,7 +1276,8 @@ SiftStatus sift_set_writes_enabled(SiftApp *app,
  * an out-parameter for a call that has already returned. The flush a person never asked for —
  * the wheel's, once a minute — runs on the worker (#49); this is the panel's deliberate one.
  *
- * It waits first for any round trip the worker has in flight, so that it finds its account's
+ * It waits first for any job the worker has in flight — a sync's whole turn, not only its
+ * current round trip — so that it finds its account's
  * adapter home rather than lent, and then holds the session only across the queue work — its
  * own round trip is made with the session released (D-122).
  *

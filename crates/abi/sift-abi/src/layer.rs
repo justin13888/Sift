@@ -253,7 +253,7 @@ impl<'a> Held<'a> {
     }
 
     /// For a call that reaches a provider from the shell's loop: its first step waits, with the
-    /// session released, for the round trip in flight — [`Layer::session_settled`] — and the
+    /// session released, for the job in flight to end — [`Layer::session_settled`] — and the
     /// rest take the lock as it is, because by then the adapter that is out is its own.
     pub(crate) fn after_settling(layer: &'a Layer) -> Self {
         Self {
@@ -283,11 +283,14 @@ impl sift_app::Locked for Held<'_> {
 impl Layer {
     /// The session, once no account's adapter is out — for a call that needs a provider.
     ///
-    /// **Waits for the round trip in flight, not for the walk.** A job lends an account's
-    /// adapter for its conversation with the provider and lets go of the session while it
-    /// talks, so a call that found the adapter out would otherwise have to be refused. This
-    /// waits with the session released, which is what lets the job reach its next held step
-    /// and give the adapter back. A call that needs no provider takes the session directly
+    /// **Waits for the job in flight, not only its current round trip.** A job borrows an
+    /// account's adapter for its whole length — a sync's turn, every page of every watched
+    /// folder up to its cap, or a flush's one batch — and lets go of the session for each round
+    /// trip, so a call that found the adapter out would otherwise have to be refused. This
+    /// waits with the session released, which is what lets the job reach its held steps and,
+    /// at its last, give the adapter back. The lend spans the job rather than one round trip
+    /// because a folder's cursor is read before a page is asked for and written after it, and
+    /// nothing else may move it in between (D-122). A call that needs no provider takes the session directly
     /// and never waits here.
     pub(crate) fn session_settled(&self) -> Result<MutexGuard<'_, Session>, ()> {
         let session = self.session.lock().map_err(|_| ())?;
