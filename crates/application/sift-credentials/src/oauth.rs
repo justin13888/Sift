@@ -42,11 +42,13 @@ pub enum AuthError {
     /// Checked **before** a flow starts, per D-36 — discovering it afterwards means the user
     /// has already been sent to a browser and returned to nothing.
     NoCallbackRegistration,
-    /// The profile asks for a scope that would authorize sending.
+    /// The profile asks for a scope named for sending, or one the adapter declared as adding
+    /// a submission path over the minimum.
     ///
-    /// The no-send constraint, where a reviewer can check it against an authorization
-    /// screen. This refuses to *begin*: a granted submission capability is an outbound
-    /// message path whether or not any code calls it.
+    /// D-88's check against scopes wider than the minimum for read, search and FR-13. This
+    /// refuses to *begin*: a granted submission capability beyond the minimum is an outbound
+    /// message path whether or not any code calls it. It does not prove the grant cannot
+    /// send; where the minimum itself can, no-send rests on the adapter's endpoint list.
     ScopeWouldAuthorizeSending,
     /// The callback matched no flow in progress.
     ///
@@ -498,7 +500,8 @@ mod tests {
 
     #[test]
     fn an_authorization_that_would_ask_for_a_sending_scope_never_starts() {
-        // The no-send constraint at the point a reviewer can check it: the consent screen.
+        // D-88's check against scopes wider than the minimum, made before the user is sent
+        // to a browser. It refuses a sending scope; it does not prove the minimum cannot send.
         let mut sending = registration();
         sending
             .profile
