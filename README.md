@@ -77,6 +77,9 @@ mise run harness -- "account authorize work <client-id>"
 mise run harness -- "account callback work com.googleusercontent.apps.<id>:/oauth2/callback?state=...&code=..."
 ```
 
+`account authorize <name> <client-id> graph` does the same for a Microsoft account; with no kind
+named it is the first one registered.
+
 The callback returns through a **registered URI scheme**, never a loopback address: NFR-24
 admits no listening socket for any purpose. The scope set is one scope, it is permanent, and
 it cannot send — which is the no-send constraint expressed where you can check it against the
@@ -108,9 +111,12 @@ three.
 committed:
 
 ```
-echo '123456789-abcdef.apps.googleusercontent.com' > shells/macos/oauth-client.txt
+echo '123456789-abcdef.apps.googleusercontent.com' > shells/macos/oauth-client.gmail.txt
 mise run macos -- --run
 ```
+
+(`shells/macos/oauth-client.txt`, the file's name before there were two providers, is still read
+when the new one is absent.)
 
 The build derives the callback scheme from the client (`com.googleusercontent.apps.123456789-abcdef`),
 registers it in the bundle, then **reads the built bundle back** and fails if it is not there —
@@ -118,9 +124,9 @@ so a build that would have sent you to a browser you could not return from stops
 It prints the client, the scheme, and the scheme the bundle actually registers:
 
 ```
-macos: OAuth client 123456789-abcdef.apps.googleusercontent.com
-       callback scheme com.googleusercontent.apps.123456789-abcdef
-       registers  com.googleusercontent.apps.123456789-abcdef
+macos: OAuth client gmail  123456789-abcdef.apps.googleusercontent.com
+       callback scheme     com.googleusercontent.apps.123456789-abcdef
+       registers   com.googleusercontent.apps.123456789-abcdef net.justinchung.sift
 ```
 
 There is **no client secret** to store: a public client cannot keep one, which is what PKCE
@@ -141,6 +147,38 @@ When you are satisfied, tick **Sift may change this mailbox** in that same windo
 move messages to Gmail's own Trash. It can never permanently delete one, and it can never send
 one. Untick it and anything not already issued stops again; what has left cannot be recalled,
 and Sift does not pretend otherwise.
+
+## Connecting a Microsoft account
+
+The same, with one client per provider: a build with both configured offers both in the
+add-account window, and a build with neither offers only the recorded mailbox. One client serves
+personal Outlook.com accounts and Microsoft 365 work or school accounts alike.
+
+**1. Register the application.** In the [Microsoft Entra admin
+center](https://entra.microsoft.com), under *App registrations*, create a **New registration**:
+
+- *Supported account types*: **Accounts in any organizational directory and personal Microsoft
+  accounts**. Sift signs in through the `common` authority, which admits both.
+- *Redirect URI*: platform **Public client/native (mobile & desktop)**, value
+  `net.justinchung.sift:/oauth2/callback` — Sift's own registered scheme. No loopback, for the
+  same NFR-24 reason as above.
+- Under *Authentication*, leave **Allow public client flows** at its default; Sift uses the
+  authorization-code flow with PKCE and has no secret. Create no client secret.
+- Under *API permissions*, the delegated Microsoft Graph permission **Mail.ReadWrite** is the
+  only one Sift asks for, with `offline_access` for the refresh token. It reads, searches, moves,
+  flags and deletes; **it cannot send**, and Sift never asks for `Mail.Send` or `.default`.
+
+**2. Point the build at it.** The *Application (client) ID* from the registration's overview:
+
+```
+echo '00000000-0000-0000-0000-000000000000' > shells/macos/oauth-client.graph.txt
+mise run macos -- --run
+```
+
+The build refuses a value that is not a GUID, and reads the bundle back as it does for Google.
+Microsoft offers a public client no endpoint to revoke its own grant, so removing the account
+erases it locally; revoke Sift's access from your Microsoft account's *Apps and services* page
+if you want the grant gone as well.
 
 The two native shells are [`crates/shells/sift-gtk`](crates/shells/sift-gtk) and
 [`shells/macos`](shells/macos/README.md), built by `mise run linux` and `mise run macos`.

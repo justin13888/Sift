@@ -314,8 +314,19 @@ pub fn read_token_answer(status: u16, body: &[u8]) -> TokenAnswer {
 /// read, search and the FR-13 intent set, so a narrower grant is an account that will fail
 /// later in a way nothing connects back to the consent screen — better to say so at the
 /// moment it happens.
+///
+/// **OpenID Connect's reserved scopes are not looked for in the answer.** They ask the
+/// authorization server for something — a refresh token, an identity token — rather than
+/// naming a permission on a resource, and a server may grant them without echoing them: the
+/// token endpoint's `scope` then lists only the resource permissions. Requiring the echo would
+/// refuse every account on such a provider for a grant it made in full.
+///
+/// Compared without regard to ASCII case, because a server may answer in the permission's
+/// canonical spelling rather than the one it was asked in, and case is not a narrower grant.
 #[must_use]
 pub fn granted_covers(requested: &[String], granted: Option<&str>) -> bool {
+    /// OpenID Connect Core §3.1.2.1 and §11.
+    const RESERVED: &[&str] = &["openid", "offline_access", "profile", "email"];
     let Some(granted) = granted else {
         // The provider did not say. Believed, because the alternative is refusing an account
         // over a field the specification makes optional.
@@ -324,7 +335,8 @@ pub fn granted_covers(requested: &[String], granted: Option<&str>) -> bool {
     let granted: Vec<&str> = granted.split_whitespace().collect();
     requested
         .iter()
-        .all(|want| granted.contains(&want.as_str()))
+        .filter(|want| !RESERVED.contains(&want.as_str()))
+        .all(|want| granted.iter().any(|g| g.eq_ignore_ascii_case(want)))
 }
 
 /// Pull one parameter out of a callback address.
@@ -571,6 +583,22 @@ mod tests {
         // A provider that does not say is believed: the field is optional, and refusing an
         // account over its absence would be worse than the failure it prevents.
         assert!(granted_covers(&want, None));
+    }
+
+    #[test]
+    fn a_reserved_scope_the_server_did_not_echo_is_not_a_narrower_grant() {
+        // The identity platform lists only resource permissions in `scope`, and grants the
+        // refresh token `offline_access` asked for by issuing one.
+        let want = vec![
+            "https://api.example.test/Mail.ReadWrite".to_owned(),
+            "offline_access".to_owned(),
+        ];
+        assert!(granted_covers(
+            &want,
+            Some("https://api.example.test/mail.readwrite")
+        ));
+        // A reserved scope is excused; a resource permission never is.
+        assert!(!granted_covers(&want, Some("offline_access")));
     }
 
     #[test]

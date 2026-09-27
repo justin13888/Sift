@@ -39,12 +39,13 @@ use sift_store::account::{Account, AccountPaths};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// What an account registered as a real mailbox is recorded as in the container.
+/// What an account registered as a real mailbox was recorded as **before its kind was**.
 ///
-/// Persisted, and read back on the next run to decide how to reconnect it. Not a provider
-/// name: D-12 keeps those below the adapter layer, and a second provider will resolve through
-/// the register rather than by widening this.
-pub const PROVIDER_KIND: &str = "provider";
+/// No longer written: a real account now records the register's opaque kind, because that is
+/// what the next run refreshes its token against. Still read, and resolved by the register to
+/// the only kind there was when it was written — see
+/// [`sift_registry::LEGACY_PROVIDER_KIND`].
+pub const PROVIDER_KIND: &str = sift_registry::LEGACY_PROVIDER_KIND;
 
 /// The same for D-65's recorded corpus, which reconnects to no network and no credential.
 pub const REPLAYED_KIND: &str = "replayed";
@@ -235,8 +236,9 @@ pub struct App {
     /// The shell asks it to begin a flow and to complete one; it never reads a token, and
     /// there is no path from here to the credential store that does not go through it.
     pub broker: sift_credentials::oauth::Broker<sift_credentials::store::Platform>,
-    /// Authorizations begun but not yet returned from, by account name.
-    pub pending_authorization: BTreeMap<String, String>,
+    /// Authorizations begun but not yet returned from, by account name, with the kind and the
+    /// client each was begun for — the callback is redeemable only against those.
+    pub pending_authorization: BTreeMap<String, (sift_registry::ProviderKind, String)>,
     /// D-99: a set keyed on identity with an anchor, cleared by a scope change.
     /// D-28's capability tokens, and the answers behind them.
     ///
@@ -250,26 +252,34 @@ pub struct App {
     pub selection: Vec<LocalId>,
     pub open_message: Option<LocalId>,
     pub has_window: bool,
-    /// D-71 — whether the callback scheme this installation needs is one this shell claims.
+    /// D-71 — every URI scheme the shell's bundle claims.
     ///
     /// A bundle is what registers a scheme and the layer is not one, so the *fact* is the
     /// shell's. The **conclusion** is not, and that distinction was bought: the macOS shell
     /// used to pass a constant `true` beside a comment asserting its Info.plist registered the
     /// scheme, and when a configuration shipped without it the layer was told the opposite of
     /// the truth, D-71's refusal could not fire, and a user granted consent and came back to
-    /// nothing. Across the ABI a shell now reports the schemes it claims and the layer decides.
+    /// nothing. Across the ABI a shell now reports the schemes it claims and the layer decides
+    /// — per client, through [`App::scheme_is_registered`], because two providers' clients
+    /// can require two different schemes.
     ///
     /// It gates the *start* of an authorization rather than the end, which is the whole point:
     /// discovering it afterwards means the browser page is the first anyone hears of it.
-    pub scheme_is_registered: bool,
-    /// The OAuth client this installation is configured with — empty where there is none.
+    pub registered_schemes: Vec<String>,
+    /// The OAuth client configured for each provider kind, by the kind's opaque string.
+    ///
+    /// **One per kind, because a client belongs to one provider.** An identifier issued by one
+    /// identity platform means nothing to another, so a single installation-wide client could
+    /// only ever sign in to one provider — and the refresh that reconnected an account used it
+    /// against whichever provider happened to be first.
     ///
     /// Per-installation configuration rather than a secret: a public client's identifier
     /// appears in every authorization URL it generates, which is why PKCE exists. The layer
-    /// holds it because three things need it and none of them should hold their own copy —
-    /// the scheme derivation, the authorization it begins, and the refresh that reconnects an
-    /// account the last run left behind.
-    pub oauth_client_id: String,
+    /// holds them because three things need them and none of them should hold their own copy
+    /// — the scheme derivation, the authorization it begins, and the refresh that reconnects
+    /// an account the last run left behind. A kind absent here is a kind this installation
+    /// cannot add.
+    pub oauth_clients: BTreeMap<String, String>,
     pub root: Option<PathBuf>,
     /// The installation container, where one has been opened.
     ///
@@ -371,8 +381,8 @@ impl App {
             selection: Vec::new(),
             open_message: None,
             has_window: false,
-            scheme_is_registered: false,
-            oauth_client_id: String::new(),
+            registered_schemes: Vec::new(),
+            oauth_clients: BTreeMap::new(),
             root: None,
             container: None,
             next_intent: 0,
@@ -469,8 +479,55 @@ impl App {
     /// Its capability set comes from the adapter rather than from a name, which is the
     /// difference between this and [`Self::add_account`]: a shape is something a test picks,
     /// and this is what an account actually declares.
-    pub fn add_provider_account(&mut self, name: &str, adapter: Live) -> Result<AccountId, String> {
-        self.add_account_of_kind(name, adapter, PROVIDER_KIND)
+    ///
+    /// **The kind is recorded**, because it is what the next run refreshes the account's token
+    /// against. It is the register's opaque string, persisted and handed back, never branched
+    /// on here.
+    ///
+    /// # Errors
+    /// The account could not be created.
+    pub fn add_provider_account(
+        &mut self,
+        name: &str,
+        kind: sift_registry::ProviderKind,
+        adapter: Live,
+    ) -> Result<AccountId, String> {
+        self.add_account_of_kind(name, adapter, kind.as_str())
+    }
+
+    /// Configure the OAuth clients from the shell's statement of them: one `kind=client` per
+    /// line.
+    ///
+    /// A line naming a kind this build does not have is ignored rather than refused — a
+    /// bundle configured by a newer build is still a bundle that can sign in to the kinds this
+    /// one knows. An empty client is the same as none.
+    pub fn configure_oauth_clients(&mut self, stated: &str) {
+        self.oauth_clients = stated
+            .lines()
+            .filter_map(|line| {
+                let (kind, client) = line.split_once('=')?;
+                let (kind, client) = (kind.trim(), client.trim());
+                (authorize::kind(kind).is_some() && !client.is_empty())
+                    .then(|| (kind.to_owned(), client.to_owned()))
+            })
+            .collect();
+    }
+
+    /// The client configured for a kind, if there is one.
+    #[must_use]
+    pub fn oauth_client(&self, kind: &str) -> Option<&str> {
+        self.oauth_clients.get(kind).map(String::as_str)
+    }
+
+    /// D-71 — whether this client's callback scheme is one the shell's bundle claims.
+    #[must_use]
+    pub fn scheme_is_registered(&self, client_id: &str) -> bool {
+        let required = sift_foundation::identifiers::callback_scheme_for(client_id);
+        !client_id.is_empty()
+            && self
+                .registered_schemes
+                .iter()
+                .any(|claimed| claimed.trim() == required)
     }
 
     /// The same, saying what a later run should reconnect it as.
@@ -904,23 +961,33 @@ impl App {
     /// configured, or the credential store or the provider refused.
     pub fn reconnect(&mut self, name: &str) -> Result<(), String> {
         let kind = self.account(name)?.kind.clone();
-        let descriptor = sift_registry::KINDS
-            .first()
-            .ok_or("this build has no provider adapters")?;
 
-        // **Not a `match` over provider names.** The registry column is documented as a name
-        // rather than something to branch on, and it will hold a real provider kind as soon as
-        // there is a second one — so this asks the two questions it can answer instead. Is it
-        // the recorded corpus? Is it one of the capability shapes the planner tests use? Every
-        // other value is an account with a provider behind it, which keeps a future `gmail`
-        // out of the arm that reports it as a shape.
+        // **Not a `match` over provider names.** The registry column holds the register's
+        // opaque kind, and this asks the questions it can answer about it instead. Is it the
+        // recorded corpus? Is it one of the capability shapes the planner tests use? Every
+        // other value is an account with a provider behind it, resolved through the register —
+        // which keeps a real kind out of the arm that reports it as a shape.
         let adapter = if kind == REPLAYED_KIND {
-            descriptor.replayed()
+            sift_registry::KINDS
+                .first()
+                .ok_or("this build has no provider adapters")?
+                .replayed()
         } else if shape_named(&kind).is_ok() {
             return Err(format!(
                 "`{name}` is a capability shape rather than an account with a provider"
             ));
         } else {
+            // **The account's own kind, never the first one registered.** Every step of a
+            // refresh — which client, which token endpoint, which adapter — follows from it,
+            // and resolving "the first" here sent a second provider's refresh token to the
+            // first provider. A row written before the kind was recorded resolves through the
+            // register's legacy rule rather than here.
+            let descriptor = sift_registry::by_persisted(&kind).ok_or_else(|| {
+                format!(
+                    "`{name}` was added by a build with a provider this one does not have, so \
+                     it cannot be reached"
+                )
+            })?;
             // A container written before the corpus had a kind of its own records a fixture
             // account as a provider. It has no credentials, and asking the store first is what
             // turns that into a sentence naming the account rather than a store error naming
@@ -929,13 +996,16 @@ impl App {
             // The local question first, so a build with no client never reaches the credential
             // store — which on this platform means never prompting for keychain access to
             // answer something already decided.
-            if self.oauth_client_id.is_empty() {
+            let Some(client) = self
+                .oauth_client(descriptor.kind.as_str())
+                .map(str::to_owned)
+            else {
                 return Err(
-                    "this build has no OAuth client configured, so an account it did not add \
-                     cannot be reached"
+                    "this build has no OAuth client configured for this account's provider, \
+                     so an account it did not add cannot be reached"
                         .to_owned(),
                 );
-            }
+            };
             let id = self.account(name)?.id;
             if self.broker.usable(id).is_err() {
                 return Err(format!(
@@ -943,8 +1013,7 @@ impl App {
                      Remove it and add it again."
                 ));
             }
-            let registration =
-                authorize::registration(authorize::default_kind(), &self.oauth_client_id.clone())?;
+            let registration = authorize::registration(descriptor.kind, &client)?;
             let mut transport = sift_http::Https::to(&registration.profile.token.host)
                 .map_err(|why| format!("the trust store could not be consulted: {why}"))?;
             let pair = match self.broker.refresh(&mut transport, &registration, id) {

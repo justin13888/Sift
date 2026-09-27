@@ -23,8 +23,9 @@ options:
     macOS: "13.0"
   createIntermediateGroups: true
 
-# The OAuth client, and the callback scheme derived from it — `SIFT_OAUTH_CLIENT_ID` and
-# `SIFT_OAUTH_SCHEME`, which `Info.plist` substitutes.
+# The OAuth clients, one per provider kind, and the callback scheme derived from the one that
+# needs a derived scheme — `SIFT_OAUTH_CLIENT_ID_<KIND>` and `SIFT_OAUTH_SCHEME`, which
+# `Info.plist` substitutes.
 #
 # **In a file, because they were in the environment and that is what broke.** These two were
 # written here as `${SIFT_OAUTH_CLIENT_ID:-}` and `${SIFT_OAUTH_SCHEME:-net.justinchung.sift}`.

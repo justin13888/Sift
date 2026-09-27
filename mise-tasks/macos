@@ -76,41 +76,82 @@ archive="target/$([[ "$configuration" == "Release" ]] && echo release || echo de
 # D-60 — the committed header matches the ABI crate. `mise run bless-header` regenerates it.
 cargo xtask header
 
-# The OAuth client, and the callback scheme derived from it.
+# The OAuth clients — **one per provider kind** — and the callback scheme derived from each.
 #
 # **Configuration, not a secret.** A client identifier for a public client appears in every
 # authorization URL it generates — that is why PKCE exists — so this is not withheld for
 # secrecy. It is out of the repository because it is per-installation: baking one in would make
-# every checkout share one client, and Google's quota, verification status and consent screen
-# all attach to the client rather than to the application.
+# every checkout share one client, and a provider's quota, verification status and consent
+# screen all attach to the client rather than to the application.
+#
+# One per kind because a client belongs to one identity platform: an identifier Google issued
+# means nothing to Microsoft's. The kinds are the register's opaque strings
+# (`crates/providers/sift-registry`), and a kind with no client is absent from the add-account
+# choices rather than offered and broken.
+#
+#   kind   file                                   environment
+#   gmail  shells/macos/oauth-client.gmail.txt    SIFT_OAUTH_CLIENT_ID_GMAIL
+#          shells/macos/oauth-client.txt          SIFT_OAUTH_CLIENT_ID      (before there were two)
+#   graph  shells/macos/oauth-client.graph.txt    SIFT_OAUTH_CLIENT_ID_GRAPH
 #
 # The scheme is **derived** rather than configured separately, so the two cannot disagree.
 # Google's iOS/macOS client type accepts exactly one redirect scheme — the client identifier
 # reversed — and its Desktop type wants a 127.0.0.1 loopback, which NFR-24 forbids outright.
-client_file="shells/macos/oauth-client.txt"
-if [[ -z "${SIFT_OAUTH_CLIENT_ID:-}" && -f "$client_file" ]]; then
-    SIFT_OAUTH_CLIENT_ID="$(tr -d '[:space:]' < "$client_file")"
+# Microsoft's mobile-and-desktop client names its own redirect, so it returns on Sift's scheme,
+# which the bundle always registers.
+read_client() {
+    local variable="$1"
+    shift
+    local value="${!variable:-}"
+    local file
+    for file in "$@"; do
+        if [[ -z "$value" && -f "$file" ]]; then
+            value="$(tr -d '[:space:]' < "$file")"
+        fi
+    done
+    printf '%s' "$value"
+}
+SIFT_OAUTH_CLIENT_ID_GMAIL="$(read_client SIFT_OAUTH_CLIENT_ID_GMAIL shells/macos/oauth-client.gmail.txt)"
+if [[ -z "$SIFT_OAUTH_CLIENT_ID_GMAIL" ]]; then
+    SIFT_OAUTH_CLIENT_ID_GMAIL="$(read_client SIFT_OAUTH_CLIENT_ID shells/macos/oauth-client.txt)"
 fi
-export SIFT_OAUTH_CLIENT_ID="${SIFT_OAUTH_CLIENT_ID:-}"
+SIFT_OAUTH_CLIENT_ID_GRAPH="$(read_client SIFT_OAUTH_CLIENT_ID_GRAPH shells/macos/oauth-client.graph.txt)"
+export SIFT_OAUTH_CLIENT_ID_GMAIL SIFT_OAUTH_CLIENT_ID_GRAPH
 
-if [[ -n "$SIFT_OAUTH_CLIENT_ID" ]]; then
-    case "$SIFT_OAUTH_CLIENT_ID" in
+# The scheme the Google client requires. It is the one URL type whose scheme varies, so it is
+# the one this task has to write; Sift's own is registered unconditionally by `Info.plist`.
+export SIFT_OAUTH_SCHEME="net.justinchung.sift"
+if [[ -n "$SIFT_OAUTH_CLIENT_ID_GMAIL" ]]; then
+    case "$SIFT_OAUTH_CLIENT_ID_GMAIL" in
         *.apps.googleusercontent.com)
-            export SIFT_OAUTH_SCHEME="com.googleusercontent.apps.${SIFT_OAUTH_CLIENT_ID%.apps.googleusercontent.com}"
+            SIFT_OAUTH_SCHEME="com.googleusercontent.apps.${SIFT_OAUTH_CLIENT_ID_GMAIL%.apps.googleusercontent.com}"
             ;;
         *)
-            echo "macos: SIFT_OAUTH_CLIENT_ID does not look like a Google client identifier," >&2
-            echo "       so the callback scheme falls back to Sift's own. If your provider" >&2
-            echo "       requires a derived scheme, this build will not complete a sign-in." >&2
-            export SIFT_OAUTH_SCHEME="net.justinchung.sift"
+            echo "macos: the gmail client does not look like a Google client identifier" >&2
+            echo "       (…apps.googleusercontent.com). The only Google client type that can" >&2
+            echo "       sign in without a loopback is the iOS type, and its identifiers end" >&2
+            echo "       that way — this build will not complete a Google sign-in." >&2
+            exit 1
             ;;
     esac
-    echo "macos: OAuth client $SIFT_OAUTH_CLIENT_ID"
-    echo "       callback scheme $SIFT_OAUTH_SCHEME"
-else
-    export SIFT_OAUTH_SCHEME="net.justinchung.sift"
+    echo "macos: OAuth client gmail  $SIFT_OAUTH_CLIENT_ID_GMAIL"
+    echo "       callback scheme     $SIFT_OAUTH_SCHEME"
+fi
+if [[ -n "$SIFT_OAUTH_CLIENT_ID_GRAPH" ]]; then
+    # An application (client) identifier on the identity platform is a GUID. Anything else is a
+    # value pasted into the wrong file, and would fail at the consent screen.
+    if [[ ! "$SIFT_OAUTH_CLIENT_ID_GRAPH" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+        echo "macos: the graph client is not an application (client) ID — expected a GUID," >&2
+        echo "       got '$SIFT_OAUTH_CLIENT_ID_GRAPH'." >&2
+        exit 1
+    fi
+    echo "macos: OAuth client graph  $SIFT_OAUTH_CLIENT_ID_GRAPH"
+    echo "       callback scheme     net.justinchung.sift"
+fi
+if [[ -z "$SIFT_OAUTH_CLIENT_ID_GMAIL$SIFT_OAUTH_CLIENT_ID_GRAPH" ]]; then
     echo "macos: no OAuth client configured — this build runs against fixtures only."
-    echo "       Put one in $client_file, or set SIFT_OAUTH_CLIENT_ID, to sign in to a real account."
+    echo "       Put one in shells/macos/oauth-client.<kind>.txt, or set"
+    echo "       SIFT_OAUTH_CLIENT_ID_<KIND>, to sign in to a real account."
 fi
 
 # **Written to a file rather than left in the environment.** These two reached the bundle by
@@ -131,8 +172,9 @@ xcconfig="shells/macos/OAuthClient.xcconfig"
 cat >"$xcconfig" <<XCCONFIG
 // Generated by \`mise run macos\`. Not committed, and not a secret: a public client's
 // identifier appears in every authorization URL it generates, which is why PKCE exists.
-// It is per-installation configuration — see \`shells/macos/oauth-client.txt\`.
-SIFT_OAUTH_CLIENT_ID = $SIFT_OAUTH_CLIENT_ID
+// It is per-installation configuration — see \`mise-tasks/macos\`.
+SIFT_OAUTH_CLIENT_ID_GMAIL = $SIFT_OAUTH_CLIENT_ID_GMAIL
+SIFT_OAUTH_CLIENT_ID_GRAPH = $SIFT_OAUTH_CLIENT_ID_GRAPH
 SIFT_OAUTH_SCHEME = $SIFT_OAUTH_SCHEME
 XCCONFIG
 
@@ -142,12 +184,13 @@ xcodegen generate --spec shells/macos/project.yml --project shells/macos --quiet
 # reason this task exists at all: a flag written twice is a flag that disagrees with itself.
 #
 # **`env -u` is doing real work.** `xcodebuild` treats an exported variable as a build-setting
-# override, so a build run from this shell would pick up `SIFT_OAUTH_CLIENT_ID` and
-# `SIFT_OAUTH_SCHEME` whether or not the project wires them — which is exactly how the previous
-# arrangement appeared to work while wiring nothing, and it would make the check below compare
-# this shell against itself. Unsetting them for the build leaves the xcconfig as the only route,
-# so the check afterwards is a statement about the project rather than about this environment.
-env -u SIFT_OAUTH_CLIENT_ID -u SIFT_OAUTH_SCHEME \
+# override, so a build run from this shell would pick up the `SIFT_OAUTH_*` settings whether or
+# not the project wires them — which is exactly how the previous arrangement appeared to work
+# while wiring nothing, and it would make the check below compare this shell against itself.
+# Unsetting them for the build leaves the xcconfig as the only route, so the check afterwards is
+# a statement about the project rather than about this environment.
+env -u SIFT_OAUTH_CLIENT_ID -u SIFT_OAUTH_CLIENT_ID_GMAIL -u SIFT_OAUTH_CLIENT_ID_GRAPH \
+    -u SIFT_OAUTH_SCHEME \
 xcodebuild \
     -project shells/macos/Sift.xcodeproj \
     -scheme Sift \
@@ -167,15 +210,21 @@ echo "macos: built $app"
 # that a registration which did not install be caught before a flow starts; this is the
 # earliest place it can be caught at all.
 plist="$app/Contents/Info.plist"
-built_client="$(plutil -extract SiftOAuthClientID raw -o - "$plist" 2>/dev/null || true)"
-if [[ "$built_client" != "$SIFT_OAUTH_CLIENT_ID" ]]; then
-    echo "macos: the bundle was configured with a client this build did not put in it." >&2
-    echo "       configured: ${SIFT_OAUTH_CLIENT_ID:-<none>}" >&2
-    echo "       in bundle:  ${built_client:-<absent>}" >&2
-    echo "       An Info.plist key whose expansion is empty is removed rather than emptied," >&2
-    echo "       so <absent> means the build setting did not resolve. Check $xcconfig." >&2
-    exit 1
-fi
+for kind in gmail graph; do
+    case "$kind" in
+        gmail) configured="$SIFT_OAUTH_CLIENT_ID_GMAIL" ;;
+        graph) configured="$SIFT_OAUTH_CLIENT_ID_GRAPH" ;;
+    esac
+    built_client="$(plutil -extract "SiftOAuthClients.$kind" raw -o - "$plist" 2>/dev/null || true)"
+    if [[ "$built_client" != "$configured" ]]; then
+        echo "macos: the bundle was configured with a $kind client this build did not put in it." >&2
+        echo "       configured: ${configured:-<none>}" >&2
+        echo "       in bundle:  ${built_client:-<absent>}" >&2
+        echo "       An Info.plist key whose expansion is empty is removed rather than emptied," >&2
+        echo "       so <absent> means the build setting did not resolve. Check $xcconfig." >&2
+        exit 1
+    fi
+done
 
 # Every scheme the bundle claims, one per line. The derived one has to be among them, and on a
 # build with no client that *is* Sift's own — which is why this compares against the resolved
@@ -194,14 +243,18 @@ for i in 0 1 2 3 4 5 6 7; do
         built_schemes+="$scheme"$'\n'
     done
 done
-if ! grep -qxF "$SIFT_OAUTH_SCHEME" <<<"$built_schemes"; then
-    echo "macos: the bundle does not register the callback scheme this build derived." >&2
-    echo "       expected: $SIFT_OAUTH_SCHEME" >&2
-    echo "       claims:   $(tr '\n' ' ' <<<"$built_schemes")" >&2
-    echo "       An authorization would be sent to a browser it could not return from." >&2
-    exit 1
-fi
-echo "       registers  $SIFT_OAUTH_SCHEME"
+# Sift's own scheme is required whatever is configured — the graph client returns on it, and
+# D-109 registers it regardless — and the derived one is required where a gmail client is.
+for required in "$SIFT_OAUTH_SCHEME" net.justinchung.sift; do
+    if ! grep -qxF "$required" <<<"$built_schemes"; then
+        echo "macos: the bundle does not register a callback scheme this build requires." >&2
+        echo "       expected: $required" >&2
+        echo "       claims:   $(tr '\n' ' ' <<<"$built_schemes")" >&2
+        echo "       An authorization would be sent to a browser it could not return from." >&2
+        exit 1
+    fi
+done
+echo "       registers  $(sort -u <<<"$built_schemes" | tr '\n' ' ')"
 
 if [[ "$launch" == true ]]; then
     # LaunchServices reports canonical paths; `$PWD` is whatever MISE_PROJECT_ROOT said. A

@@ -63,6 +63,37 @@ supported for production use. So the declared value is **folder move only**, and
 report that is secretly one. If the report call reaches the stable API, this row returns to *native
 report* by amendment.
 
+## Authorization
+
+A public client with PKCE and no secret, per [D-88](../../security/credentials.md), returning through
+Sift's own registered URI scheme under [D-36](../../security/credentials.md) — never a loopback,
+which NFR-24 forbids. The identity platform lets a mobile-and-desktop client name its own redirect, so
+unlike Gmail the scheme is not derived from the client identifier.
+
+**One authority serves both kinds of account.** The platform's *common* authority admits personal
+accounts and work or school accounts alike, and the platform decides which directory holds the one a
+person signs in with. Choosing an authority per account type would be the tenant branch D-12 forbids.
+
+**The scope set is two scopes, and it is permanent:**
+
+- the Graph resource's *read-write mail* permission — read, search, and every FR-13 intent this adapter
+  declares, including permanent delete. It carries no submission right: the platform puts sending behind
+  a permission of its own;
+- *offline access* — the refresh token FR-2's silent refresh depends on. Without it the account stops
+  working an hour after it is added.
+
+No send permission is ever requested, and neither is a resource's *default* scope, which grants whatever
+the client registration statically lists and so would let a send permission added in a portal reach the
+consent screen without a code change. Both are declared to the profile as sending scopes, so asking for
+either fails a test rather than a review. Widening the set later forces the entire install base through
+re-consent, which is why D-88 calls it a minimum.
+
+The authorization asks the platform to show its account chooser, because the browser session is shared
+and a person adding a second mailbox would otherwise be handed straight back as the first.
+
+**Revocation is not offered.** The platform has no endpoint for a public client to revoke its own grant,
+so FR-4's erasure — which is local and provable — is the whole of removal on this provider.
+
 ## Client
 
 A hand-written subset covering the mail surface, with CI diffing the types against the published schema,

@@ -20,3 +20,4 @@ sift-provider.workspace = true
 # `cargo xtask arch` checks that of the adapters themselves, and none of them depends on this.
 sift-http.workspace = true
 sift-gmail.workspace = true
+sift-graph.workspace = true

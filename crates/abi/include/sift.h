@@ -361,14 +361,24 @@ typedef struct {
    */
   SiftArmTimer arm_timer;
   /**
-   * The OAuth client this bundle was configured with — empty where there is none.
+   * The OAuth clients this bundle was configured with, one `kind=client` per line — empty
+   * where there are none.
+   *
+   * **Keyed by the register's opaque kind string, never by a provider name.** D-12 keeps
+   * the name out of this boundary; a kind is a string the layer hands out through
+   * `sift_providers` and takes back, and a shell copies it from its bundle without reading
+   * it. One client per kind, because an identifier one identity platform issued means
+   * nothing to another. A kind with none is absent from the add-account choices.
    *
    * **Configuration, not a secret.** A public client's identifier appears in every
    * authorization URL it generates, which is why PKCE exists; D-88 forbids an embedded
    * secret outright. It is stated once, here, rather than repeated at every call, because
    * the layer needs it for three things a shell should not be answering separately.
+   *
+   * Neither a kind nor a client identifier contains a newline or `=`, so this needs no
+   * escaping.
    */
-  SiftStr oauth_client_id;
+  SiftStr oauth_clients;
   /**
    * Every URI scheme this shell's bundle claims, separated by newlines — D-36 and D-109.
    *
@@ -587,6 +597,44 @@ typedef struct {
    */
   uint8_t failed;
 } SiftFlush;
+
+/**
+ * One choice in the add-account surface.
+ *
+ * **A shell renders it and hands the kind back; it never reads either.** `kind` is the
+ * register's opaque string and `display_key` is a state identifier the shell translates —
+ * D-56 and D-68 keep Sift's own prose, a provider's display name included, out of every layer
+ * below the shell. So no shell names a provider in logic: it looks up a label by key and
+ * passes the kind to [`sift_begin_authorization`].
+ */
+typedef struct {
+  SiftStr kind;
+  SiftStr display_key;
+  /**
+   * D-71 — whether this bundle claims the scheme this kind's client returns on. A choice
+   * that cannot receive its callback is still listed, so the shell can say *why* it cannot
+   * begin; beginning it is refused either way.
+   */
+  uint8_t scheme_registered;
+} SiftProvider;
+
+/**
+ * A contiguous, borrowed array of fixed-layout records.
+ *
+ * The alternative — an opaque row handle with a per-field accessor — was excluded
+ * arithmetically rather than on taste. FR-6's list row carries about ten fields, and
+ * NFR-6 requires 60 fps with **zero dropped frames over a 10,000-row fling**. That is a
+ * hundred thousand boundary crossings per fling, against one delivery.
+ *
+ * # Safety
+ *
+ * Borrowed for the duration of the delivery. Each record's text fields are [`SiftStr`]
+ * pointing into layer-owned storage with the same lifetime.
+ */
+typedef struct {
+  const SiftProvider *ptr;
+  size_t len;
+} SiftRows_SiftProvider;
 
 /**
  * What a search found, and what it understood.
@@ -1215,19 +1263,35 @@ SiftStatus sift_undo_last(SiftApp *app, SiftGesture *out);
  * to stop two shells growing two answers to a question like that, so the derivation stays in
  * `sift-foundation` and this is how a shell reaches it.
  *
- * It is derived from the client this installation was configured with, which the layer was
- * given at initialization — so a shell that asks this and a flow that declares a redirect
- * cannot answer differently.
+ * It is derived from the client this installation was configured with **for `kind`**, which
+ * the layer was given at initialization — so a shell that asks this and a flow that declares
+ * a redirect cannot answer differently. Two kinds can require two different schemes.
  *
  * A shell needs it to tell the platform which scheme a callback will arrive on. It is empty
- * where no client is configured, and a shell must not begin an authorization in that case.
+ * where no client is configured for the kind, and a shell must not begin an authorization in
+ * that case.
  *
  * The string lives in the layer until the next call that asks for one.
  *
  * # Safety
+ * `app` and `out` must be valid; `kind` must point to `kind_len` bytes of UTF-8.
+ */
+SiftStatus sift_callback_scheme(SiftApp *app, const uint8_t *kind, size_t kind_len, SiftStr *out);
+
+/**
+ * Every provider this installation can add an account of, in the register's order.
+ *
+ * A kind with no client configured is **absent**, not offered and broken — the rule the
+ * capability model applies to every other affordance. An empty list is a build with no
+ * client at all, which runs against the recorded corpus.
+ *
+ * The rows are borrowed until the next call; the text they point at is the register's and
+ * lives for the process.
+ *
+ * # Safety
  * `app` and `out` must be valid.
  */
-SiftStatus sift_callback_scheme(SiftApp *app, SiftStr *out);
+SiftStatus sift_providers(SiftApp *app, SiftRows_SiftProvider *out);
 
 /**
  * D-36 — begin an authorization, and hand back the address to open in a browser.
@@ -1240,14 +1304,18 @@ SiftStatus sift_callback_scheme(SiftApp *app, SiftStr *out);
  * verifier behind it is: PKCE binds the exchange to the process that started it, and a shell
  * holding the state would be a shell that could be asked to complete a flow it did not begin.
  *
- * The client is the one this installation was configured with, stated at initialization. It
- * is not a parameter because it was one: a shell repeating it at every call is a shell that
- * can disagree with the bundle it is running out of.
+ * `kind` is one a [`sift_providers`] row handed out. The client is the one this installation
+ * was configured with for it, stated at initialization. It is not a parameter because it
+ * was one: a shell repeating it at every call is a shell that can disagree with the bundle it
+ * is running out of. A kind this build does not have, or has no client for, is refused.
  *
  * # Safety
- * `app` and `out` must be valid.
+ * `app` and `out` must be valid; `kind` must point to `kind_len` bytes of UTF-8.
  */
-SiftStatus sift_begin_authorization(SiftApp *app, SiftStr *out);
+SiftStatus sift_begin_authorization(SiftApp *app,
+                                    const uint8_t *kind,
+                                    size_t kind_len,
+                                    SiftStr *out);
 
 /**
  * Finish an authorization from the address the system handed back, and add the account.
