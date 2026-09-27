@@ -8,6 +8,8 @@ use sift_foundation::limits::{
     L10_IMAGE_BYTES, L11_DECODE_PIXELS, L12_RASTER_PIXELS, L13_FETCH_BYTES, L29_DOC_CONCURRENCY,
 };
 use std::collections::BTreeMap;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Instant;
 
 /// One of exactly three answers.
 ///
@@ -45,6 +47,10 @@ pub enum Reason {
     NetworkPolicy,
     /// A bound in the limits register. Checked **before any decoder is handed bytes**.
     Bounds(&'static str),
+    /// D-29's bounded structural validation refused what arrived: not a format the broker
+    /// passes through, a vector image, or a header that does not describe a real image.
+    /// Carries which, because "blocked" with no reason sends a reader looking for a rule.
+    Validation(&'static str),
     /// No blocking authority is loaded.
     ///
     /// **Names the shed rather than a rule**, because there was no rule. Telling a user
@@ -97,8 +103,10 @@ pub struct Document {
     /// D-91 bounds per-document concurrency at L-29 and **queues beyond it rather than
     /// failing**: one message with several hundred fetching positions must not saturate the
     /// pool the store, the queue and search share.
-    in_flight: usize,
-    queued: usize,
+    ///
+    /// Shared with every [`Grant`] issued under this document, because a fetch runs off the
+    /// broker's lock and must still learn of revocation and give its slot back.
+    slots: Arc<Slots>,
     /// FR-8's *load once*: this open document may fetch, and nothing outlives it.
     ///
     /// **Per document rather than per sender, and that is the distinction the two controls
@@ -118,12 +126,118 @@ pub struct Request {
     pub transferred_length: Option<u64>,
 }
 
+/// One document's fetch slots, shared between the broker and every fetch it granted.
+#[derive(Debug, Default)]
+pub(crate) struct Slots {
+    state: Mutex<SlotState>,
+    /// Signalled when a slot is given back and when the document is revoked.
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SlotState {
+    pub(crate) in_flight: usize,
+    revoked: bool,
+}
+
+impl Slots {
+    /// The state, whether or not a holder panicked. The lock guards two words of bookkeeping
+    /// that no panic can leave half-written, and refusing every later fetch because of one
+    /// would be a message whose images never load for a reason nobody can see.
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, SlotState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn revoke(&self) {
+        self.lock().revoked = true;
+        self.changed.notify_all();
+    }
+}
+
+/// What fetching one allowed resource needs: where it lives, and a claim on a slot.
+///
+/// Issued by [`Broker::grant`] under the broker's lock and carried away from it, so the fetch
+/// itself runs with nothing held that the store, the queue or the next request waits on.
+/// **A grant does not outlive its document in any way that matters**: revoking the token
+/// wakes a grant waiting for a slot and fails every later read, so a fetch in flight at
+/// navigation is cancelled and answered rather than left to complete into nothing.
+#[derive(Debug)]
+pub struct Grant {
+    /// The remote address the position named. The one place it leaves the broker, and only
+    /// for a position every check has passed.
+    pub url: String,
+    /// What the message declared about the resource's length, where it said.
+    pub declared_length: Option<u64>,
+    slots: Arc<Slots>,
+    /// Whether this grant holds a slot, so that dropping it gives back exactly what it took.
+    held: bool,
+}
+
+impl Grant {
+    /// Wait for one of the document's L-29 slots, until `deadline`.
+    ///
+    /// **Queues rather than fails** — refusing a legitimate image because eight others were
+    /// already loading would be a rendering defect wearing a safety argument. The wait is
+    /// bounded, because D-91 gives every load a deadline, and it ends early at revocation.
+    ///
+    /// # Errors
+    /// [`Unavailable::Revoked`] where the document went while waiting, and
+    /// [`Unavailable::Deadline`] where no slot came free in time.
+    pub fn acquire(&mut self, deadline: Instant) -> Result<(), Unavailable> {
+        if self.held {
+            return Ok(());
+        }
+        let bound = usize::try_from(L29_DOC_CONCURRENCY).unwrap_or(usize::MAX);
+        let mut state = self.slots.lock();
+        loop {
+            if state.revoked {
+                return Err(Unavailable::Revoked);
+            }
+            if state.in_flight < bound {
+                state.in_flight += 1;
+                self.held = true;
+                return Ok(());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(Unavailable::Deadline);
+            }
+            state = self
+                .slots
+                .changed
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// Whether the document this was granted under has since been revoked.
+    #[must_use]
+    pub fn is_revoked(&self) -> bool {
+        self.slots.lock().revoked
+    }
+}
+
+impl Drop for Grant {
+    fn drop(&mut self) {
+        if self.held {
+            self.slots.lock().in_flight -= 1;
+            self.slots.changed.notify_one();
+        }
+    }
+}
+
 /// The broker.
 #[derive(Debug, Default)]
 pub struct Broker {
     documents: BTreeMap<String, Document>,
-    /// Whether the active network policy tier permits fetching at all.
+    /// Whether the active network policy tier permits a fetch the user asked for.
     pub tier_permits_fetch: bool,
+    /// Whether it permits one nobody asked for yet — NFR-32's zero speculative prefetch
+    /// outside Unrestricted. Separate from the field above because the two differ in
+    /// Conservative and Minimal, where a reader's allowed image loads and nothing is fetched
+    /// ahead of being shown.
+    pub tier_permits_prefetch: bool,
     /// Senders the user has explicitly allowed — FR-8. Keyed on the **attested synthetic
     /// origin**, never on a displayed sender: this is security state, and write access to it
     /// is write access to Sift's egress policy.
@@ -136,6 +250,7 @@ impl Broker {
         Self {
             documents: BTreeMap::new(),
             tier_permits_fetch: true,
+            tier_permits_prefetch: true,
             allowed_origins: Vec::new(),
         }
     }
@@ -149,8 +264,7 @@ impl Broker {
                 token: token.clone(),
                 origin,
                 positions,
-                in_flight: 0,
-                queued: 0,
+                slots: Arc::default(),
                 allowed_once: false,
             },
         );
@@ -176,7 +290,12 @@ impl Broker {
     /// Forging a value here gains nothing in any case: the only thing it can do is revoke,
     /// and a caller that can name a live token already holds the document it belongs to.
     pub fn revoke_named(&mut self, token: &str) -> bool {
-        self.documents.remove(token).is_some()
+        self.documents.remove(token).is_some_and(|document| {
+            // Every fetch under it learns at its next read, and every one queued for a slot
+            // wakes to answer `Revoked` rather than waiting for a slot that means nothing now.
+            document.slots.revoke();
+            true
+        })
     }
 
     /// Allow a sender's remote content durably — FR-8.
@@ -229,6 +348,9 @@ impl Broker {
     /// cache, and a shed that silently withdrew consent would make memory pressure quietly
     /// change what Sift is permitted to fetch.
     pub fn shed(&mut self) {
+        for document in self.documents.values() {
+            document.slots.revoke();
+        }
         self.documents.clear();
     }
 
@@ -265,17 +387,57 @@ impl Broker {
         authority: &Authority,
         infrastructure: &Infrastructure,
     ) -> Answer {
+        match self.decide(request, authority, infrastructure) {
+            Ok((_, position)) => Answer::Bytes {
+                length: position.declared_length.unwrap_or(0),
+            },
+            Err(refused) => refused,
+        }
+    }
+
+    /// Answer one request, and where the answer is the bytes, hand back what fetching them
+    /// needs — the remote address, the ceiling, and a claim on one of the document's slots.
+    ///
+    /// **The same decision as [`Broker::answer`]**, by construction; this adds only what a
+    /// fetch carries away with it. Nothing here touches the network: the grant is taken
+    /// under whatever lock guards the broker, and the fetch then runs without it — D-91's
+    /// rule that blocking work never happens where the engine is waiting.
+    ///
+    /// # Errors
+    /// The blocked or unavailable answer, exactly as [`Broker::answer`] gives it.
+    pub fn grant(
+        &self,
+        request: &Request,
+        authority: &Authority,
+        infrastructure: &Infrastructure,
+    ) -> Result<Grant, Answer> {
+        let (document, position) = self.decide(request, authority, infrastructure)?;
+        Ok(Grant {
+            url: position.url.clone(),
+            declared_length: position.declared_length,
+            slots: Arc::clone(&document.slots),
+            held: false,
+        })
+    }
+
+    /// Checks 1 through 6: the document and position a request names, or why it is refused.
+    fn decide(
+        &self,
+        request: &Request,
+        authority: &Authority,
+        infrastructure: &Infrastructure,
+    ) -> Result<(&Document, &Position), Answer> {
         // 1. Is this address valid for this view at all? D-28.
         let Some(address) = Address::parse(&request.url) else {
-            return Answer::Unavailable(Unavailable::UnknownAddress);
+            return Err(Answer::Unavailable(Unavailable::UnknownAddress));
         };
-        let Some(document) = self.documents.get_mut(address.token.as_str()) else {
+        let Some(document) = self.documents.get(address.token.as_str()) else {
             // The token was revoked, or was never minted. Either way the document this
             // claims to belong to is not here.
-            return Answer::Unavailable(Unavailable::Revoked);
+            return Err(Answer::Unavailable(Unavailable::Revoked));
         };
         let Some(position) = document.positions.get(address.position) else {
-            return Answer::Unavailable(Unavailable::UnknownAddress);
+            return Err(Answer::Unavailable(Unavailable::UnknownAddress));
         };
 
         // 2 through 6, in one place shared with [`Broker::withheld`], so that what a reader
@@ -291,20 +453,16 @@ impl Broker {
             position,
             request.transferred_length,
         ) {
-            return Answer::Blocked(reason);
+            return Err(Answer::Blocked(reason));
         }
-        let length = position.declared_length.unwrap_or(0);
+        Ok((document, position))
+    }
 
-        // 7. Per-document concurrency. **Queues rather than fails**, because refusing a
-        //    legitimate image because five others were already loading would be a rendering
-        //    defect wearing a safety argument.
-        if document.in_flight >= L29_DOC_CONCURRENCY as usize {
-            document.queued += 1;
-        } else {
-            document.in_flight += 1;
-        }
-
-        Answer::Bytes { length }
+    /// How many fetches under a live document hold a slot right now. `None` for a token
+    /// that names no live document.
+    #[must_use]
+    pub fn in_flight(&self, token: &str) -> Option<usize> {
+        self.documents.get(token).map(|d| d.slots.lock().in_flight)
     }
 
     /// What each of a live document's positions would be refused for, were it requested now.
@@ -351,7 +509,7 @@ impl Broker {
     /// cannot.
     #[must_use]
     pub const fn may_prefetch(&self) -> bool {
-        self.tier_permits_fetch
+        self.tier_permits_fetch && self.tier_permits_prefetch
     }
 
     #[must_use]
@@ -481,6 +639,21 @@ fn exceeds_a_bound(position: &Position, transferred: Option<u64>) -> Option<&'st
         && u64::from(w) * u64::from(h) > L12_RASTER_PIXELS
     {
         return Some("L-12 rasterized pixels");
+    }
+    None
+}
+
+/// The bound a count of bytes actually received breaks, if any.
+///
+/// The transferred half of [`exceeds_a_bound`], in the same order, for a fetch that counts
+/// as it streams: a sender controls the declaration and the body both, so what arrives is
+/// held to the bound whatever was declared.
+pub(crate) const fn transferred_bound(received: u64) -> Option<&'static str> {
+    if received > L10_IMAGE_BYTES {
+        return Some("L-10 image bytes");
+    }
+    if received > L13_FETCH_BYTES {
+        return Some("L-13 single fetch without confirmation");
     }
     None
 }

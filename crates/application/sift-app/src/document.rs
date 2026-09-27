@@ -366,10 +366,11 @@ fn describe(reason: &Reason, authority_loaded: bool) -> String {
             }
         }
         Reason::NetworkPolicy => "the current network policy allows no fetches".to_owned(),
-        Reason::Bounds(bound) if bound.starts_with("L-11") => {
+        Reason::Bounds(bound) if bound.starts_with("L-11") || bound.starts_with("L-12") => {
             "the image's dimensions are larger than Sift will decode".to_owned()
         }
         Reason::Bounds(_) => "the image is larger than Sift will load".to_owned(),
+        Reason::Validation(_) => "it is not an image format Sift will display".to_owned(),
     }
 }
 
