@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+#MISE description="NFR-40 method 4 — fuzz the sanitizer and the MIME parser, seeded with the fidelity corpus. Args: [sanitize] [parse]"
+#
+# Two targets, each in a fuzz workspace of its own beside the crate it exercises (D-120):
+#
+#   sanitize   crates/rendering/sift-sanitize/fuzz — no panic, `audit` of the output empty, and
+#              I8 holding unless a bound refused the input
+#   parse      crates/rendering/sift-mime/fuzz     — no panic, and every accepted structure
+#              within L-2, L-3 and L-5 and inside the bytes it was parsed from
+#
+# With no argument both run. Each runs for FUZZ_SECONDS (default 60): that is the per-change
+# leg, bounded so that it can block a merge (D-63). `FUZZ_SECONDS=0` runs until stopped, which is
+# the continuous tier's run on a dedicated host.
+#
+# The seed corpus is rebuilt from the fidelity corpus on every run, so a fixture admitted there
+# seeds the fuzzer with no further step: every message as the sanitizer takes it, every
+# mutation-XSS vector (one payload per record), and — for the parser — every message wrapped in
+# the MIME structures it takes apart. What the fuzzer discovers beyond the seeds accumulates in
+# target/fuzz/corpus/<target>, and a crash is written to target/fuzz/artifacts/<target>.
+#
+# A crash is a finding, not noise. Minimize it
+#
+#     cargo +<toolchain> fuzz tmin --fuzz-dir <dir> --target-dir target/fuzz/build <target> <artifact>
+#
+# fix the cause, and admit the minimized input to the corpus as a permanent vector
+# (fixtures/mxss/vectors.txt for the sanitizer, under D-115's admission rule) so the fixed
+# behaviour is held by the ordinary test suite rather than by the fuzzer finding it again.
+set -euo pipefail
+
+root="${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
+cd "$root"
+
+# libFuzzer's coverage instrumentation and the address sanitizer are nightly-only, so the fuzz
+# workspaces build on a dated nightly while the root workspace stays on the stable pin in
+# rust-toolchain.toml (D-120). Dated, for the reason that pin is exact: a toolchain that moves
+# under the harness makes a new finding indistinguishable from a new compiler. Bump deliberately.
+toolchain="nightly-2026-06-10"
+
+seconds="${FUZZ_SECONDS:-60}"
+[[ "$seconds" =~ ^[0-9]+$ ]] || {
+    echo "fuzz: FUZZ_SECONDS must be a whole number of seconds (0 runs until stopped)" >&2
+    exit 1
+}
+
+targets=("$@")
+[[ ${#targets[@]} -gt 0 ]] || targets=(sanitize parse)
+
+fixtures="crates/rendering/sift-sanitize/fixtures"
+work="$root/target/fuzz"
+
+# Idempotent, and a no-op once the toolchain is present. Minimal, because this only builds.
+rustup toolchain install --profile minimal "$toolchain"
+
+# ── Seeds ──────────────────────────────────────────────────────────────────────
+
+# Every message fixture the manifest names, byte for byte.
+message_files() {
+    sed -e 's/#.*//' "$fixtures/messages/manifest.txt" | awk -F'|' 'NF >= 3 {
+        gsub(/^[ \t]+|[ \t]+$/, "", $1); print $1
+    }'
+}
+
+# One file per mutation-XSS record: the line after each `@ ` header is the payload, exactly.
+seed_vectors() {
+    local out="$1"
+    awk -v out="$out" '
+        take { f = out "/" id; printf "%s", $0 > f; close(f); take = 0; next }
+        /^@ / { split(substr($0, 3), h, "|"); id = h[1]; gsub(/[ \t]/, "", id); take = 1 }
+    ' "$fixtures/mxss/vectors.txt"
+}
+
+seed_sanitize() {
+    local out="$1" file
+    while read -r file; do
+        cp "$fixtures/messages/$file" "$out/message-$file"
+    done < <(message_files)
+    seed_vectors "$out"
+}
+
+# The parser's seeds are the same messages in the structures real mail puts them in: a lone
+# part, a multipart/alternative beside a plain rendering, and a forwarded message/rfc822 inside
+# a multipart/mixed beside an attachment. CRLF throughout, as on the wire.
+seed_parse() {
+    local out="$1" file type plain body
+    plain="$(cat "$fixtures/messages/plain-text.txt")"
+    while read -r file; do
+        case "$file" in *.html) type="text/html" ;; *) type="text/plain" ;; esac
+        body="$(cat "$fixtures/messages/$file")"
+
+        printf 'MIME-Version: 1.0\r\nSubject: %s\r\nContent-Type: %s; charset=utf-8\r\n\r\n%s' \
+            "$file" "$type" "$body" >"$out/single-$file.eml"
+
+        printf 'MIME-Version: 1.0\r\nSubject: %s\r\nContent-Type: multipart/alternative; boundary="alt"\r\n\r\n--alt\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n--alt\r\nContent-Type: %s; charset=utf-8\r\n\r\n%s\r\n--alt--\r\n' \
+            "$file" "$plain" "$type" "$body" >"$out/alternative-$file.eml"
+
+        printf 'MIME-Version: 1.0\r\nSubject: Fwd: %s\r\nContent-Type: multipart/mixed; boundary="mix"\r\n\r\n--mix\r\nContent-Type: text/plain\r\n\r\nForwarded.\r\n--mix\r\nContent-Type: message/rfc822\r\n\r\nSubject: %s\r\nContent-Type: %s; charset=utf-8\r\n\r\n%s\r\n--mix\r\nContent-Type: application/pdf; name="a.pdf"\r\nContent-Disposition: attachment; filename="a.pdf"\r\n\r\n%%PDF-1.4\r\n--mix--\r\n' \
+            "$file" "$file" "$type" "$body" >"$out/forwarded-$file.eml"
+    done < <(message_files)
+}
+
+# ── Runs ───────────────────────────────────────────────────────────────────────
+
+for target in "${targets[@]}"; do
+    case "$target" in
+        sanitize) dir="crates/rendering/sift-sanitize/fuzz" ;;
+        parse) dir="crates/rendering/sift-mime/fuzz" ;;
+        *)
+            echo "fuzz: no target '$target' (the targets are: sanitize, parse)" >&2
+            exit 1
+            ;;
+    esac
+
+    seeds="$work/seeds/$target"
+    corpus="$work/corpus/$target"
+    artifacts="$work/artifacts/$target"
+    rm -rf "$seeds"
+    mkdir -p "$seeds" "$corpus" "$artifacts"
+    "seed_$target" "$seeds"
+    echo "fuzz: $target — $(find "$seeds" -type f | wc -l | tr -d ' ') seeds, ${seconds}s (0 is unbounded)"
+
+    # The build goes under the root target/, which is ignored, rather than beside the fuzz
+    # workspace. The corpus directory comes first because libFuzzer writes new inputs to the
+    # first directory it is given, and the seeds are regenerated rather than grown.
+    cargo "+$toolchain" fuzz run \
+        --fuzz-dir "$dir" \
+        --target-dir "$work/build" \
+        "$target" "$corpus" "$seeds" -- \
+        -max_total_time="$seconds" \
+        -timeout=10 \
+        -artifact_prefix="$artifacts/"
+done

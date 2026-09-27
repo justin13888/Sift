@@ -1,0 +1,35 @@
+# NFR-40 method 4 — fuzzing the MIME parser, seeded with the fidelity corpus.
+#
+# A workspace of its own rather than a member of the root one (D-120). libFuzzer needs a
+# nightly toolchain and coverage instrumentation, and the root workspace builds on a pinned
+# stable release; a member here would put `libfuzzer-sys` in every build, and in the graph the
+# dependency gates approve, for a harness no shipped binary contains. Its lockfile is
+# committed so a fuzz run is reproducible.
+#
+# Run it through `mise run fuzz`, which builds the seed corpus from the sanitizer's
+# `fixtures/` first — wrapping each message in the MIME structures the parser takes apart.
+
+[package]
+name = "sift-mime-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sift-foundation = { path = "../../../foundation/sift-foundation" }
+sift-mime = { path = ".." }
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,33 @@
+# NFR-40 method 4 — fuzzing the sanitizer, seeded with the fidelity corpus.
+#
+# A workspace of its own rather than a member of the root one (D-120). libFuzzer needs a
+# nightly toolchain and coverage instrumentation, and the root workspace builds on a pinned
+# stable release; a member here would put `libfuzzer-sys` in every build, and in the graph the
+# dependency gates approve, for a harness no shipped binary contains. Its lockfile is
+# committed so a fuzz run is reproducible.
+#
+# Run it through `mise run fuzz`, which builds the seed corpus from `../fixtures/` first.
+
+[package]
+name = "sift-sanitize-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sift-sanitize = { path = ".." }
+
+[[bin]]
+name = "sanitize"
+path = "fuzz_targets/sanitize.rs"
+test = false
+doc = false
+bench = false
