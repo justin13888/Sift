@@ -248,6 +248,19 @@ fn walk(
                 walk(&child, depth + 1, anchor, state)?;
                 keep.push(child);
             }
+            Verdict::Replace(wrapper) => {
+                // The element goes and a node the pass built stands in its place, holding
+                // its children. Taken rather than cloned for the same reason as above: the
+                // discarded element must hold nothing when it is released.
+                let grandchildren: Vec<Handle> = core::mem::take(&mut child.children.borrow_mut());
+                for g in &grandchildren {
+                    g.parent.set(Some(Rc::downgrade(&wrapper)));
+                }
+                *wrapper.children.borrow_mut() = grandchildren;
+                walk(&wrapper, depth + 1, state)?;
+                wrapper.parent.set(Some(Rc::downgrade(node)));
+                keep.push(wrapper);
+            }
         }
     }
 
@@ -319,6 +332,8 @@ enum Verdict {
     Keep,
     Drop,
     Unwrap,
+    /// Replace the element with this one, which takes over its children.
+    Replace(Handle),
 }
 
 fn is_element(node: &Handle, tag: &str) -> bool {
@@ -349,6 +364,22 @@ fn classify(
 
             // `html`, `head` and `body` are the tree builder's own scaffolding rather than
             // sender content: unwrap them so their children survive.
+            //
+            // Except for what they say about the text beneath them. NFR-50: a message that
+            // declares its direction or language only on the root — `<html dir="rtl"
+            // lang="he">`, `<body dir="auto">` — is otherwise read in the wrong order and
+            // shaped with whatever font the platform picks for an untagged run. So the body
+            // is replaced by a `div` carrying the `dir` and `lang` in effect at the body, and
+            // no other scaffolding attribute.
+            if tag == "body"
+                && let Some(wrapper) = root_direction_and_language(node, attrs)
+            {
+                if let NodeData::Element { attrs, .. } = &wrapper.data {
+                    filter_attributes("div", attrs, state)?;
+                    stamp("div", attrs, state);
+                }
+                return Ok(Verdict::Replace(wrapper));
+            }
             if matches!(tag.as_str(), "html" | "head" | "body") {
                 return Ok(Verdict::Unwrap);
             }
@@ -394,6 +425,74 @@ fn classify(
             Ok(Verdict::Keep)
         }
     }
+}
+
+/// The `div` that stands in for `body` when the root declares a direction or a language.
+///
+/// The value in effect at the body is the body's own where it declares one — even an empty
+/// one, which the HTML specification reads as "unknown language" or "no direction" and which
+/// overrides the root's — and the `html` element's otherwise. Only `dir` and `lang` are
+/// read: every other attribute on the scaffolding is still discarded.
+///
+/// `None` where neither element declares either, so a message with nothing to carry is
+/// serialized exactly as it was before this existed. I6 holds either way: a second pass sees
+/// the `div` as sender content under a bare body, keeps it and its two attributes under the
+/// global allowlist, and stamps it with the same handle because it is still the first
+/// element in document order.
+fn root_direction_and_language(
+    body: &Handle,
+    body_attrs: &RefCell<Vec<html5ever::Attribute>>,
+) -> Option<Handle> {
+    let parent = {
+        let weak = body.parent.take();
+        let strong = weak.as_ref().and_then(std::rc::Weak::upgrade);
+        body.parent.set(weak);
+        strong
+    };
+    let read = |attrs: &RefCell<Vec<html5ever::Attribute>>, name: &str| -> Option<String> {
+        attrs
+            .borrow()
+            .iter()
+            .find(|a| a.name.local.eq_str_ignore_ascii_case(name))
+            .map(|a| a.value.to_string())
+    };
+    let from_root = |name: &str| -> Option<String> {
+        let parent = parent.as_ref()?;
+        match &parent.data {
+            NodeData::Element {
+                name: tag, attrs, ..
+            } if tag.local.eq_str_ignore_ascii_case("html") => read(attrs, name),
+            _ => None,
+        }
+    };
+
+    let carried: Vec<html5ever::Attribute> = ["dir", "lang"]
+        .into_iter()
+        .filter_map(|name| {
+            let value = read(body_attrs, name).or_else(|| from_root(name))?;
+            Some(html5ever::Attribute {
+                name: html5ever::QualName::new(
+                    None,
+                    html5ever::ns!(),
+                    html5ever::LocalName::from(name),
+                ),
+                value: value.into(),
+            })
+        })
+        .collect();
+    if carried.is_empty() {
+        return None;
+    }
+    Some(markup5ever_rcdom::Node::new(NodeData::Element {
+        name: html5ever::QualName::new(
+            None,
+            html5ever::ns!(html),
+            html5ever::LocalName::from("div"),
+        ),
+        attrs: RefCell::new(carried),
+        template_contents: RefCell::new(None),
+        mathml_annotation_xml_integration_point: false,
+    }))
 }
 
 /// Elements removed with their contents, because their contents are not text a reader wants.
@@ -1258,6 +1357,65 @@ mod invariants {
             "{}",
             out.html
         );
+    }
+
+    #[test]
+    fn nfr50_direction_and_language_on_the_root_reach_the_content() {
+        let out = clean(r#"<html dir="rtl" lang="he"><body><p>שלום</p></body></html>"#);
+        assert_eq!(
+            out.html,
+            r#"<div dir="rtl" lang="he" data-sift-element="0"><p data-sift-element="1">שלום</p></div>"#
+        );
+    }
+
+    #[test]
+    fn nfr50_the_body_declaration_overrides_the_root_one_attribute_by_attribute() {
+        // `dir` from the body, `lang` from the root; an empty `lang` on the body is a
+        // declaration ("unknown") and still wins.
+        let out = clean(r#"<html dir="rtl" lang="he"><body dir="auto"><p>x</p></body></html>"#);
+        assert!(
+            out.html.starts_with(r#"<div dir="auto" lang="he" "#),
+            "{}",
+            out.html
+        );
+        let out = clean(r#"<html lang="he"><body lang=""><p>x</p></body></html>"#);
+        assert!(out.html.starts_with(r#"<div lang="" "#), "{}", out.html);
+    }
+
+    #[test]
+    fn nfr50_no_other_scaffolding_attribute_is_carried() {
+        let out = clean(
+            r#"<html dir="rtl" xmlns="http://www.w3.org/1999/xhtml" class="x"><body onload="alert(1)" bgcolor="red" style="color:red" background="https://t.example/p.gif"><p>x</p></body></html>"#,
+        );
+        assert_eq!(
+            out.html,
+            r#"<div dir="rtl" data-sift-element="0"><p data-sift-element="1">x</p></div>"#
+        );
+        assert!(out.positions.is_empty(), "{:?}", out.positions);
+    }
+
+    #[test]
+    fn a_root_with_nothing_to_carry_is_unwrapped_as_before() {
+        let out = clean(r#"<html><body class="b"><p>x</p></body></html>"#);
+        assert_eq!(out.html, r#"<p data-sift-element="0">x</p>"#);
+    }
+
+    #[test]
+    fn i6_the_carried_root_declarations_are_idempotent() {
+        for html in [
+            r#"<html dir="rtl" lang="he"><head><style>p{color:red}</style></head><body><p>a</p> <p>b</p></body></html>"#,
+            r#"<html lang="ja"><body dir="auto">text before <b>bold</b></body></html>"#,
+            r#"<body dir="rtl"></body>"#,
+        ] {
+            let once = clean(html);
+            let twice = clean(&once.html);
+            assert_eq!(once.html, twice.html, "not idempotent for {html}");
+            assert!(
+                once.html.starts_with("<style") || once.html.starts_with("<div dir"),
+                "the root declaration was not carried: {}",
+                once.html
+            );
+        }
     }
 
     // ---- The stripping that another decision depends on ----

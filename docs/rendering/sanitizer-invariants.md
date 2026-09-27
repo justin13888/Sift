@@ -235,8 +235,11 @@ I1 through I10 MUST hold for every input, verified in CI by five complementary m
 The fidelity corpus is held to all ten invariants in its own right, not only to I8: every message in it
 is accepted rather than rejected by a bound, and loses no visible text, alternative text, heading level,
 table or list structure, direction or language to sanitization — NFR-50's survival requirement, verified
-here rather than in manual spot checks. One gap is known and open: direction and language declared only on
-the document root are lost when the tree builder's scaffolding is unwrapped (#91).
+here rather than in manual spot checks. That includes direction and language declared only on the document
+root or the body: the tree builder's scaffolding is unwrapped, but the direction and language in effect at
+the body — the body's own declaration where it makes one, the root's otherwise — are carried onto a
+container the sanitizer places around the body's content, and no other attribute of the scaffolding
+survives with them.
 
 Methods 2 and 3 share code with the [per-message debug view](../runtime/observability.md). Build it once,
 use it twice.
