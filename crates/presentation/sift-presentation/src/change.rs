@@ -59,9 +59,14 @@ impl Identified for crate::merge::Row {
         self.id
     }
     fn content(&self) -> u64 {
-        // D-44's digest plus the ordering key: a row whose position-determining value moved
-        // has changed even where the digest has not.
-        self.digest ^ self.received_millis
+        // D-44's whole digest and its rule version plus the ordering key: a row whose
+        // position-determining value moved has changed even where the digest has not, and a
+        // digest that changed anywhere — not only in its first eight bytes — is a change.
+        use core::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        self.digest.hash(&mut hasher);
+        self.received_millis.hash(&mut hasher);
+        hasher.finish()
     }
 }
 
@@ -330,5 +335,34 @@ mod tests {
         assert_eq!(run.len(), 3);
         let values: Vec<usize> = run.iter().map(|i| [9, 1, 8, 7, 2, 3][*i]).collect();
         assert!(values.windows(2).all(|w| w[0] < w[1]), "{values:?}");
+    }
+
+    #[test]
+    fn a_merge_row_whose_digest_changed_past_the_eighth_byte_is_an_update() {
+        use crate::merge::{Digest, Row};
+        let mut bytes = [1; 32];
+        let old = Row {
+            id: 7,
+            account: 1,
+            received_millis: 100,
+            digest: Digest::from_stored(2, bytes),
+        };
+        bytes[20] = 9;
+        let late = Row {
+            digest: Digest::from_stored(2, bytes),
+            ..old
+        };
+        let reversioned = Row {
+            digest: Digest::from_stored(1, [1; 32]),
+            ..old
+        };
+        for new in [late, reversioned] {
+            assert_eq!(
+                diff(&[old], &[new]).changes,
+                vec![Change::Update { at: 0 }],
+                "{new:?}"
+            );
+        }
+        assert!(diff(&[old], &[old]).changes.is_empty());
     }
 }
