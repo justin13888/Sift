@@ -124,6 +124,11 @@ if [[ "$universal" == true ]]; then
     # directory no untargeted build writes. The project is then told that archive's absolute
     # path in place of `-lsift_abi`, so the `target/release` search path is never consulted and
     # a stale host-only archive there cannot be what gets linked.
+    #
+    # Both slices need their standard library, which an install that never read
+    # `rust-toolchain.toml` does not carry; `toolchain` adds the host platform's declared
+    # targets, and asks locally first, so this costs nothing once they are present.
+    mise run toolchain
     slices=()
     for triple in aarch64-apple-darwin x86_64-apple-darwin; do
         cargo build --release -p sift-abi --target "$triple"

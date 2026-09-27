@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Ensure the pinned toolchain carries the components the gates need."
+#MISE description="Ensure the pinned toolchain carries the components and targets the builds need."
 #
 # `rust-toolchain.toml` declares `components = ["rustfmt", "clippy"]`, and rustup honours that
 # list **when rustup is the thing that installs the toolchain**. On a runner it often is not:
@@ -51,11 +51,49 @@ fi
 #
 #     error[E0463]: can't find crate for `std`
 #
-# Only the target this invocation builds for is checked, so a host build never reaches the
-# network here.
-if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
-    if ! rustup target list --installed 2>/dev/null | grep -qx "$CARGO_BUILD_TARGET"; then
-        echo "toolchain: adding target $CARGO_BUILD_TARGET to the pinned toolchain"
-        rustup target add "$CARGO_BUILD_TARGET"
+# and D-46's universal build (`mise run macos --universal`, which names both Apple triples on
+# the command line) fails the same way on its second slice.
+#
+# So the targets ensured are the one this invocation builds for, if any, plus every target
+# `rust-toolchain.toml` declares **for the host's own platform** — its triple with the
+# architecture removed (`apple-darwin`, `unknown-linux-gnu`). A declared target for another
+# platform is one nothing here can link for, so a Linux leg does not download two Apple
+# standard libraries to lint a Linux build. The list is read from the file, not written here,
+# for the same reason no version is.
+#
+# As with components, the installed set is asked locally first, so a toolchain that already
+# has them never reaches the network.
+wanted=()
+[[ -n "${CARGO_BUILD_TARGET:-}" ]] && wanted+=("$CARGO_BUILD_TARGET")
+
+host="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
+toolchain_file="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/rust-toolchain.toml"
+if [[ -n "$host" && -f "$toolchain_file" ]]; then
+    # Every quoted string from `targets = [` to the closing `]`, whether the array is written on
+    # one line or several. Comments are stripped first so a quoted word in one is not a target.
+    declared="$(
+        sed 's/#.*//' "$toolchain_file" | awk '
+            /^[[:space:]]*targets[[:space:]]*=/ { collecting = 1 }
+            collecting { print }
+            collecting && /\]/ { exit }
+        ' | grep -o '"[^"]*"' | tr -d '"'
+    )"
+    for target in $declared; do
+        [[ "${target#*-}" == "${host#*-}" ]] && wanted+=("$target")
+    done
+fi
+
+if [[ ${#wanted[@]} -gt 0 ]]; then
+    installed_targets="$(rustup target list --installed 2>/dev/null || true)"
+    missing_targets=()
+    for target in "${wanted[@]}"; do
+        grep -qx "$target" <<<"$installed_targets" || missing_targets+=("$target")
+    done
+    # One target can be wanted twice (CARGO_BUILD_TARGET is also declared); rustup accepts the
+    # repeat, but the message should not show it.
+    if [[ ${#missing_targets[@]} -gt 0 ]]; then
+        read -r -a missing_targets <<<"$(printf '%s\n' "${missing_targets[@]}" | sort -u | tr '\n' ' ')"
+        echo "toolchain: adding target ${missing_targets[*]} to the pinned toolchain"
+        rustup target add "${missing_targets[@]}"
     fi
 fi
