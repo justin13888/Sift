@@ -30,7 +30,7 @@ final class AddAccountWindow: NSWindowController {
     /// The label of the account this sign-in is meant to replace, where it began from FR-2's
     /// re-authentication prompt. D-89 makes the new account a new one; this only names it
     /// and says what happens to the old one afterwards.
-    private let replacing: String?
+    private var replacing: String?
     /// Told when the flow ends, added or not, so the shell releases this controller — and so a
     /// callback arriving afterwards is not handed to a screen that is gone.
     private let onDismissed: () -> Void
@@ -141,6 +141,37 @@ final class AddAccountWindow: NSWindowController {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// Point a flow already open at the account FR-2's prompt was about, when "Sign In Again…"
+    /// arrives while this screen is up rather than before it.
+    ///
+    /// The flow is raised rather than restarted (see `raise`), so the replace wording has to
+    /// reach the screen that is already there: otherwise the person is never told the sign-in
+    /// adds a new account. The latest prompt wins — one screen completes one sign-in, and the
+    /// account named is the one the person most recently chose to sign in to again.
+    ///
+    /// A sign-in already waiting on the browser keeps its status line, which is about that
+    /// sign-in; the name field is only rewritten where it still holds nothing the person typed.
+    func retarget(replacing label: String) {
+        guard !finished else { return }
+        let previous = replacing
+        replacing = label
+        let untouched = nameField.stringValue.isEmpty || nameField.stringValue == previous
+        if untouched { nameField.stringValue = label }
+        if session == nil, !choices.isEmpty {
+            status.stringValue = AddAccountWindow.replacementPrompt(label)
+        }
+    }
+
+    /// D-89: signing in again is adding the mailbox again, and the person is told so before
+    /// they go to the browser rather than finding a second account afterwards.
+    private static func replacementPrompt(_ replacing: String) -> String {
+        """
+        Sift will open your browser to sign in. Signing in again adds this mailbox as a \
+        new account; once it has, Sift offers to remove \u{201C}\(replacing)\u{201D}, the \
+        one it can no longer reach.
+        """
+    }
+
     /// End the flow, in whichever frame it was presented in.
     private func finish(added: Bool, signedIn: Bool = false) {
         guard !finished else { return }
@@ -244,13 +275,7 @@ final class AddAccountWindow: NSWindowController {
                 no credentials, and nobody's mail in it.
                 """
         } else if let replacing {
-            // D-89: signing in again is adding the mailbox again, and the person is told so
-            // before they go to the browser rather than finding a second account afterwards.
-            status.stringValue = """
-                Sift will open your browser to sign in. Signing in again adds this mailbox as a \
-                new account; once it has, Sift offers to remove \u{201C}\(replacing)\u{201D}, the \
-                one it can no longer reach.
-                """
+            status.stringValue = AddAccountWindow.replacementPrompt(replacing)
         } else {
             status.stringValue =
                 "Sift will open your browser to sign in. The reply comes back to Sift directly."

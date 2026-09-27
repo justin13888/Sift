@@ -894,6 +894,9 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// order. Bounded by the number of accounts: an account is queued at most once.
     fileprivate var waitingReauthentication: [SiftId] = []
     private var addAccount: AddAccountWindow?
+    /// The account the open add-account flow replaces, where FR-2's prompt began or retargeted
+    /// it. Cleared when the flow ends.
+    private var addAccountReplacing: SiftId?
     private var runtimePanel: RuntimePanel?
     private var settingsWindow: SettingsWindow?
     private var standaloneReaders: [StandaloneReader] = []
@@ -912,13 +915,22 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// the person is told so first, and offered removal of the old one when it completes.
     private func beginAddAccount(replacing: SiftId? = nil) {
         guard let app else { return }
-        if let existing = addAccount {
-            existing.raise()
-            return
-        }
         let old = replacing.flatMap { id in
             Account.all(app: app).first { $0.id.same(as: id) }
         }
+        if let existing = addAccount {
+            // A flow already open is raised, not restarted — but a "Sign In Again…" that
+            // arrives while it is up still has to become the replace flow, or the person is
+            // never told the sign-in adds a new account and is never offered removal of the
+            // old one when it completes.
+            if let old {
+                addAccountReplacing = old.id
+                existing.retarget(replacing: old.name)
+            }
+            existing.raise()
+            return
+        }
+        addAccountReplacing = old?.id
         let window = AddAccountWindow(
             app: app,
             replacing: old?.name,
@@ -937,12 +949,15 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
                 // before it: removing first would leave a person whose sign-in then failed
                 // with neither account. Warned rather than refused, as D-89 requires — two
                 // accounts on one mailbox is a configuration Sift cannot tell from a mistake.
-                if signedIn, let old {
-                    DispatchQueue.main.async { self?.offerReplacement(of: old.id) }
+                // Read from the shell rather than captured here: a later "Sign In Again…" may
+                // have retargeted this flow while it was open.
+                if signedIn, let replaced = self?.addAccountReplacing {
+                    DispatchQueue.main.async { self?.offerReplacement(of: replaced) }
                 }
             },
             onDismissed: { [weak self] in
                 self?.addAccount = nil
+                self?.addAccountReplacing = nil
                 // First run with nothing added leaves no window, and an accessory with no
                 // window is one the dock does not show. Put the policy back where the window
                 // count says it should be rather than leaving Sift stranded as regular.
