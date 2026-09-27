@@ -177,45 +177,19 @@ fi
 cargo xtask header
 
 # The OAuth clients — **one per provider kind** — and the callback scheme derived from each.
-#
-# **Configuration, not a secret.** A client identifier for a public client appears in every
-# authorization URL it generates — that is why PKCE exists — so this is not withheld for
-# secrecy. It is out of the repository because it is per-installation: baking one in would make
-# every checkout share one client, and a provider's quota, verification status and consent
-# screen all attach to the client rather than to the application.
-#
-# One per kind because a client belongs to one identity platform: an identifier Google issued
-# means nothing to Microsoft's. The kinds are the register's opaque strings
-# (`crates/providers/sift-registry`), and a kind with no client is absent from the add-account
-# choices rather than offered and broken.
-#
-#   kind   file                                   environment
-#   gmail  shells/macos/oauth-client.gmail.txt    SIFT_OAUTH_CLIENT_ID_GMAIL
-#          shells/macos/oauth-client.txt          SIFT_OAUTH_CLIENT_ID      (before there were two)
-#   graph  shells/macos/oauth-client.graph.txt    SIFT_OAUTH_CLIENT_ID_GRAPH
+# Where each client comes from, and why there is one per kind, is `shells/macos/oauth-clients.bash`,
+# which `mise-tasks/release-rc` also reads for its precondition: one lookup, so the release
+# precondition cannot pass while this build resolves no client, or the reverse.
 #
 # The scheme is **derived** rather than configured separately, so the two cannot disagree.
 # Google's iOS/macOS client type accepts exactly one redirect scheme — the client identifier
 # reversed — and its Desktop type wants a 127.0.0.1 loopback, which NFR-24 forbids outright.
 # Microsoft's mobile-and-desktop client names its own redirect, so it returns on Sift's scheme,
 # which the bundle always registers.
-read_client() {
-    local variable="$1"
-    shift
-    local value="${!variable:-}"
-    local file
-    for file in "$@"; do
-        if [[ -z "$value" && -f "$file" ]]; then
-            value="$(tr -d '[:space:]' < "$file")"
-        fi
-    done
-    printf '%s' "$value"
-}
-SIFT_OAUTH_CLIENT_ID_GMAIL="$(read_client SIFT_OAUTH_CLIENT_ID_GMAIL shells/macos/oauth-client.gmail.txt)"
-if [[ -z "$SIFT_OAUTH_CLIENT_ID_GMAIL" ]]; then
-    SIFT_OAUTH_CLIENT_ID_GMAIL="$(read_client SIFT_OAUTH_CLIENT_ID shells/macos/oauth-client.txt)"
-fi
-SIFT_OAUTH_CLIENT_ID_GRAPH="$(read_client SIFT_OAUTH_CLIENT_ID_GRAPH shells/macos/oauth-client.graph.txt)"
+# shellcheck source=shells/macos/oauth-clients.bash
+source shells/macos/oauth-clients.bash
+SIFT_OAUTH_CLIENT_ID_GMAIL="$(sift_oauth_client gmail)"
+SIFT_OAUTH_CLIENT_ID_GRAPH="$(sift_oauth_client graph)"
 export SIFT_OAUTH_CLIENT_ID_GMAIL SIFT_OAUTH_CLIENT_ID_GRAPH
 
 # The scheme the Google client requires. It is the one URL type whose scheme varies, so it is

@@ -120,22 +120,14 @@ if ! xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; the
 fi
 
 # An OAuth client for every provider kind the candidate offers. A release bundle with none
-# can only open fixtures. Resolved the way `mise-tasks/macos` resolves them, which reads the
-# bundle back afterwards to confirm each one landed.
-client() {
-    local variable="$1" file
-    shift
-    local value="${!variable:-}"
-    for file in "$@"; do
-        [[ -n "$value" || ! -f "$file" ]] || value="$(tr -d '[:space:]' <"$file")"
-    done
-    printf '%s' "$value"
-}
-gmail="$(client SIFT_OAUTH_CLIENT_ID_GMAIL shells/macos/oauth-client.gmail.txt)"
-[[ -n "$gmail" ]] || gmail="$(client SIFT_OAUTH_CLIENT_ID shells/macos/oauth-client.txt)"
-graph="$(client SIFT_OAUTH_CLIENT_ID_GRAPH shells/macos/oauth-client.graph.txt)"
-[[ -n "$gmail" ]] || problems+=("no gmail OAuth client: shells/macos/oauth-client.gmail.txt or SIFT_OAUTH_CLIENT_ID_GMAIL")
-[[ -n "$graph" ]] || problems+=("no graph OAuth client: shells/macos/oauth-client.graph.txt or SIFT_OAUTH_CLIENT_ID_GRAPH")
+# can only open fixtures. Resolved by the same lookup `mise-tasks/macos` sources, which reads
+# the bundle back afterwards to confirm each one landed.
+# shellcheck source=shells/macos/oauth-clients.bash
+source shells/macos/oauth-clients.bash
+for kind in gmail graph; do
+    [[ -n "$(sift_oauth_client "$kind")" ]] \
+        || problems+=("no $kind OAuth client: $(sift_oauth_client_sources "$kind")")
+done
 
 command -v brew >/dev/null 2>&1 || problems+=("brew is not on PATH, and the Cask is checked with brew style.")
 
