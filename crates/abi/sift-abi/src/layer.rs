@@ -272,6 +272,10 @@ pub(crate) enum Job {
     Fire,
     /// A shell asked for one account to be synced now.
     Sync(String),
+    /// FR-4's best-effort revocation of a removed account's grant — a provider round trip,
+    /// so it runs here and not on the loop that asked for the removal. Its `Debug` names the
+    /// kind and not the token it carries.
+    Revoke(sift_app::Revocation),
 }
 
 /// One search's results, and the text they borrow.

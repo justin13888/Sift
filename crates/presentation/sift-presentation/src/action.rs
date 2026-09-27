@@ -257,6 +257,11 @@ pub const ACTIONS: &[Action] = &[
     act("app.pause-sync", Scope::Application),
     act("app.resume-sync", Scope::Application),
     act("app.add-account", Scope::Application),
+    // FR-4. **Not a mutation in D-98's sense**, which is why it carries no intent: it changes
+    // nothing in any mailbox. It erases what this installation holds, and the queue that every
+    // mailbox change passes through is one of the things it erases. The shell confirms, stating
+    // what is lost, and then crosses through `sift_forget_account` by identity.
+    act("app.remove-account", Scope::Application),
     act("app.open-settings", Scope::Application),
     act("app.open-message-debug-view", Scope::OpenMessage),
     act("app.open-runtime-panel", Scope::Application),
@@ -451,7 +456,9 @@ mod tests {
     #[test]
     fn application_actions_work_with_no_window_open() {
         // Sift is resident with nothing on screen. Quitting, pausing and adding an account
-        // all have to work in that state — FR-25's whole distinction depends on it.
+        // all have to work in that state — FR-25's whole distinction depends on it. So does
+        // removing one: FR-2's re-authentication alert arrives with no window open, and it is
+        // one of the places removal is offered.
         let nothing = Context {
             selection_len: 0,
             has_open_message: false,
@@ -462,6 +469,7 @@ mod tests {
             "app.quit",
             "app.pause-sync",
             "app.add-account",
+            "app.remove-account",
             "app.command-palette",
         ] {
             assert!(

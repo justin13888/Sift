@@ -532,6 +532,15 @@ typedef struct {
    * Intents recorded and held because writes are not authorized. Zero once they are.
    */
   uint32_t held;
+  /**
+   * Every intent not yet settled with the provider, held or not — what
+   * [`sift_forget_account`] would discard.
+   *
+   * FR-4's confirmation states it **before** removal: D-32 notes a queued mutation is the
+   * one thing a resync cannot restore, so removing an account with triage still pending is
+   * the one removal that loses something the provider does not also hold.
+   */
+  uint32_t queued;
 } SiftAccount;
 
 /**
@@ -1204,6 +1213,40 @@ uint32_t sift_account_count(SiftApp *app);
  * `app` and `out` must be valid.
  */
 SiftStatus sift_accounts(SiftApp *app, SiftRows_SiftAccount *out);
+
+/**
+ * FR-4 — remove an account, by D-89's identity: its files, its credentials, its per-account
+ * settings, and everything in this process that still names it.
+ *
+ * **By identity rather than by label**, unlike every other account-taking entry point here.
+ * A confirmation is on screen for as long as the person reading it likes, and a label can come
+ * to mean a different account in the meantime — a re-authentication that adds the same
+ * mailbox again is exactly that. The one call that cannot be undone takes the one handle that
+ * cannot be reused.
+ *
+ * # The teardown, in order
+ *
+ * Taking the session waits for any sync or flush already running, because each holds it for
+ * its whole duration — so work for this account has finished before anything is erased, and
+ * work queued for it afterwards finds no account and does nothing. Then the application closes
+ * it, erases it, and re-arms the wheel without it; the observations anchored on it are
+ * cancelled and their sinks dropped; and what this boundary remembered about it — the last
+ * condition told, new mail not yet announced — is forgotten, so no callback names it again.
+ *
+ * **This is the confirmed call.** It removes; asking is the shell's, through D-98's
+ * `app.remove-account`, and the confirmation states what is lost from [`SiftAccount`]'s
+ * `queued` before this is reached.
+ *
+ * # Revocation
+ *
+ * Where it is possible and safe, the account's grant is then revoked at the provider — on the
+ * worker, after the erasure, and never in its way. `Ok` does not wait for it and does not
+ * report on it: the account is gone whether or not the provider answers.
+ *
+ * # Safety
+ * `app` must be valid.
+ */
+SiftStatus sift_forget_account(SiftApp *app, SiftId account);
 
 /**
  * Authorize, or withdraw authorization for, writes to one account.
