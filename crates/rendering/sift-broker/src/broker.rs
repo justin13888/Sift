@@ -45,6 +45,9 @@ pub enum Reason {
     /// The active network policy tier forbids it. NFR-32: zero speculative prefetch in
     /// Conservative or Minimal.
     NetworkPolicy,
+    /// The account the document belongs to is paused — D-95's per-account flag, which stops
+    /// fetching for that account whatever the network tier says.
+    Paused,
     /// A bound in the limits register. Checked **before any decoder is handed bytes**.
     Bounds(&'static str),
     /// D-29's bounded structural validation refused what arrived: not a format the broker
@@ -115,6 +118,9 @@ pub struct Document {
     /// both would make the transient choice permanent, which is the failure mode a user
     /// cannot see and cannot undo.
     allowed_once: bool,
+    /// Whether the account this document belongs to is paused. The broker knows no accounts,
+    /// so the application sets it through [`Broker::hold`] before every decision.
+    held: bool,
 }
 
 /// A request as the engine hands it over.
@@ -266,9 +272,27 @@ impl Broker {
                 positions,
                 slots: Arc::default(),
                 allowed_once: false,
+                held: false,
             },
         );
         token
+    }
+
+    /// Hold or release a live document's fetches because its account is paused — D-95.
+    ///
+    /// A held document is refused [`Reason::Paused`] for every position, in the answer, the
+    /// grant and the withheld count alike. Fetches already granted run on: pausing stops new
+    /// requests, as it does for the rest of the account.
+    ///
+    /// Returns false where the token names no live document.
+    pub fn hold(&mut self, token: &str, held: bool) -> bool {
+        match self.documents.get_mut(token) {
+            Some(document) => {
+                document.held = held;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Revoke a document's token.
@@ -558,6 +582,10 @@ fn refusal(
     // 3. May it be fetched now? The tier's answer does not depend on the message.
     if !gate.tier_permits_fetch {
         return Some(Reason::NetworkPolicy);
+    }
+    //    And the account's own pause, which the tier does not see.
+    if document.held {
+        return Some(Reason::Paused);
     }
 
     // 4. Has the user allowed this sender? Remote content is blocked **by default**.
@@ -1131,6 +1159,44 @@ mod tests {
         );
         assert_eq!(a, Answer::Blocked(Reason::NetworkPolicy));
         assert!(!b.may_prefetch(), "prefetch survived a constrained tier");
+    }
+
+    #[test]
+    fn a_held_document_is_refused_as_paused_until_it_is_released() {
+        // D-95: the account's pause stops fetching even where the tier would permit it.
+        let origin = attested("sender.test");
+        let (mut b, t) = broker_with(origin.clone(), vec![position("https://a.test/x.png")]);
+        b.allow_origin(&origin);
+        let request = Request {
+            url: Address {
+                token: t.clone(),
+                position: 0,
+            }
+            .to_url(),
+            transferred_length: None,
+        };
+        let infrastructure = Infrastructure::default();
+        assert!(b.grant(&request, &authority(), &infrastructure).is_ok());
+
+        assert!(b.hold(t.as_str(), true));
+        assert_eq!(
+            b.answer(&request, &authority(), &infrastructure),
+            Answer::Blocked(Reason::Paused)
+        );
+        assert_eq!(
+            b.grant(&request, &authority(), &infrastructure)
+                .unwrap_err(),
+            Answer::Blocked(Reason::Paused)
+        );
+        assert_eq!(
+            b.withheld(t.as_str(), &authority(), &infrastructure),
+            Some(vec![Some(Reason::Paused)])
+        );
+
+        assert!(b.hold(t.as_str(), false));
+        assert!(b.grant(&request, &authority(), &infrastructure).is_ok());
+        assert!(b.revoke(&t));
+        assert!(!b.hold(t.as_str(), true), "a revoked token held nothing");
     }
 
     #[test]

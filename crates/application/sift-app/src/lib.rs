@@ -382,6 +382,12 @@ pub struct App {
     /// window at once, which is a durable allowance nobody asked for. It is also bounded by
     /// construction, in a process specified to run for weeks.
     allowed_once_message: Option<LocalId>,
+    /// Which account each live document's token belongs to, so its fetches stop while that
+    /// account is paused — D-95. The broker knows no accounts.
+    ///
+    /// Bounded by the broker's live documents: every refresh drops the tokens the broker no
+    /// longer holds, whether navigation, a shed, or a render revoked them.
+    document_owners: BTreeMap<String, String>,
     /// D-10's authority — the filter engine built from the bundled lists, or its absence.
     ///
     /// **Held only while a window is open and the governor is at L0**, which is NFR-42's
@@ -460,6 +466,7 @@ impl App {
             last_pressure_at: None,
             last_pressure: sift_governor::Pressure::Normal,
             allowed_once_message: None,
+            document_owners: BTreeMap::new(),
             // Absent until a window opens: no window means no body view and so no caller.
             filter: sift_block::engine::Authority::Absent,
             network: sift_net::tier::Tier::Conservative,
@@ -469,7 +476,7 @@ impl App {
     /// The network-derived policy tier, as detection or the user's per-network override
     /// resolved it — D-14, FR-35. Recorded rather than detected here: the platform monitor is
     /// the shell's, and the layer only plans against its answer.
-    pub const fn set_network_tier(&mut self, tier: sift_net::tier::Tier) {
+    pub fn set_network_tier(&mut self, tier: sift_net::tier::Tier) {
         self.network = tier;
         self.resources_under_tier();
     }

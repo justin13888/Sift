@@ -225,6 +225,8 @@ impl App {
         // A token that names no live document cannot happen here — it was minted a moment
         // ago — but were it to, every position is reported withheld rather than none.
         let infrastructure = sift_block::origin::Infrastructure::default();
+        self.document_owners
+            .insert(rendered.token.as_str().to_owned(), owner);
         self.resources_under_tier();
         let refusals = self
             .resources
@@ -308,10 +310,26 @@ impl App {
     }
 
     /// Put the broker under the tier last recorded, so a fetch and the count a reader is shown
-    /// are both decided by the network the reader is actually on.
-    pub(crate) const fn resources_under_tier(&mut self) {
+    /// are both decided by the network the reader is actually on — and under each document's
+    /// account pause, which server search also checks and the tier does not carry (D-95).
+    pub(crate) fn resources_under_tier(&mut self) {
         self.resources.tier_permits_fetch = fetches_on_demand(self.network);
         self.resources.tier_permits_prefetch = self.network.prefetch();
+        let paused: std::collections::BTreeSet<String> = self
+            .document_owners
+            .values()
+            .filter(|owner| self.is_paused(owner))
+            .cloned()
+            .collect();
+        self.hold_paused_documents(|owner| paused.contains(owner));
+    }
+
+    /// Hold every live document whose account `paused` names, release the rest, and forget
+    /// the tokens the broker no longer holds.
+    pub(crate) fn hold_paused_documents(&mut self, paused: impl Fn(&str) -> bool) {
+        let resources = &mut self.resources;
+        self.document_owners
+            .retain(|token, owner| resources.hold(token, paused(owner)));
     }
 
     /// Revoke a document's token.
@@ -321,6 +339,7 @@ impl App {
     pub fn close_document(&mut self, token: &str) -> bool {
         // By text rather than by value: a shell holds the token as a string, and nothing
         // should be given a way to *construct* one — that is the part that stays unforgeable.
+        self.document_owners.remove(token);
         self.resources.revoke_named(token)
     }
 }
@@ -548,6 +567,7 @@ fn describe(reason: &Reason, authority_loaded: bool) -> String {
             }
         }
         Reason::NetworkPolicy => "the current network policy allows no fetches".to_owned(),
+        Reason::Paused => "syncing is paused for this account, so nothing is fetched".to_owned(),
         Reason::Bounds(bound) if bound.starts_with("L-11") || bound.starts_with("L-12") => {
             "the image's dimensions are larger than Sift will decode".to_owned()
         }
@@ -592,6 +612,90 @@ mod tests {
         for leak in ["authority", "backstop", "L-1", "{", "(", "Finding", "Block"] {
             assert!(!text.contains(leak), "{leak:?} leaked into {text:?}");
         }
+    }
+
+    /// C1's defect: the tier said "fetch" and nothing asked whether the account was paused.
+    /// `is_paused` reads the container, which a test cannot open without the platform's
+    /// credential store, so the pause is handed to the hold directly — the mapping from token
+    /// to account, the refusal, and the pruning are what this proves.
+    #[test]
+    fn a_paused_accounts_document_fetches_nothing_and_says_why() {
+        use sift_broker::broker::Request;
+        let mut app = App::new();
+        app.set_window_present(true);
+        app.add_replayed_account("mail").expect("added");
+        app.sync("mail", 5).expect("sync");
+        let listed = crate::list_messages(app.account("mail").expect("open")).expect("list");
+        let id = listed
+            .iter()
+            .map(|(m, _)| *m)
+            .find(|m| {
+                app.open_document(*m, false, false)
+                    .is_ok_and(|d| d.fetching_positions > 0)
+            })
+            .expect("the corpus has a message with remote content");
+        app.allow_remote_content_once(id);
+        let document = app.open_document(id, false, false).expect("opened");
+        let infrastructure = sift_block::origin::Infrastructure::default();
+        let request = |i: usize| Request {
+            url: format!(
+                "{}://{}/{i}",
+                sift_foundation::identifiers::INTERNAL_SCHEME,
+                document.token
+            ),
+            transferred_length: None,
+        };
+        let allowed = (0..document.fetching_positions)
+            .find(|&i| {
+                app.resources
+                    .grant(&request(i), &app.filter, &infrastructure)
+                    .is_ok()
+            })
+            .expect("consent was given and something is allowed");
+        assert_eq!(
+            app.document_owners.len(),
+            app.resources.live_documents(),
+            "one owner per live document, and no more"
+        );
+
+        app.hold_paused_documents(|owner| owner == "mail");
+        assert_eq!(
+            app.resources
+                .grant(&request(allowed), &app.filter, &infrastructure)
+                .unwrap_err(),
+            Answer::Blocked(Reason::Paused)
+        );
+        assert!(
+            app.resources
+                .withheld(&document.token, &app.filter, &infrastructure)
+                .expect("live")
+                .iter()
+                .all(Option::is_some),
+            "the reader's count must say every position is withheld while paused"
+        );
+
+        app.hold_paused_documents(|_| false);
+        assert!(
+            app.resources
+                .grant(&request(allowed), &app.filter, &infrastructure)
+                .is_ok()
+        );
+
+        assert!(app.close_document(&document.token));
+        assert!(!app.document_owners.contains_key(&document.token));
+        app.resources.shed();
+        app.resources_under_tier();
+        assert!(app.document_owners.is_empty(), "a shed's tokens were kept");
+    }
+
+    #[test]
+    fn a_pause_refusal_says_so() {
+        let text = describe(&Reason::Paused, true);
+        assert_eq!(
+            text,
+            "syncing is paused for this account, so nothing is fetched"
+        );
+        in_the_readers_terms(&text);
     }
 
     #[test]

@@ -160,7 +160,9 @@ document's layout nor the store, the queue or search.
 **The tier decides it the way it decides every on-demand fetch.** An allowed image in the message a
 person is reading is a fetch that person asked for, so it follows the same rows as
 [server-side search](../runtime/network-conditions.md): permitted in Unrestricted, Conservative and
-Minimal, and refused while paused, behind a captive portal, and with no path. Prefetch is a separate
+Minimal, and refused while paused, behind a captive portal, and with no path. Paused means what it means
+for search: the tier, or the message's own account paused by the user under D-95, which the tier does not
+carry. Prefetch is a separate
 question with a separate answer — only Unrestricted, under NFR-32 — and the broker holds the two apart
 rather than letting a tier that permits the one imply the other. A refusal by the tier is a deterministic
 blocked answer, and the reader's withheld count says so.
