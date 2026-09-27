@@ -1,10 +1,10 @@
 //! The policy pass.
 
 use crate::allowlist;
+use crate::dom::{Dom, Handle, Node, NodeData, SerializableHandle};
 use html5ever::driver::ParseOpts;
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::{parse_document, serialize};
-use markup5ever_rcdom::{Handle, NodeData, RcDom, SerializableHandle};
 use sift_foundation::limits::{
     L6_DOM_DEPTH, L7_DOM_NODES, L8_ATTRS_PER_ELEMENT, L35_SANITIZE_PASSES,
 };
@@ -145,7 +145,7 @@ fn settle(mut later: Sanitized, earlier: Sanitized) -> Sanitized {
 fn pass(html: &str) -> Result<Sanitized, SanitizeError> {
     // I10: the tree builder consumes bytes under the HTML encoding rules and yields UTF-8
     // regardless of what the document declared, including where declarations contradict.
-    let dom = parse_document(RcDom::default(), ParseOpts::default()).one(html);
+    let dom = parse_document(Dom::default(), ParseOpts::default()).one(html);
 
     let state = RefCell::new(State {
         positions: Vec::new(),
@@ -225,21 +225,13 @@ fn walk(
                 // invention of an empty message than removal is.
                 walk(&child, depth + 1, in_anchor, state)?;
 
-                // `mem::take` rather than `clone`, and the reason is not tidiness.
-                //
-                // The DOM's `Drop` is iterative so that a deeply nested tree does not
-                // overflow the stack when it is released, and the way it achieves that is by
-                // **emptying the children of every node it walks**. An unwrapped element is
-                // no longer in its parent's kept list, so it is released as soon as the
-                // parent's children are replaced — and on the way out it would clear the
-                // children of the very nodes just reparented out of it, which are still
-                // alive and still referenced.
-                //
-                // Taking the list leaves the discarded element holding nothing, so its
-                // release reaches nothing that survived it. Without this every unwrapped
-                // element silently empties its descendants: the elements remain and their
-                // text is gone, which reads as a sanitizer that strips content rather than
-                // as a use-after-reparent.
+                // `mem::take` rather than `clone`: the discarded element keeps no second
+                // reference to what moved out of it. The previous DOM's release emptied the
+                // children of every node it walked, alive or not, and an unwrapped element
+                // cloned from here silently emptied its descendants. Sift's own DOM releases
+                // only what it last owns (`crate::dom`), so the take is no longer what keeps
+                // the text; it stays because a tree with one owner per node is the one that
+                // cannot reintroduce the defect.
                 let grandchildren: Vec<Handle> = core::mem::take(&mut child.children.borrow_mut());
                 for g in grandchildren {
                     g.parent.set(Some(Rc::downgrade(node)));
@@ -514,7 +506,7 @@ fn root_direction_and_language(
     if carried.is_empty() {
         return None;
     }
-    Some(markup5ever_rcdom::Node::new(NodeData::Element {
+    Some(Node::new(NodeData::Element {
         name: html5ever::QualName::new(
             None,
             html5ever::ns!(html),
@@ -740,7 +732,7 @@ fn filter_style_element(node: &Handle, state: &RefCell<State>) -> Verdict {
         return Verdict::Drop;
     }
     // Replace the children with the regenerated text. Nothing of the sender's survives.
-    let text = markup5ever_rcdom::Node::new(NodeData::Text {
+    let text = Node::new(NodeData::Text {
         contents: RefCell::new(rebuilt.into()),
     });
     *node.children.borrow_mut() = vec![text];

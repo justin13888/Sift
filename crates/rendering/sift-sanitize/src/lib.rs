@@ -34,6 +34,7 @@
 pub mod allowlist;
 pub mod audit;
 pub mod document;
+mod dom;
 pub mod sanitize;
 
 pub use sanitize::{SanitizeError, Sanitized, sanitize};

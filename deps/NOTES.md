@@ -127,7 +127,7 @@ decision".
 
 ---
 
-## `html5ever` and `markup5ever_rcdom`
+## `html5ever`
 
 **Reached by:** `sift-sanitize`. **The most hostile-input-facing dependency in the tree** —
 every byte it parses was chosen by an unauthenticated sender with unlimited attempts.
@@ -147,14 +147,28 @@ every byte it parses was chosen by an unauthenticated sender with unlimited atte
   obligation rather than a nice-to-have.
 - **Licence.** `MIT OR Apache-2.0`. Clears the allowlist.
 - **Floor, threads, timers, sockets.** No floor above Sift's. No network, no filesystem, no
-  threads.
+  threads. The 0.40 line and what it brings in (`markup5ever` 0.40, `web_atoms` 0.3,
+  `string_cache` 0.11, `phf` 0.14) all declare `rust-version = 1.85` and `MIT OR Apache-2.0`
+  or `MIT`. `phf` 0.14 sits beside the 0.13 `cssparser` still uses; a duplicate version, not a
+  new kind of dependency.
 
-**A defect found in it while wiring this up, recorded because it will recur.** `Node`'s
-`Drop` is iterative so that a deeply nested tree does not overflow the stack, and it
-achieves that by **emptying the children of every node it walks** — including nodes that are
-still alive and referenced elsewhere. Any code that reparents a subtree and then lets the old
-parent be released will silently lose that subtree's contents. `sanitize.rs` takes the
-children out of an unwrapped element rather than cloning them, and says why at the site.
+**Why the DOM is Sift's own, and not `markup5ever_rcdom`.** The tree the builder writes into
+was `markup5ever_rcdom`, a crate the html5ever project publishes for its own tests and calls
+unsupported — "has not been fuzzed or tested against arbitrary, malicious, or nontrivial
+inputs". It pinned the sanitizer to the builder line it was cut for, and that is how a builder
+panic on `<meta http-equiv="Content-Type"content="charset">` (NFR-19), fixed upstream in
+0.40, stayed reachable: no rcdom for 0.40 was published. The tree-sink interface is small and
+unchanged between the two lines, so the sanitizer now owns its DOM (`sift-sanitize`'s `dom`
+module) and takes the builder at the version that carries its fixes. Upgrading the builder is
+now a lockfile change reviewed here, not a wait on a test crate.
+
+**A defect found in the old DOM, recorded because the new one is built not to have it.**
+rcdom's `Node::drop` was iterative so a deeply nested tree did not overflow the stack, and it
+achieved that by **emptying the children of every node it walked** — including nodes still
+alive and referenced elsewhere. Code that reparented a subtree and then released the old
+parent silently lost that subtree's contents. Sift's DOM descends only into nodes it holds the
+last reference to, so a survivor keeps its children; `sanitize.rs` still takes the children
+out of an unwrapped element rather than cloning them.
 
 ---
 
