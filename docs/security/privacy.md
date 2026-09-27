@@ -89,9 +89,35 @@ that is **unverifiable in principle**: you cannot demonstrate the absence of a t
 and NFR-23 states plainly that credentials must never be in a crash dump. A mechanism whose compliance
 cannot be shown does not satisfy a requirement written that strongly.
 
-Disabling the platform's own crash collectors matters as much as what Sift itself captures. Those
-collectors write full dumps regardless of Sift's opt-in, so leaving them enabled would mean the guarantee
-holds only for the path Sift controls.
+What the platform collects matters as much as what Sift itself captures. A platform collector records a
+crash regardless of Sift's opt-in, so one left running means the guarantee holds only for the path Sift
+controls. Every collector that can be disabled from inside the process is disabled; one that cannot is
+stated to the user as a limitation of the guarantee, never implied to be inside it.
+
+**What the platform allows, which answers [Q-20](../open-questions.md) in part.** The collectors are two
+things, and only one of them can be switched off from inside the process. The operating system's core
+dump is governed by a per-process resource limit, and lowering that limit is not an operation the macOS
+sandbox mediates: Sift lowers it to zero, hard limit included, before anything else at launch, reads the
+result back rather than assuming it, and states it in the runtime panel and in every report it writes. The
+platform's crash reporter is the other, and no application can turn it off, sandboxed or not — it runs
+outside the process and is governed by the user's own analytics settings. What it records is not under
+Sift's control and is not covered by this decision: besides backtraces and the loaded libraries it keeps
+each thread's register state, whose values can be anything the process held at that instant, and
+application-specific text copied out of the process, such as a runtime's last error message. Nothing
+establishes that it carries no heap-derived data, so this decision does not claim it; the runtime panel
+states it as the limitation it is.
+That readback is how the answer is confirmed against the sandboxed Developer ID build: the release
+candidate's panel shows it.
+
+**What Sift's own report holds.** On a fatal signal — which is also how a panic that escapes
+[D-47](../architecture/overview.md)'s catch boundaries ends, because an escaping unwind aborts — the report
+records the crashing thread's backtrace, the signal and faulting address, the version, build number and
+source revision, and the identifier and load address of every image loaded at launch, which is what offline
+symbolication against the release's kept debug symbols needs. It is assembled from text prepared at launch
+and from the stack, and the handler reads nothing from the heap, which is how the absence of heap memory is
+a property of the writer rather than of a pass over its output. Two things D-35 allows are not yet in it:
+the other threads' backtraces, and the per-subsystem counters, which need a read the core can answer from a
+signal handler.
 
 **What it costs:** memory-corruption bugs and NFR-19 failures on hostile MIME are exactly the class that
 backtraces alone diagnose poorly, and they are also the class least likely to be reproducible from a user
@@ -127,7 +153,11 @@ failures where it is already weakest.
 
 The save dialog is chosen over revealing the file in place because it works the same way inside the macOS
 sandboxes [D-45](../product/platform-baseline.md) requires and under Flatpak: the platform grants access
-to the location the user picked, and Sift needs no broader file access to hand the report over. The
+to the location the user picked, and Sift needs no broader file access to hand the report over. The macOS
+shell offers to show the file in Finder as well, because revealing a file in the application's own
+container needs no access it does not already have, and a tester collecting a report and the
+[NFR-55](../product/platform-baseline.md) log together wants the folder rather than one copy; the save
+dialog stays the path every shell offers. The
 retained report holds what D-35 allows and nothing else, so it adds no correspondence metadata to a data
 directory that is backed up and copied between machines.
 

@@ -4,6 +4,13 @@
 #USAGE flag "--release" help="Build the release configuration (the default)"
 #USAGE flag "--run" help="Launch the bundle after building"
 #USAGE flag "--ad-hoc" help="Sign ad-hoc instead of under the team (for a machine with no identity; CI implies it)"
+#USAGE flag "--universal" help="Release only: link one arm64+x86_64 core and build both slices (D-46)"
+#USAGE flag "--marketing-version <version>" help="The user-facing version written into the bundle (D-62)"
+#USAGE flag "--build-number <number>" help="The bundle's build number (D-62)"
+#USAGE flag "--source-revision <revision>" help="The git revision stamped into Info.plist (D-62)"
+#
+# The last four are what `mise run release-rc` passes. Nothing else needs them, and a build
+# without them keeps the literals `project.yml` carries.
 #
 # D-61: **the platform's own application toolchain owns the bundle**, and the Rust core is
 # built into a static library it links. The Rust workspace never produces the `.app`, so this
@@ -42,15 +49,51 @@ command -v xcodegen >/dev/null 2>&1 || {
 configuration="Release"
 launch=false
 ad_hoc=false
-for arg in "$@"; do
+universal=false
+marketing_version=""
+build_number=""
+source_revision=""
+while [[ $# -gt 0 ]]; do
+    arg="$1"
+    shift
     case "$arg" in
         --debug) configuration="Debug" ;;
         --release) configuration="Release" ;;
         --run) launch=true ;;
         --ad-hoc) ad_hoc=true ;;
-        *) echo "macos: unknown argument '$arg' (expected --debug, --release, --run or --ad-hoc)" >&2; exit 1 ;;
+        --universal) universal=true ;;
+        --marketing-version=*) marketing_version="${arg#*=}" ;;
+        --build-number=*) build_number="${arg#*=}" ;;
+        --source-revision=*) source_revision="${arg#*=}" ;;
+        --marketing-version | --build-number | --source-revision)
+            [[ $# -gt 0 ]] || { echo "macos: $arg needs a value" >&2; exit 1; }
+            case "$arg" in
+                --marketing-version) marketing_version="$1" ;;
+                --build-number) build_number="$1" ;;
+                --source-revision) source_revision="$1" ;;
+            esac
+            shift
+            ;;
+        *)
+            echo "macos: unknown argument '$arg' (expected --debug, --release, --run, --ad-hoc," >&2
+            echo "       --universal, --marketing-version, --build-number or --source-revision)" >&2
+            exit 1
+            ;;
     esac
 done
+
+# D-46's universal artefact is a Release product: the Debug configuration links the host's
+# archive and nothing else, and a universal Debug build would be two cargo builds for a bundle
+# nobody ships.
+if [[ "$universal" == true && "$configuration" != "Release" ]]; then
+    echo "macos: --universal builds the Release configuration only." >&2
+    exit 1
+fi
+if [[ -n "$build_number" && ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
+    # D-62 and the register: the build number space begins at 1.
+    echo "macos: --build-number must be a positive integer, got '$build_number'." >&2
+    exit 1
+fi
 
 # **D-45's signing posture, and the one machine it cannot apply to.** `project.yml` signs every
 # configuration under the team (see the comment there). A CI runner holds no identity and no
@@ -70,73 +113,83 @@ if [[ "$ad_hoc" == true && "$launch" == true ]]; then
     exit 1
 fi
 
-if [[ "$configuration" == "Release" ]]; then
-    cargo build --release -p sift-abi
+# Build settings this invocation overrides on the `xcodebuild` command line, on top of
+# `project.yml`. Empty for an ordinary build.
+overrides=()
+
+if [[ "$universal" == true ]]; then
+    # **D-46 — one core with both slices, linked by an explicit path.** Each architecture is a
+    # targeted build (`--target` on the command line wins over `CARGO_BUILD_TARGET`, so the
+    # guard below has nothing to guard here), and `lipo` joins the two into an archive under a
+    # directory no untargeted build writes. The project is then told that archive's absolute
+    # path in place of `-lsift_abi`, so the `target/release` search path is never consulted and
+    # a stale host-only archive there cannot be what gets linked.
+    slices=()
+    for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+        cargo build --release -p sift-abi --target "$triple"
+        slices+=("target/$triple/release/libsift_abi.a")
+    done
+    mkdir -p target/universal-apple-darwin/release
+    archive="$PWD/target/universal-apple-darwin/release/libsift_abi.a"
+    rm -f "$archive"
+    lipo -create -output "$archive" "${slices[@]}"
+    archs="$(lipo -archs "$archive")"
+    for arch in arm64 x86_64; do
+        if [[ " $archs " != *" $arch "* ]]; then
+            echo "macos: $archive has no $arch slice (it has: $archs)." >&2
+            exit 1
+        fi
+    done
+    echo "macos: universal core $archive ($archs)"
+    overrides+=("ARCHS=arm64 x86_64" "ONLY_ACTIVE_ARCH=NO" "OTHER_LDFLAGS=$archive")
 else
-    cargo build -p sift-abi
+    if [[ "$configuration" == "Release" ]]; then
+        cargo build --release -p sift-abi
+    else
+        cargo build -p sift-abi
+    fi
+
+    # The project links `target/{debug,release}/libsift_abi.a` by configuration.
+    # `CARGO_BUILD_TARGET` moves cargo's output under `target/$TARGET/` without moving the link
+    # path, so the archive the linker finds would be whatever an earlier untargeted build
+    # happened to leave there — which is the stale-declaration failure the header step below
+    # exists to prevent, arriving by the other door. Neither is worth diagnosing twice.
+    if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
+        echo "macos: CARGO_BUILD_TARGET is set ($CARGO_BUILD_TARGET), so cargo wrote libsift_abi.a" >&2
+        echo "       under target/$CARGO_BUILD_TARGET/ while this project links target/{debug,release}." >&2
+        echo "       Unset it for this task rather than linking whatever is stale there." >&2
+        exit 1
+    fi
+
+    archive="target/$([[ "$configuration" == "Release" ]] && echo release || echo debug)/libsift_abi.a"
+    [[ -f "$archive" ]] || {
+        echo "macos: $archive is missing after the cargo build above." >&2
+        exit 1
+    }
 fi
 
-# The project links `target/{debug,release}/libsift_abi.a` by configuration. `CARGO_BUILD_TARGET`
-# moves cargo's output under `target/$TARGET/` without moving the link path, so the archive the
-# linker finds would be whatever an earlier untargeted build happened to leave there — which is
-# the stale-declaration failure the header step below exists to prevent, arriving by the other
-# door. Neither is worth diagnosing twice.
-if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
-    echo "macos: CARGO_BUILD_TARGET is set ($CARGO_BUILD_TARGET), so cargo wrote libsift_abi.a" >&2
-    echo "       under target/$CARGO_BUILD_TARGET/ while this project links target/{debug,release}." >&2
-    echo "       Unset it for this task rather than linking whatever is stale there." >&2
-    exit 1
-fi
-
-archive="target/$([[ "$configuration" == "Release" ]] && echo release || echo debug)/libsift_abi.a"
-[[ -f "$archive" ]] || {
-    echo "macos: $archive is missing after the cargo build above." >&2
-    exit 1
-}
+# D-62 — what `mise run release-rc` stamps. Each is read back from the bundle below.
+[[ -z "$marketing_version" ]] || overrides+=("MARKETING_VERSION=$marketing_version")
+[[ -z "$build_number" ]] || overrides+=("CURRENT_PROJECT_VERSION=$build_number")
+[[ -z "$source_revision" ]] || overrides+=("SIFT_SOURCE_REVISION=$source_revision")
 
 # D-60 — the committed header matches the ABI crate. `mise run bless-header` regenerates it.
 cargo xtask header
 
 # The OAuth clients — **one per provider kind** — and the callback scheme derived from each.
-#
-# **Configuration, not a secret.** A client identifier for a public client appears in every
-# authorization URL it generates — that is why PKCE exists — so this is not withheld for
-# secrecy. It is out of the repository because it is per-installation: baking one in would make
-# every checkout share one client, and a provider's quota, verification status and consent
-# screen all attach to the client rather than to the application.
-#
-# One per kind because a client belongs to one identity platform: an identifier Google issued
-# means nothing to Microsoft's. The kinds are the register's opaque strings
-# (`crates/providers/sift-registry`), and a kind with no client is absent from the add-account
-# choices rather than offered and broken.
-#
-#   kind   file                                   environment
-#   gmail  shells/macos/oauth-client.gmail.txt    SIFT_OAUTH_CLIENT_ID_GMAIL
-#          shells/macos/oauth-client.txt          SIFT_OAUTH_CLIENT_ID      (before there were two)
-#   graph  shells/macos/oauth-client.graph.txt    SIFT_OAUTH_CLIENT_ID_GRAPH
+# Where each client comes from, and why there is one per kind, is `shells/macos/oauth-clients.bash`,
+# which `mise-tasks/release-rc` also reads for its precondition: one lookup, so the release
+# precondition cannot pass while this build resolves no client, or the reverse.
 #
 # The scheme is **derived** rather than configured separately, so the two cannot disagree.
 # Google's iOS/macOS client type accepts exactly one redirect scheme — the client identifier
 # reversed — and its Desktop type wants a 127.0.0.1 loopback, which NFR-24 forbids outright.
 # Microsoft's mobile-and-desktop client names its own redirect, so it returns on Sift's scheme,
 # which the bundle always registers.
-read_client() {
-    local variable="$1"
-    shift
-    local value="${!variable:-}"
-    local file
-    for file in "$@"; do
-        if [[ -z "$value" && -f "$file" ]]; then
-            value="$(tr -d '[:space:]' < "$file")"
-        fi
-    done
-    printf '%s' "$value"
-}
-SIFT_OAUTH_CLIENT_ID_GMAIL="$(read_client SIFT_OAUTH_CLIENT_ID_GMAIL shells/macos/oauth-client.gmail.txt)"
-if [[ -z "$SIFT_OAUTH_CLIENT_ID_GMAIL" ]]; then
-    SIFT_OAUTH_CLIENT_ID_GMAIL="$(read_client SIFT_OAUTH_CLIENT_ID shells/macos/oauth-client.txt)"
-fi
-SIFT_OAUTH_CLIENT_ID_GRAPH="$(read_client SIFT_OAUTH_CLIENT_ID_GRAPH shells/macos/oauth-client.graph.txt)"
+# shellcheck source=shells/macos/oauth-clients.bash
+source shells/macos/oauth-clients.bash
+SIFT_OAUTH_CLIENT_ID_GMAIL="$(sift_oauth_client gmail)"
+SIFT_OAUTH_CLIENT_ID_GRAPH="$(sift_oauth_client graph)"
 export SIFT_OAUTH_CLIENT_ID_GMAIL SIFT_OAUTH_CLIENT_ID_GRAPH
 
 # The scheme the Google client requires. It is the one URL type whose scheme varies, so it is
@@ -218,6 +271,7 @@ xcode() {
         -scheme Sift \
         -configuration "$configuration" \
         -derivedDataPath shells/macos/.build/xcode \
+        ${overrides[@]+"${overrides[@]}"} \
         "$@"
 }
 
@@ -331,6 +385,38 @@ for required in "$SIFT_OAUTH_SCHEME" net.justinchung.sift; do
     fi
 done
 echo "       registers  $(sort -u <<<"$built_schemes" | tr '\n' ' ')"
+
+# D-62's stamps, read back for the reason the clients are: an override that did not resolve
+# leaves the literal in `project.yml`, or removes the key, and says nothing.
+for pair in "CFBundleShortVersionString=$marketing_version" "CFBundleVersion=$build_number" \
+    "SiftSourceRevision=$source_revision"; do
+    key="${pair%%=*}"
+    wanted="${pair#*=}"
+    [[ -n "$wanted" ]] || continue
+    built="$(plutil -extract "$key" raw -o - "$plist" 2>/dev/null || true)"
+    if [[ "$built" != "$wanted" ]]; then
+        echo "macos: the bundle's $key is '${built:-<absent>}', not the '$wanted' this build set." >&2
+        exit 1
+    fi
+done
+if [[ -n "$marketing_version$build_number$source_revision" ]]; then
+    echo "       version    $(plutil -extract CFBundleShortVersionString raw -o - "$plist")" \
+        "($(plutil -extract CFBundleVersion raw -o - "$plist"))" \
+        "$(plutil -extract SiftSourceRevision raw -o - "$plist" 2>/dev/null || echo 'no revision')"
+fi
+
+# D-46 — both slices in the executable, not only in the archive it linked.
+if [[ "$universal" == true ]]; then
+    executable="$app/Contents/MacOS/$(plutil -extract CFBundleExecutable raw -o - "$plist")"
+    built_archs="$(lipo -archs "$executable")"
+    for arch in arm64 x86_64; do
+        if [[ " $built_archs " != *" $arch "* ]]; then
+            echo "macos: $executable has no $arch slice (it has: $built_archs)." >&2
+            exit 1
+        fi
+    done
+    echo "       architectures $built_archs"
+fi
 
 # **The signature is read back too**, for the reason the URL types are: a bundle that lost an
 # entitlement should fail here rather than in a user's Keychain. D-45.

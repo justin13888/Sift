@@ -1,4 +1,5 @@
-//! D-16, D-34, NFR-45 — what is counted, and what the soak gate reads.
+//! D-16, D-34, NFR-45 — what is counted, and what the soak gate reads. NFR-55 — the
+//! bounded local diagnostic log ([`log`]).
 //!
 //! # Explicit cache accounting is the primary mechanism
 //!
@@ -16,6 +17,7 @@
 //! and neither is what most tooling reports by default.
 
 pub mod cache;
+pub mod log;
 pub mod soak;
 pub mod wakeups;
 

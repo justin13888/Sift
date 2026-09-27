@@ -25,6 +25,11 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- D-62: the source revision the version identifies, for the About panel and a crash
+	     report. `mise run release-rc` sets it; a development build leaves it empty, which the About
+	     panel reads as no revision rather than a wrong one. -->
+	<key>SiftSourceRevision</key>
+	<string>$(SIFT_SOURCE_REVISION)</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>NSPrincipalClass</key>

@@ -226,6 +226,11 @@ fi
 
 # `macos` is four steps in two toolchains and a platform guard, so it lives in mise-tasks/ too.
 # `mise run macos -- --run` builds the bundle and then launches it.
+#
+# `release-rc` lives there as well: `mise run release-rc -- <version>` makes the Cask channel's
+# universal, notarized and stapled DMG on the release machine and writes the Cask's checksum.
+# It publishes nothing, and — holding D-63's signing credentials — is never part of `check`,
+# `ci`, a hook or a workflow.
 
 [tasks.linux]
 description = "Build the Linux shell with the toolkit (D-61 — Cargo owns this binary)"

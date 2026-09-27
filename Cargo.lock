@@ -1918,6 +1918,7 @@ name = "sift-observe"
 version = "0.1.0"
 dependencies = [
  "sift-alloc",
+ "sift-foundation",
  "sift-subsystem",
 ]
 
