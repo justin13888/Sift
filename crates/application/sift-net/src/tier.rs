@@ -92,12 +92,6 @@ impl Tier {
         matches!(self, Self::Unrestricted)
     }
 
-    /// Whether filter lists may update. NFR-43: stale is acceptable, absent is not.
-    #[must_use]
-    pub const fn filter_list_updates(self) -> bool {
-        matches!(self, Self::Unrestricted)
-    }
-
     /// Whether push is preferred over polling.
     ///
     /// **Inverted on cellular, and only on cellular.** A keepalive is cheap in bytes and
@@ -185,9 +179,10 @@ pub struct Accounting {
     per_account: Vec<(u128, LinkClass, u64)>,
     /// Traffic belonging to no account.
     ///
-    /// Filter-list and infrastructure-list updates, and FR-3's autoconfiguration discovery —
-    /// which happens *before the account exists*, so charging it to one is impossible as
-    /// well as wrong. **Charged to the installation, and counting toward no account's cap.**
+    /// FR-3's autoconfiguration discovery, which happens *before the account exists*, so
+    /// charging it to one is impossible as well as wrong. Lists are not fetched at all —
+    /// D-111 ships them in the binary. **Charged to the installation, and counting toward
+    /// no account's cap.**
     installation: u64,
 }
 
@@ -224,8 +219,8 @@ impl Accounting {
 
     /// Whether an account has reached its cap.
     ///
-    /// The installation's own traffic is **excluded**, which is what stops a filter-list
-    /// update pausing somebody's mail.
+    /// The installation's own traffic is **excluded**, which is what stops traffic the user
+    /// cannot connect to an account — adding another account, say — pausing this one's mail.
     #[must_use]
     pub fn over_cap(&self, account: u128, cap: Option<u64>) -> bool {
         cap.is_some_and(|c| self.total_for(account) >= c)
@@ -322,7 +317,6 @@ mod tests {
             Tier::OfflinePortal,
         ] {
             assert!(!t.prefetch(), "{t:?} prefetched");
-            assert!(!t.filter_list_updates(), "{t:?} updated filter lists");
         }
         assert!(Tier::Unrestricted.prefetch());
     }
@@ -391,7 +385,7 @@ mod tests {
 
     #[test]
     fn installation_traffic_counts_toward_no_accounts_cap() {
-        // Otherwise a filter-list update would pause somebody's mail — and FR-3's
+        // Otherwise adding a second account would pause the first one's mail — and FR-3's
         // autoconfiguration happens before the account exists, so charging it to one is
         // impossible as well as wrong.
         let mut a = Accounting::default();

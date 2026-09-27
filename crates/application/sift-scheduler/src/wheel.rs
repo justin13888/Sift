@@ -53,9 +53,9 @@ pub struct TimerId(u64);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub id: TimerId,
-    /// `None` for work that belongs to the installation rather than to an account — a
-    /// filter-list update, for instance, whose traffic FR-36 charges to the installation
-    /// and not across accounts.
+    /// `None` for work that belongs to the installation rather than to an account —
+    /// [`Work::Maintenance`], whose traffic, if any, FR-36 charges to the installation and
+    /// not across accounts.
     pub account: Option<AccountId>,
     pub kind: Work,
 }
