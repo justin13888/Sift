@@ -110,6 +110,9 @@ impl core::fmt::Debug for Blocker {
 /// Compiled in rather than read from disk, because a list read from a path at run time is a
 /// list something other than the build can change, and D-111's whole argument is that the
 /// integrity of list content is the integrity of the build.
+///
+/// It is also how **NFR-43** holds: an update is a new build, never a fetch, so nothing about
+/// updating can block rendering, and a list compiled in can be stale but never absent.
 pub const BUNDLED_EMAIL_LIST: &str = include_str!("../lists/email.txt");
 
 impl Blocker {
