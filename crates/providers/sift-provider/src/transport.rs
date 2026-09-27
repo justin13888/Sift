@@ -184,7 +184,7 @@ pub struct Replay {
     pub performed: Vec<Exchange>,
     /// The headers each performed request carried, in step with `performed`.
     ///
-    /// "No send or compose scope is ever requested" and "the idempotency key is the
+    /// "No scope is requested for sending" and "the idempotency key is the
     /// client-assigned intent identifier" are both claims about headers, and neither is
     /// checkable against a response.
     pub headers: Vec<Vec<(String, String)>>,

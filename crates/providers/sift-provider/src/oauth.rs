@@ -14,11 +14,12 @@
 //!
 //! # What is checked here rather than trusted
 //!
-//! [`OAuthProfile::authorizes_sending`] is the no-send constraint expressed where a reviewer
-//! can check it against an authorization screen, which is what D-88's second point asks for.
-//! It is not a lint over the string "send": a scope that grants a mail protocol grants
-//! submission over that protocol whatever it is called, and the notable case is a provider
-//! whose full-mailbox scope is spelled as a bare URL.
+//! [`OAuthProfile::authorizes_sending`] checks D-88's second point: no scope requested for
+//! sending, and none that adds a submission path over the minimum. It is not a lint over the
+//! string "send": a scope that grants a mail protocol grants submission over that protocol
+//! whatever it is called, and the notable case is a provider whose full-mailbox scope is
+//! spelled as a bare URL. What it cannot see is a provider whose *minimum* scope also sends;
+//! D-88 as amended keeps no-send there by the adapter's committed endpoint list instead.
 
 use core::fmt::Write as _;
 use sha2::{Digest, Sha256};
@@ -67,11 +68,12 @@ pub struct OAuthProfile {
 }
 
 impl OAuthProfile {
-    /// Whether any scope requested would authorize sending mail.
+    /// Whether any scope requested is named for sending or composing, or is one the adapter
+    /// declared in [`Self::sending_scopes`] as adding a submission path over the minimum.
     ///
-    /// **This must be false forever.** The no-send constraint is structural, and a scope
-    /// that authorizes submission is an outbound message path that exists whether or not any
-    /// code calls it — it is the capability sitting on the user's consent screen, granted.
+    /// **This must be false forever.** It does not prove the grant cannot send: a provider's
+    /// minimum scope may authorize sending too, and D-88 as amended keeps no-send there by
+    /// the send methods' absence from the adapter's committed endpoint list.
     #[must_use]
     pub fn authorizes_sending(&self) -> bool {
         self.scopes.iter().any(|s| {

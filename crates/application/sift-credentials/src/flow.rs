@@ -77,12 +77,13 @@ pub const fn embeds_a_client_secret() -> bool {
     false
 }
 
-/// Whether any scope requested can send mail.
+/// Whether every scope requested is free of a send or compose name.
 ///
-/// D-88's second point puts the no-send constraint **where a reviewer can check it against
-/// an authorization screen**: the scope set is the minimum for read, search and the FR-13
-/// intent set, and no send or compose scope is ever requested. It is also **permanent** —
-/// widening it later forces the entire install base through re-consent.
+/// D-88's second point: the scope set is the minimum for read, search and the FR-13 intent
+/// set, and none is requested for sending or composing. It is also **permanent** — widening
+/// it later forces the entire install base through re-consent. A name check cannot see a
+/// minimum scope that also sends; D-88 as amended keeps no-send there by the adapter's
+/// committed endpoint list.
 #[must_use]
 pub fn scopes_are_read_only(scopes: &[&str]) -> bool {
     !scopes.iter().any(|s| {

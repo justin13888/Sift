@@ -95,9 +95,22 @@ it rather than treating it as an option.
 **The scope set is permanent, and it is smaller than it looks.** A scope string is baked into the
 verified client and into every existing user's grant, so widening it later forces the entire install base
 through re-consent. Each provider document records its own set. Two rules hold across all of them: the
-set is the minimum for read, search and the FR-13 intent set, and **no send or compose scope is ever
-requested**, which is [the no-send constraint](../product/scope.md) expressed where a reviewer can check
-it against an authorization screen rather than against a code path.
+set is the minimum for read, search and the FR-13 intent set, and **no scope is ever requested for
+sending or composing, and none wider than that minimum** — so a scope whose addition over the minimum
+is a submission path is refused, however its name reads.
+
+**Where a provider's minimum itself authorizes sending, the constraint moves to the code, and the
+provider document says so.** This rule once also promised that [the no-send constraint](../product/scope.md)
+would be checkable against an authorization screen. That promise was false for
+[Gmail](../mail/providers/gmail.md): no scope there reads content and applies labels without also
+authorizing send, so the narrowest scope that delivers FR-13 is a submission capability on the consent
+screen. The alternative — the read-only scope, with archive, label and trash absent — gives up the
+triage the product exists for, and the no-send constraint is written about code paths, not grants. So
+for such a provider the check a reviewer makes is the [D-13](../mail/provider-model.md) committed
+endpoint list: every send method in the published schema is absent from it, a test fails if one is
+added, and no submission protocol is spoken. A scope wider than the minimum is still refused even
+where the minimum can send, because it adds a path that list cannot bound — a mail protocol with its
+own submission channel.
 
 **Refresh is single-flight per account.** Push, delta, body fetch and queue flush run concurrently under
 [D-19](../architecture/overview.md), so an expired token produces several simultaneous refusals and, with
