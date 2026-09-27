@@ -24,6 +24,9 @@ struct Account: Equatable {
     let writesEnabled: Bool
     /// Intents recorded and held because writes are not authorized.
     let held: UInt32
+    /// Every intent not yet settled with the provider, held or not — what removing the account
+    /// would discard, and what FR-4's confirmation states first.
+    let queued: UInt32
 
     init(_ raw: SiftAccount) {
         id = raw.id
@@ -32,6 +35,7 @@ struct Account: Equatable {
         condition = raw.condition
         writesEnabled = raw.writes_enabled != 0
         held = raw.held
+        queued = raw.queued
     }
 
     /// Every account the container holds, in the order the layer returns them.

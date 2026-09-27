@@ -142,8 +142,14 @@ focus reader, focus sidebar, focus search.
 
 **Search** — begin search, clear search, narrow to this account, narrow to this folder.
 
-**Application** — new main window, close window, quit, pause sync, resume sync, add account, open
-settings, open the per-message debug view, open the runtime panel, and the palette itself.
+**Application** — new main window, close window, quit, pause sync, resume sync, add account, remove
+account, open settings, open the per-message debug view, open the runtime panel, and the palette itself.
+
+**Remove account is not a mutation in the sense above**, and so carries no intent: it changes nothing in
+any mailbox. It is [FR-4](../mail/accounts.md)'s erasure of what this installation holds — the queue that
+every mailbox change passes through among it — and it is confirmed before it happens, in the terms
+[D-89](../mail/accounts.md) requires: the per-account decisions that are lost, and any queued change that
+has not reached the provider and so cannot be restored by a resync.
 
 **Undo** — undo the last reversible gesture, which acts over [D-85](../mail/mutations.md)'s undo group
 rather than over a message, so a bulk operation reverses as the one gesture

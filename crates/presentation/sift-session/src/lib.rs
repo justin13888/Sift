@@ -160,6 +160,38 @@ impl Session {
         }
     }
 
+    /// FR-4 — remove an account, and every observation anchored on it with it.
+    ///
+    /// **Cancelled rather than left to deliver an empty window.** A registration anchored on
+    /// an identity that no longer exists can never show anything again, and one left live is
+    /// a projection recomputed on every signal for the life of the process on behalf of a list
+    /// that has nothing to draw. The unified inbox is not anchored on it and keeps running; it
+    /// simply stops containing the account's rows.
+    ///
+    /// Returns what was cancelled, so the boundary can drop the sinks behind them in the same
+    /// step — a sink with no registration is a callback nothing will ever call.
+    ///
+    /// # Errors
+    /// See [`App::forget_account`]. Nothing is cancelled where the removal was refused.
+    pub fn forget_account(
+        &mut self,
+        name: &str,
+    ) -> Result<(sift_app::Forgotten, Vec<ObservationId>), String> {
+        let forgotten = self.app.forget_account(name)?;
+        let anchored: Vec<ObservationId> = self
+            .observations
+            .iter()
+            .filter(|(_, r)| {
+                matches!(r.watching, Watching::Messages { account: Some(a), .. } if a == forgotten.id)
+            })
+            .map(|(id, _)| ObservationId(*id))
+            .collect();
+        for id in &anchored {
+            self.cancel(*id);
+        }
+        Ok((forgotten, anchored))
+    }
+
     #[must_use]
     pub fn live(&self) -> usize {
         self.observations.len()

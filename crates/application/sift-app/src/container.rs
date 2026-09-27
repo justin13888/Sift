@@ -408,14 +408,7 @@ impl Container {
                 Err(e) => return Err(e.to_string()),
             }
         }
-        let paths = sift_store::account::AccountPaths::under(&self.root, id);
-        for path in [&paths.store, &paths.journal] {
-            for suffix in ["", "-wal", "-journal", "-shm"] {
-                let mut p = path.clone().into_os_string();
-                p.push(suffix);
-                let _ = std::fs::remove_file(PathBuf::from(p));
-            }
-        }
+        remove_account_files(&self.root, id);
         // **One transaction, which is what the schema comment above claims.** The settings
         // reference the row, so they go first — and both go or neither does, or a failure
         // between them leaves an account whose per-account decisions have been erased and
@@ -467,6 +460,23 @@ impl Container {
         }
         out.sort();
         Ok(out)
+    }
+}
+
+/// Delete both of an account's database files under `root`, with every sibling the engine
+/// leaves beside them — FR-4's "no file belonging to that account remains on disk".
+///
+/// Shared by the container's erasure and by the scratch mode the harness and the boundary's
+/// tests run in, so that the one list of suffixes is the one both are held to. A file that is
+/// already gone is not an error: the intent is that it must not exist, and it does not.
+pub fn remove_account_files(root: &Path, id: AccountId) {
+    let paths = sift_store::account::AccountPaths::under(root, id);
+    for path in [&paths.store, &paths.journal] {
+        for suffix in ["", "-wal", "-journal", "-shm"] {
+            let mut p = path.clone().into_os_string();
+            p.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(p));
+        }
     }
 }
 

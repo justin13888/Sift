@@ -117,6 +117,52 @@ fn classify_transport(error: &TransportError) -> FailureKind {
     }
 }
 
+/// What revoking a grant at the provider came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Revoked {
+    /// The provider accepted the revocation.
+    Accepted,
+    /// The profile declares no revocation endpoint, so nothing was sent. Not a failure: some
+    /// platforms offer a public client no way to revoke its own grant, and FR-4's erasure is
+    /// local and complete without it.
+    NoEndpoint,
+}
+
+/// FR-4's best-effort revocation of a grant at the provider — **after** local erasure, and
+/// never in its way.
+///
+/// A free function rather than a broker method, because by the time it runs the credential
+/// store holds nothing for the account: the token was read out before the erasure, and this is
+/// the one use it is put to. `transport` is bound to the revocation endpoint's host by the
+/// caller, as it is for a refresh.
+///
+/// # Errors
+/// [`AuthError::Failed`] where the request did not reach the provider or the provider refused
+/// it. The caller reports it and does nothing else — the account is already gone here.
+pub fn revoke<T: Transport>(
+    transport: &mut T,
+    profile: &OAuthProfile,
+    token: &str,
+) -> Result<Revoked, AuthError> {
+    let Some(endpoint) = &profile.revoke else {
+        return Ok(Revoked::NoEndpoint);
+    };
+    let body = oauth::revoke_body(token);
+    let request = Request::new("POST", &endpoint.path)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body.as_bytes());
+    match transport.exchange(&request) {
+        // RFC 7009 §2.2: 200 whether or not the token was valid, so a token the provider had
+        // already invalidated is a success rather than something to retry.
+        Ok(response) if (200..300).contains(&response.status) => Ok(Revoked::Accepted),
+        Ok(response) => Err(AuthError::Failed(classify(&oauth::read_token_answer(
+            response.status,
+            &response.body,
+        )))),
+        Err(e) => Err(AuthError::Failed(classify_transport(&e))),
+    }
+}
+
 /// What one account's authorization is against.
 ///
 /// The three travel together because they are meaningless apart: the redirect must be one
@@ -714,6 +760,52 @@ mod tests {
             Err(AuthError::Failed(FailureKind::Throttled))
         );
         assert!(!FailureKind::Throttled.is_non_transient());
+    }
+
+    #[test]
+    fn a_profile_with_no_revocation_endpoint_sends_nothing() {
+        let mut t = Replay::new();
+        assert_eq!(revoke(&mut t, &profile(), "rt"), Ok(Revoked::NoEndpoint));
+        assert!(t.performed.is_empty(), "a revocation reached the network");
+    }
+
+    #[test]
+    fn a_revocation_posts_the_refresh_token_to_the_declared_endpoint() {
+        let mut p = profile();
+        p.revoke = Some(Endpoint::new("token.example.test", "/revoke"));
+        let mut t = Replay::new();
+        t.on("POST", "/revoke", b"");
+        assert_eq!(revoke(&mut t, &p, "the-rt"), Ok(Revoked::Accepted));
+        let sent = String::from_utf8(t.bodies[0].clone()).unwrap();
+        assert!(sent.contains("token=the-rt"), "{sent}");
+        assert!(!sent.contains("client_secret"));
+    }
+
+    #[test]
+    fn a_refused_or_unreachable_revocation_is_reported_rather_than_retried() {
+        let mut p = profile();
+        p.revoke = Some(Endpoint::new("token.example.test", "/revoke"));
+        let mut refused = Replay::new();
+        refused.respond(
+            "POST",
+            "/revoke",
+            Response {
+                status: 400,
+                headers: vec![],
+                body: br#"{"error":"invalid_request"}"#.to_vec(),
+            },
+        );
+        assert!(matches!(
+            revoke(&mut refused, &p, "rt"),
+            Err(AuthError::Failed(_))
+        ));
+        let mut down = Replay::new();
+        down.on("POST", "/revoke", b"")
+            .fail_nth("POST", "/revoke", 0, TransportError::Unknown);
+        assert!(matches!(
+            revoke(&mut down, &p, "rt"),
+            Err(AuthError::Failed(_))
+        ));
     }
 
     #[test]

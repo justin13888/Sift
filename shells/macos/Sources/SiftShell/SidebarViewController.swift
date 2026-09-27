@@ -32,6 +32,12 @@ final class SidebarViewController: NSViewController {
         outline.dataSource = self
         outline.delegate = self
         outline.selectionHighlightStyle = .sourceList
+        // FR-4's removal, on the row it removes — the place a person looks for it. Built when it
+        // opens, because what it offers depends on which row was clicked, and the unified row
+        // is not an account and has nothing to remove.
+        let menu = NSMenu()
+        menu.delegate = self
+        outline.menu = menu
 
         let column = NSTableColumn(identifier: .init("item"))
         column.resizingMask = .autoresizingMask
@@ -109,6 +115,28 @@ final class SidebarViewController: NSViewController {
         let row = outline.selectedRow
         guard row >= 0, row < entries.count else { return .zero }
         return entries[row].account
+    }
+}
+
+extension SidebarViewController: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let row = outline.clickedRow
+        guard row > 0, row < entries.count else { return }
+        let item = NSMenuItem(
+            title: "Remove \u{201C}\(entries[row].title)\u{201D}…",
+            action: #selector(removeClicked(_:)), keyEquivalent: "")
+        item.target = self
+        item.tag = row
+        menu.addItem(item)
+    }
+
+    /// Asked, never done here: the confirmation that says what is lost is the application
+    /// shell's, and it is the same one the menu bar, Settings and the re-authentication alert
+    /// reach, so four ways in are not four wordings of the most destructive thing Sift offers.
+    @objc private func removeClicked(_ sender: NSMenuItem) {
+        guard sender.tag > 0, sender.tag < entries.count else { return }
+        ApplicationShell.shared.confirmRemoval(of: entries[sender.tag].account)
     }
 }
 

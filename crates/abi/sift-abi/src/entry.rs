@@ -462,6 +462,13 @@ pub struct SiftAccount<'a> {
     pub writes_enabled: u8,
     /// Intents recorded and held because writes are not authorized. Zero once they are.
     pub held: u32,
+    /// Every intent not yet settled with the provider, held or not — what
+    /// [`sift_forget_account`] would discard.
+    ///
+    /// FR-4's confirmation states it **before** removal: D-32 notes a queued mutation is the
+    /// one thing a resync cannot restore, so removing an account with triage still pending is
+    /// the one removal that loses something the provider does not also hold.
+    pub queued: u32,
 }
 
 /// Every account the container holds.
@@ -505,6 +512,7 @@ pub unsafe extern "C" fn sift_accounts(
                     kind: account.kind.clone(),
                     writes_enabled: account.writes_enabled,
                     held,
+                    queued: u32::try_from(account.queue.len()).unwrap_or(u32::MAX),
                     condition,
                 });
             }
@@ -534,6 +542,7 @@ pub unsafe extern "C" fn sift_accounts(
                     condition: g.condition,
                     writes_enabled: u8::from(g.writes_enabled),
                     held: g.held,
+                    queued: g.queued,
                 })
                 .collect();
             Ok(SiftRows::new(extend_rows(&table)))
@@ -548,7 +557,82 @@ struct Gathered {
     kind: String,
     writes_enabled: bool,
     held: u32,
+    queued: u32,
     condition: SiftCondition,
+}
+
+/// FR-4 — remove an account, by D-89's identity: its files, its credentials, its per-account
+/// settings, and everything in this process that still names it.
+///
+/// **By identity rather than by label**, unlike every other account-taking entry point here.
+/// A confirmation is on screen for as long as the person reading it likes, and a label can come
+/// to mean a different account in the meantime — a re-authentication that adds the same
+/// mailbox again is exactly that. The one call that cannot be undone takes the one handle that
+/// cannot be reused.
+///
+/// # The teardown, in order
+///
+/// Taking the session waits for any sync or flush already running, because each holds it for
+/// its whole duration — so work for this account has finished before anything is erased, and
+/// work queued for it afterwards finds no account and does nothing. Then the application closes
+/// it, erases it, and re-arms the wheel without it; the observations anchored on it are
+/// cancelled and their sinks dropped; and what this boundary remembered about it — the last
+/// condition told, new mail not yet announced — is forgotten, so no callback names it again.
+///
+/// **This is the confirmed call.** It removes; asking is the shell's, through D-98's
+/// `app.remove-account`, and the confirmation states what is lost from [`SiftAccount`]'s
+/// `queued` before this is reached.
+///
+/// # Revocation
+///
+/// Where it is possible and safe, the account's grant is then revoked at the provider — on the
+/// worker, after the erasure, and never in its way. `Ok` does not wait for it and does not
+/// report on it: the account is gone whether or not the provider answers.
+///
+/// # Safety
+/// `app` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_forget_account(app: *mut SiftApp, account: SiftId) -> SiftStatus {
+    guard(|| {
+        // SAFETY: the caller's obligation.
+        let layer = (unsafe { layer(app) }).ok_or(())?;
+        let wanted = account.to_u128();
+        let (forgotten, cancelled) = {
+            let mut session = layer.session.lock().map_err(|_| ())?;
+            let name = session
+                .app()
+                .accounts()
+                .find(|(_, a)| a.id.as_u128() == wanted)
+                .map(|(name, _)| name.clone())
+                .ok_or(())?;
+            session.forget_account(&name).map_err(|_| ())?
+        };
+        {
+            let mut sinks = layer.sinks.lock().map_err(|_| ())?;
+            for observation in &cancelled {
+                sinks.remove(&observation.0);
+            }
+        }
+        // Forgotten rather than left to go stale. A condition remembered for an identity that
+        // no longer exists is harmless until a comparison reads it; new mail held for one is an
+        // announcement that would open nothing.
+        layer.conditions.lock().map_err(|_| ())?.remove(&wanted);
+        layer.new_mail.lock().map_err(|_| ())?.remove(&wanted);
+
+        rearm_accounts(layer);
+        crate::layer::post(
+            layer,
+            Task::Deliver {
+                layer: app as usize,
+            },
+        );
+        if let Some(revocation) = forgotten.revocation {
+            // `false` is a layer shutting down, and a revocation nobody sends is a grant the
+            // person can still revoke from the provider's own console.
+            let _ = layer.dispatch(crate::layer::Job::Revoke(revocation));
+        }
+        Ok(())
+    })
 }
 
 /// Authorize, or withdraw authorization for, writes to one account.
@@ -1745,6 +1829,17 @@ fn run_job(layer: &Layer, job: crate::layer::Job) {
         crate::layer::Job::Fire => sift_alloc::tagged(Subsystem::Scheduler, || fire(layer)),
         crate::layer::Job::Sync(name) => {
             sift_alloc::tagged(Subsystem::Sync, || sync_now(layer, &name));
+        }
+        // **Not under the session, and not reported.** It touches nothing the session holds —
+        // the account is already gone — so taking the lock would only make a gesture wait on
+        // a provider for no reason. The outcome has nowhere to go: the call that asked
+        // returned long ago, and there is no account left to put a condition on. A refusal
+        // leaves a grant the person can revoke from the provider's own console; retrying it
+        // would be a network habit on behalf of something that no longer exists.
+        crate::layer::Job::Revoke(revocation) => {
+            sift_alloc::tagged(Subsystem::Adapters, || {
+                let _ = revocation.send();
+            });
         }
     }
 }
@@ -4392,6 +4487,146 @@ mod tests {
             unsafe { rows.as_slice() }.len(),
             0,
             "the account-less state is what makes the add-account flow the right first screen"
+        );
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
+    }
+
+    /// Every account the layer lists, copied out of the borrowed rows.
+    fn listed(app: *mut SiftApp) -> Vec<(String, u128, u32, u32)> {
+        let mut rows = SiftRows::<SiftAccount<'static>>::empty();
+        assert_eq!(unsafe { sift_accounts(app, &raw mut rows) }, SiftStatus::Ok);
+        unsafe { rows.as_slice() }
+            .iter()
+            .map(|r| {
+                (
+                    unsafe { r.name.as_str() }.unwrap_or_default().to_owned(),
+                    r.id.to_u128(),
+                    r.held,
+                    r.queued,
+                )
+            })
+            .collect()
+    }
+
+    fn annunciator(app: *mut SiftApp) -> SiftAnnunciator {
+        let mut out = SiftAnnunciator {
+            condition: SiftCondition::HEALTHY,
+            accounts: 0,
+            asks_something_of_the_user: 0,
+            reaches_the_user_without_a_window: 0,
+        };
+        assert_eq!(
+            unsafe { sift_annunciator(app, &raw mut out) },
+            SiftStatus::Ok
+        );
+        out
+    }
+
+    /// FR-4's acceptance, driven through the boundary a shell uses: after removal there is no
+    /// file naming the account, no sidebar row, no annunciator contribution, no live
+    /// observation, and nothing a later sync can bring back.
+    ///
+    /// The credential half is proved against a store a test can read, in `sift-app`'s container
+    /// tests; this layer runs without one, because reaching the login keychain would prompt.
+    #[test]
+    fn a_removed_account_is_gone_from_every_surface_and_from_the_disk() {
+        let app = start(run_inline, scratch_str());
+        let message = hostile_message(app);
+        let other = "other";
+        let mut kept = SiftId::from_u128(0);
+        assert_eq!(
+            unsafe { sift_add_replayed_account(app, other.as_ptr(), other.len(), &raw mut kept) },
+            SiftStatus::Ok
+        );
+
+        // Triage that has not reached the provider: what the confirmation must state first.
+        assert_eq!(
+            unsafe { sift_select(app, &raw const message, 1) },
+            SiftStatus::Ok
+        );
+        assert_eq!(do_action(app, "message.archive"), SiftStatus::Ok);
+        let before = listed(app);
+        let (_, mail, held, queued) = before
+            .iter()
+            .find(|(name, ..)| name == "mail")
+            .cloned()
+            .expect("the account is listed");
+        assert_eq!(
+            (held, queued),
+            (1, 1),
+            "the pending gesture is not reported"
+        );
+        assert_ne!(
+            annunciator(app).condition,
+            SiftCondition::HEALTHY,
+            "a watched account holding triage draws a condition"
+        );
+
+        let mut observation = SiftObservation::NONE;
+        assert_eq!(
+            unsafe {
+                sift_observe_messages(
+                    app,
+                    SiftId::from_u128(mail),
+                    50,
+                    noop_rows,
+                    core::ptr::null_mut(),
+                    &raw mut observation,
+                )
+            },
+            SiftStatus::Ok
+        );
+
+        let root = {
+            let layer = unsafe { layer(app) }.expect("a live layer");
+            let session = layer.session.lock().expect("session");
+            session.app().root.clone().expect("a scratch root")
+        };
+        let naming = || -> Vec<String> {
+            let stem = format!("{}", sift_foundation::identity::AccountId::from_u128(mail));
+            std::fs::read_dir(&root)
+                .expect("readable")
+                .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                .filter(|n| n.starts_with(&stem))
+                .collect()
+        };
+        assert!(!naming().is_empty(), "the account wrote nothing to remove");
+
+        assert_eq!(
+            unsafe { sift_forget_account(app, SiftId::from_u128(mail)) },
+            SiftStatus::Ok
+        );
+
+        assert!(naming().is_empty(), "files survived: {:?}", naming());
+        let after = listed(app);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].0, other, "the other account went with it");
+        assert_eq!(unsafe { sift_account_count(app) }, 1);
+        assert_eq!(
+            annunciator(app).condition,
+            SiftCondition::HEALTHY,
+            "a removed account still contributes to the annunciator"
+        );
+        assert_eq!(
+            unsafe { sift_cancel_observation(app, observation) },
+            SiftStatus::Failed,
+            "an observation anchored on the removed account is still live"
+        );
+
+        // A sync asked for by the old label afterwards — a queued one, say — finds nothing to
+        // sync and brings nothing back.
+        sync_and_settle(app, "mail");
+        assert_eq!(unsafe { sift_account_count(app) }, 1);
+        assert!(
+            naming().is_empty(),
+            "a later sync recreated the account's files"
+        );
+
+        // The identity is spent. A second removal is a refusal rather than an erasure of
+        // something else.
+        assert_eq!(
+            unsafe { sift_forget_account(app, SiftId::from_u128(mail)) },
+            SiftStatus::Failed
         );
         assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
     }
