@@ -1,6 +1,6 @@
 //! Every numeric bound Sift enforces at runtime, in one place.
 //!
-//! Owns L-1 through L-32. See `docs/limits.md`.
+//! Owns L-1 through L-34. See `docs/limits.md`.
 //!
 //! # Why this is a register rather than a scattered set of constants
 //!
@@ -202,6 +202,13 @@ pub const L25_DISPLAY_CHARS: u64 = 998;
 /// which NFR-52 budgets and which is retained far longer than any body.
 pub const L16_SNIPPET_CHARS: u64 = 280;
 
+/// L-33 · Bytes of the local diagnostic log, across both of its segments — NFR-55.
+///
+/// Two segments, each bounded at half; appending past that closes the current one and
+/// discards the previous, so eviction is oldest-first and the files never exceed this. Counted
+/// on disk. The log's memory is the Logging row of the attribution partition, not this.
+pub const L33_DIAGNOSTIC_LOG_BYTES: u64 = 4 * MIB;
+
 // ---------------------------------------------------------------------------
 // Time limits. Bounds on behaviour, not performance targets: a target belongs to its
 // requirement, and appears here only if exceeding it changes what Sift *does* rather
@@ -287,6 +294,13 @@ pub const L30_SYNC_POLL: Duration = Duration::from_secs(60);
 /// it" hint D-25 exists to express, and it is handed to the platform timer as its leeway.
 /// Larger means fewer wakeups and later work.
 pub const L31_WHEEL_SLACK: Duration = Duration::from_secs(5);
+
+/// L-34 · Age beyond which a line of the local diagnostic log is deleted — NFR-55.
+///
+/// A segment is closed once its first line is half this old and deleted once its last line
+/// is, which together keep no line longer than this; both are checked whenever the log is
+/// opened or written.
+pub const L34_DIAGNOSTIC_LOG_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 // ---------------------------------------------------------------------------
 // The register.
@@ -590,6 +604,18 @@ pub const ALL: &[Limit] = &[
         bounds: "messages one account's server-side search returns per query",
         consequence: Capacity,
     },
+    Limit {
+        id: "L-33",
+        magnitude: Bytes(L33_DIAGNOSTIC_LOG_BYTES),
+        bounds: "bytes of the local diagnostic log, across both of its segments",
+        consequence: Capacity,
+    },
+    Limit {
+        id: "L-34",
+        magnitude: Time(L34_DIAGNOSTIC_LOG_RETENTION),
+        bounds: "age beyond which a line of the local diagnostic log is deleted",
+        consequence: Deadline,
+    },
 ];
 
 /// Look a limit up by identifier.
@@ -605,11 +631,11 @@ mod tests {
 
     #[test]
     fn the_register_holds_every_identifier_the_document_owns_exactly_once() {
-        // docs/limits.md says it owns L-1 through L-32. A gap here means a bound that
+        // docs/limits.md says it owns L-1 through L-34. A gap here means a bound that
         // exists in the specification and is enforced by nothing, or the reverse.
         let ids: BTreeSet<&str> = ALL.iter().map(|l| l.id).collect();
         assert_eq!(ids.len(), ALL.len(), "an identifier appears twice");
-        for n in 1..=32 {
+        for n in 1..=34 {
             let id = format!("L-{n}");
             assert!(
                 ids.contains(id.as_str()),
@@ -618,7 +644,7 @@ mod tests {
         }
         assert_eq!(
             ALL.len(),
-            32,
+            34,
             "an identifier is here and not in docs/limits.md"
         );
     }

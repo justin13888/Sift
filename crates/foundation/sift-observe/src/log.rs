@@ -53,10 +53,10 @@ pub const PREVIOUS: &str = "diagnostic.log.1";
 pub const CRASH_REPORT: &str = "crash-report.txt";
 
 /// L-33 — the log's byte budget, across both segments.
-pub const BUDGET_BYTES: u64 = 4 * 1024 * 1024;
+pub const BUDGET_BYTES: u64 = sift_foundation::limits::L33_DIAGNOSTIC_LOG_BYTES;
 
 /// L-34 — how long a line is retained.
-pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+pub const RETENTION: Duration = sift_foundation::limits::L34_DIAGNOSTIC_LOG_RETENTION;
 
 /// The most fields one event carries. Fixed so an event is a value with no allocation of its
 /// own, and so a line has a length bound the budget arithmetic can rely on.
