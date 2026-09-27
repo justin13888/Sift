@@ -238,6 +238,29 @@ mod macos {
         StoreError::Unavailable(e.to_string())
     }
 
+    /// What a failed read means. **Absent is not the same as unreadable.** Before first
+    /// unlock the store refuses with a different code, and reporting that as "not there"
+    /// would invite a caller to mint a replacement for a secret that still exists — D-43's
+    /// installation secret first among them.
+    pub(super) fn read_error(e: &Error) -> StoreError {
+        if e.code() == ITEM_NOT_FOUND {
+            StoreError::NotFound
+        } else {
+            unavailable(e)
+        }
+    }
+
+    /// What a failed delete means. Deleting what is not there satisfies the caller's
+    /// intent; anything else is the store refusing, and FR-4's erasure is a claim that the
+    /// item is gone — which a refusal does not establish.
+    pub(super) fn delete_outcome(e: &Error) -> Result<(), StoreError> {
+        if e.code() == ITEM_NOT_FOUND {
+            Ok(())
+        } else {
+            Err(unavailable(e))
+        }
+    }
+
     impl CredentialStore for Platform {
         fn write(&self, account: AccountId, item: Item, secret: &str) -> Result<(), StoreError> {
             let key = key_for(account, item);
@@ -267,17 +290,7 @@ mod macos {
                 }
                 other => other,
             }
-            // **Absent is not the same as unreadable.** Before first unlock the store refuses
-            // with a different code, and reporting that as "not there" would invite a caller
-            // to mint a replacement for a secret that still exists — D-43's installation
-            // secret first among them.
-            .map_err(|e| {
-                if e.code() == ITEM_NOT_FOUND {
-                    StoreError::NotFound
-                } else {
-                    unavailable(&e)
-                }
-            })?;
+            .map_err(|e| read_error(&e))?;
             String::from_utf8(bytes)
                 .map_err(|_| StoreError::Unavailable("the stored item was not text".into()))
         }
@@ -290,14 +303,7 @@ mod macos {
                 }
                 other => other,
             };
-            match result {
-                Ok(()) => Ok(()),
-                // Deleting what is not there satisfies the caller's intent.
-                Err(e) if e.code() == ITEM_NOT_FOUND => Ok(()),
-                // Anything else is the store refusing, and FR-4's erasure is a claim that the
-                // item is gone — which a refusal does not establish.
-                Err(e) => Err(unavailable(&e)),
-            }
+            result.or_else(|e| delete_outcome(&e))
         }
     }
 }
@@ -423,6 +429,48 @@ mod tests {
             store.read(account, Item::Refresh),
             Err(StoreError::NotFound)
         );
+    }
+
+    /// `errSecInteractionNotAllowed` — what the keychain answers before first unlock.
+    #[cfg(target_os = "macos")]
+    const INTERACTION_NOT_ALLOWED: i32 = -25_308;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_read_the_store_refuses_is_unavailable_and_only_an_absent_item_is_not_found() {
+        use security_framework::base::Error;
+        // D-43: a locked store reported as "not there" would have a caller mint a
+        // replacement for a secret that still exists.
+        assert_eq!(
+            macos::read_error(&Error::from_code(-25_300)),
+            StoreError::NotFound
+        );
+        for code in [INTERACTION_NOT_ALLOWED, -34_018, -25_293] {
+            assert!(
+                matches!(
+                    macos::read_error(&Error::from_code(code)),
+                    StoreError::Unavailable(_)
+                ),
+                "code {code} read as absent"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_delete_the_store_refuses_is_an_error_and_only_an_absent_item_is_success() {
+        use security_framework::base::Error;
+        // FR-4: erasure claims the item is gone, which a refusal does not establish.
+        assert_eq!(macos::delete_outcome(&Error::from_code(-25_300)), Ok(()));
+        for code in [INTERACTION_NOT_ALLOWED, -34_018, -25_293] {
+            assert!(
+                matches!(
+                    macos::delete_outcome(&Error::from_code(code)),
+                    Err(StoreError::Unavailable(_))
+                ),
+                "code {code} deleted as success"
+            );
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
