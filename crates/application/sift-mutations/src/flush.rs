@@ -146,7 +146,50 @@ pub fn flush_once<A: Adapter + ?Sized>(
 where
     A::Error: core::fmt::Display,
 {
-    let capabilities = adapter.capabilities();
+    let issued = issue(adapter.capabilities(), queue, resolve, mark_issued)?;
+    if issued.is_empty() {
+        return Ok(issued.report);
+    }
+    let answer = send(adapter, &issued);
+    settle(queue, issued, answer)
+}
+
+/// A batch that has been made durable as `Issued` and has not yet been sent.
+///
+/// The three halves of [`flush_once`] are separate so that a caller holding the queue behind a
+/// lock can let go of it for the round trip — D-122. [`issue`] and [`settle`] touch the queue
+/// and are held; [`send`] touches only the provider and is not.
+#[derive(Debug)]
+pub struct Issued {
+    report: FlushReport,
+    ids: Vec<u128>,
+    batch: Vec<WireMutation>,
+}
+
+impl Issued {
+    /// Nothing to send: every candidate was quarantined, deferred, or there were none.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.batch.is_empty()
+    }
+
+    /// What the flush has done so far.
+    #[must_use]
+    pub fn report(&self) -> &FlushReport {
+        &self.report
+    }
+}
+
+/// The first half: choose a batch, and make it durable as `Issued` before anything is sent.
+///
+/// # Errors
+/// See [`FlushError`]. Nothing has been sent when this fails.
+pub fn issue(
+    capabilities: &sift_provider::capability::Capabilities,
+    queue: &mut Queue,
+    resolve: &impl Resolve,
+    mark_issued: &mut impl FnMut(&[u128]) -> Result<(), String>,
+) -> Result<Issued, FlushFailure> {
     let limit = capabilities.batch_size();
     let candidates: Vec<(u128, LocalId, Intent)> = queue
         .next_batch(limit)
@@ -189,7 +232,7 @@ where
     }
 
     if batch.is_empty() {
-        return Ok(report);
+        return Ok(Issued { report, ids, batch });
     }
 
     // A batch must not contain two intents for the same message. `next_batch` holds that
@@ -216,11 +259,54 @@ where
         queue.set_state(*id, State::Issued);
     }
     report.issued = ids.len();
+    Ok(Issued { report, ids, batch })
+}
 
-    let outcomes = match adapter.apply(&batch) {
+/// The second half: the round trip, and nothing else. It takes no queue, so a caller that
+/// holds one behind a lock has nothing to hold while this runs.
+///
+/// # Errors
+/// The provider failed, classified by the adapter that produced it.
+pub fn send<A: Adapter + ?Sized>(
+    adapter: &A,
+    issued: &Issued,
+) -> Result<Vec<MutationOutcome>, FlushError>
+where
+    A::Error: core::fmt::Display,
+{
+    adapter
+        .apply(&issued.batch)
+        .map_err(|e| FlushError::Provider {
+            failure: adapter.classify(&e),
+            said: e.to_string(),
+        })
+}
+
+/// The third half: record what the provider answered.
+///
+/// **The queue may have moved since [`issue`]**, because a caller that let go of it for the
+/// round trip let a person triage in between. Nothing here depends on it having stood still:
+/// every transition is addressed by the intent's own identifier, an intent enqueued meanwhile
+/// against the same message sits behind the issued one rather than coalescing with it — only
+/// a pending intent coalesces — and an intent no longer in the queue is simply not found.
+///
+/// # Errors
+/// The provider failed; the report carries what had already been done.
+pub fn settle(
+    queue: &mut Queue,
+    issued: Issued,
+    answer: Result<Vec<MutationOutcome>, FlushError>,
+) -> Result<FlushReport, FlushFailure> {
+    let Issued {
+        mut report, ids, ..
+    } = issued;
+    let outcomes = match answer {
         Ok(outcomes) => outcomes,
-        Err(e) => {
-            let failure = adapter.classify(&e);
+        Err(error) => {
+            let failure = match &error {
+                FlushError::Provider { failure, .. } => *failure,
+                FlushError::NotYetSynced(_) => Failure::Transient,
+            };
             // The request left. Whether the server applied it is unknown, and D-85's answer
             // is to establish server state before trying again rather than replaying blindly
             // — which is what NFR-17 means by exactly-once *observable*.
@@ -233,13 +319,7 @@ where
             if let Failure::Throttled { retry_after_millis } = failure {
                 report.retry_after_millis = Some(retry_after_millis);
             }
-            return Err(FlushFailure {
-                report,
-                error: FlushError::Provider {
-                    failure,
-                    said: e.to_string(),
-                },
-            });
+            return Err(FlushFailure { report, error });
         }
     };
 
@@ -447,6 +527,47 @@ mod tests {
         assert_eq!(report.applied, 1);
         assert_eq!(*order.borrow(), vec!["marked", "sent"]);
         assert!(!adapter.seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_intent_made_during_the_round_trip_waits_behind_the_one_in_flight() {
+        // D-122: the queue is let go of between issue and settle, so a person can triage the
+        // same message meanwhile. The later intent must not coalesce with the issued archive,
+        // which would rewrite an archive the server is already applying.
+        let adapter = Fake::applying(1);
+        let mut queue = queue_with(&[(1, message(1), Intent::Archive)]);
+        let mut mark = |_: &[u128]| Ok(());
+        let issued = issue(adapter.capabilities(), &mut queue, &Map, &mut mark).unwrap();
+        assert!(!issued.is_empty());
+
+        queue.enqueue(2, message(1), Intent::MoveTo { folder: 1 }, 0);
+        assert_eq!(
+            queue.len(),
+            2,
+            "the new intent coalesced with one in flight"
+        );
+        // Nothing here stops a second flush choosing it before this one settles: what does
+        // is that one account has one flush at a time, because its adapter is lent to it.
+
+        let answer = send(&adapter, &issued);
+        let report = settle(&mut queue, issued, answer).unwrap();
+        assert_eq!(report.applied, 1);
+        let left: Vec<(u128, State)> = queue.entries().iter().map(|q| (q.id, q.state)).collect();
+        assert_eq!(left, vec![(2, State::Pending)]);
+        assert_eq!(queue.next_batch(10)[0].id, 2, "the later intent is next");
+    }
+
+    #[test]
+    fn an_intent_gone_from_the_queue_by_the_answer_is_not_resurrected() {
+        let adapter = Fake::applying(1);
+        let mut queue = queue_with(&[(1, message(1), Intent::Archive)]);
+        let mut mark = |_: &[u128]| Ok(());
+        let issued = issue(adapter.capabilities(), &mut queue, &Map, &mut mark).unwrap();
+        let answer = send(&adapter, &issued);
+        let mut emptied = Queue::new();
+        let report = settle(&mut emptied, issued, answer).unwrap();
+        assert_eq!(report.applied, 1);
+        assert!(emptied.is_empty());
     }
 
     #[test]
