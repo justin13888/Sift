@@ -89,9 +89,10 @@ that is **unverifiable in principle**: you cannot demonstrate the absence of a t
 and NFR-23 states plainly that credentials must never be in a crash dump. A mechanism whose compliance
 cannot be shown does not satisfy a requirement written that strongly.
 
-Disabling the platform's own crash collectors matters as much as what Sift itself captures. Those
-collectors write full dumps regardless of Sift's opt-in, so leaving them enabled would mean the guarantee
-holds only for the path Sift controls.
+What the platform collects matters as much as what Sift itself captures. A platform collector records a
+crash regardless of Sift's opt-in, so one left running means the guarantee holds only for the path Sift
+controls. Every collector that can be disabled from inside the process is disabled; one that cannot is
+stated to the user as a limitation of the guarantee, never implied to be inside it.
 
 **What the platform allows, which answers [Q-20](../open-questions.md) in part.** The collectors are two
 things, and only one of them can be switched off from inside the process. The operating system's core
@@ -99,9 +100,12 @@ dump is governed by a per-process resource limit, and lowering that limit is not
 sandbox mediates: Sift lowers it to zero, hard limit included, before anything else at launch, reads the
 result back rather than assuming it, and states it in the runtime panel and in every report it writes. The
 platform's crash reporter is the other, and no application can turn it off, sandboxed or not — it runs
-outside the process and is governed by the user's own analytics settings. What it records is backtraces,
-register values and the loaded libraries, not the process's memory, so it holds no heap either; but it is
-not under Sift's control, and the runtime panel says so rather than letting this decision imply it is.
+outside the process and is governed by the user's own analytics settings. What it records is not under
+Sift's control and is not covered by this decision: besides backtraces and the loaded libraries it keeps
+each thread's register state, whose values can be anything the process held at that instant, and
+application-specific text copied out of the process, such as a runtime's last error message. Nothing
+establishes that it carries no heap-derived data, so this decision does not claim it; the runtime panel
+states it as the limitation it is.
 That readback is how the answer is confirmed against the sandboxed Developer ID build: the release
 candidate's panel shows it.
 
