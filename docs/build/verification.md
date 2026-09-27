@@ -2,7 +2,7 @@
 
 The gates, the machines that run them, what a pass means, and the harnesses that cannot be added later.
 
-**Owns:** D-63, D-64, D-65.
+**Owns:** D-63, D-64, D-65, D-120.
 
 [Reference environment](../product/reference-environment.md) fixes the rig, the corpora and the
 measurement protocol. [Sanitizer invariants](../rendering/sanitizer-invariants.md) fixes how I1–I10 are
@@ -81,6 +81,42 @@ and would be right to until the first time a target passes on one architecture a
 with a single number hiding it. [R-13](../open-questions.md) already describes the neighbouring problem —
 a macOS engine version that moves under the rendering gate on somebody else's schedule — and owning the
 machines does not fix that one.
+
+## D-120 — Fuzzing runs reproducibly per change, and unbounded in the continuous tier
+
+**Chosen:** [NFR-40](../rendering/sanitizer-invariants.md)'s method 4 is coverage-guided fuzzing with
+libFuzzer, one target for the sanitizer and one for the MIME parser, each seeded from the fidelity corpus
+on every run. It runs in two tiers. **Per change**, each target runs a fixed number of executions from a
+fixed random seed and the seed corpus alone, so the same commit explores the same inputs on every host
+and the leg blocks a merge. **Continuously**, on a dedicated host, each target draws a fresh seed, keeps
+the corpus it discovers between runs, and runs until stopped; a finding there is minimized, fixed, and
+admitted to the corpus as a fixed vector. The targets build on a dated nightly compiler, in workspaces of
+their own beside the crates they exercise, while everything else builds on the pinned stable toolchain.
+**Rejected:** a per-change run bounded by wall-clock time; fuzzing as a continuous-tier gate only;
+fuzz targets as members of the main workspace.
+
+**Why a fixed seed per change.** A time-bounded run explores as far as the runner is fast. A finding that
+has existed for months then surfaces on whichever change happened to land on a quicker runner, blocking
+work that did not cause it, and the obvious response to that is to make the leg advisory — which is how a
+fuzzing gate stops being one. A fixed seed and a fixed execution count make the per-change leg a
+regression gate: it fails because of the change under review, and it fails the same way when rerun.
+Finding what has always been there is the continuous tier's job, which has the time the per-change tier
+lacks.
+
+**Why a workspace of their own.** Coverage instrumentation and the address sanitizer need a nightly
+compiler. A fuzz target inside the main workspace would put the fuzzing runtime in every build and in the
+dependency graph gate 3 reviews, for a harness no shipped binary contains, and would ask the floor check
+to build it on a toolchain that cannot. Each fuzz workspace commits its own lockfile, so a fuzz run is as
+reproducible as the build beside it.
+
+**What it costs:** a second toolchain to keep, pinned by date for the reason the stable one is pinned
+exactly — a compiler that moves under the harness makes a new finding indistinguishable from a new
+compiler — and a per-change leg that proves only the inputs its seed reaches.
+
+**Contestable because:** a fixed seed explores the same neighbourhood on every change, so the per-change
+leg finds regressions near the seed corpus and little else; everything it misses waits for the continuous
+tier, and that tier waits on the dedicated host D-63 costs. Until that host exists, the continuous run is
+a contributor's command rather than a schedule.
 
 ## D-64 — Every gate states its metric and its threshold, and a failing run may not move either
 

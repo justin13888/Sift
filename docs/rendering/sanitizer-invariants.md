@@ -1,6 +1,6 @@
 # Sanitizer invariants
 
-**Owns:** D-26, I1–I10, NFR-40.
+**Owns:** D-26, D-121, I1–I10, NFR-40.
 
 The sanitizer is asserted, not assumed. These invariants are testable claims, and they are tested — see
 NFR-40 below.
@@ -160,6 +160,33 @@ content model changes when script is disabled, template contents, namespace conf
 foreign content, and entity re-interpretation. **A sanitizer that satisfies I1 through I7 and fails I8 is
 exploitable.** Prioritize it accordingly.
 
+## D-121 — I8 holds by construction: the sanitizer passes its own output until it settles
+
+**Chosen:** the sanitizer's output is a fixed point of its own policy pass. After the first pass it passes
+the output again, and returns once a pass changes nothing; a document that has not settled within a small
+fixed number of passes is refused to the raw view like any document a bound refuses. A later pass reads
+the earlier pass's internal addresses rather than the sender's, so the fetching positions it reports are
+mapped back to what the sender wrote, and the removals of every pass are kept.
+**Rejected:** enumerating each shape that fails the round trip and patching the policy for it; refusing
+every document whose first pass does not round-trip.
+
+**Why.** A single pass does not reach I8 on its own, and cannot be made to by listing cases. The tree
+builder produces trees that no markup reparses into — foster parenting nests an anchor inside an anchor,
+the adoption agency nests a heading inside a heading — and the policy's own unwrapping moves children into
+parents they were never parsed beside. Each such tree serializes to bytes the engine builds a different
+document from. Method 4's fuzzing found these faster than they could be classified; the round trip itself
+is the only complete statement of which trees are stable, so the sanitizer asks it. Refusing on the first
+unstable pass instead was rejected because misnested markup is ordinary in marketing mail, and the second
+pass settles every case found so far — refusal would send legitimate mail to the raw view for a
+difference the reader cannot see.
+
+**What it costs.** Every accepted document is parsed, walked and serialized at least twice, so the
+sanitize share of NFR-41's budget roughly doubles; a document that never settles costs the full number of
+passes before it is refused. The pass count is a hypothesis in the same sense as every number here: one
+re-pass has sufficed for every finding, and the margin above it is for constructions nobody has found.
+Specific shapes the fuzzing finds are still fixed in the policy where the fix is local (an anchor inside a
+kept anchor is unwrapped), because a document that settles in one pass costs less than one that needs two.
+
 ## What each invariant is backed by
 
 Defence in depth changes how much each invariant must be sweated, and stating that explicitly tells a
@@ -190,7 +217,14 @@ I1 through I10 MUST hold for every input, verified in CI by five complementary m
 3. **Dual-parser divergence.** Parse *S(x)* with the Rust parser and with the engine; any structural
    divergence is a candidate I8 failure. Run continuously over the whole
    [fidelity corpus](../product/reference-environment.md).
-4. **Fuzzing** of the MIME parser and the sanitizer, seeded with the real-world corpus.
+4. **Fuzzing** of the MIME parser and the sanitizer, seeded with the real-world corpus. Per input, the
+   sanitizer either refuses under a bound or produces output whose reparsed tree holds nothing an
+   invariant forbids and which is parse-stable; the parser either rejects to the raw view or returns a
+   structure within its bounds and inside the bytes it was given; neither panics. It runs as a bounded,
+   reproducible leg on every change and unbounded in the continuous tier
+   ([D-120](../build/verification.md#d-120--fuzzing-runs-reproducibly-per-change-and-unbounded-in-the-continuous-tier)).
+   A finding is minimized, fixed, and admitted as a fixed regression vector under method 5 or as a
+   test beside the parser, so the ordinary suite holds it rather than the fuzzer finding it again.
 5. **Fixed regression vectors** — every published mutation-XSS payload as a permanent test case. Each
    is recorded with its source and its expected outcome, and is never removed or renumbered once admitted
    ([D-115](../product/reference-environment.md#d-115--the-fidelity-corpus-admits-nothing-without-a-recorded-provenance)).
