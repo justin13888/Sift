@@ -444,10 +444,16 @@ impl App {
         let registered = container.accounts()?;
 
         for row in &registered {
-            let owner = container::account_secret(&store, row.id)?;
+            // Before the files open: D-22's retirement counts what is on disk.
+            let keys = container::account_keys(&store, root, row.id)?;
             let paths = AccountPaths::under(root, row.id);
-            let account =
-                Account::open_sealed(&paths, row.id, &owner).map_err(|e| e.to_string())?;
+            let account = Account::open_sealed_rotating(
+                &paths,
+                row.id,
+                &keys.current,
+                keys.retiring.as_ref(),
+            )
+            .map_err(|e| e.to_string())?;
 
             let mut queue = Queue::new();
             queue.restore(read_intents(&account.journal)?);

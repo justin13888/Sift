@@ -522,6 +522,123 @@ pub fn account_secret<S: CredentialStore>(
     }
 }
 
+/// An account's key generations, as an open presents them to the sealing layer.
+#[derive(Debug)]
+pub struct AccountKeys {
+    /// The key new pages are sealed under.
+    pub current: [u8; 32],
+    /// The key being retired by D-22's lazy rotation, while any page still carries it.
+    pub retiring: Option<[u8; 32]>,
+}
+
+/// Begin D-22's lazy rotation of an account's key.
+///
+/// The current key becomes the retiring one and a new key is minted. Nothing is rewritten: the
+/// account's pages are re-sealed under the new key as they are next written, and both
+/// generations stay readable meanwhile. [`account_keys`] retires the old key once no page
+/// carries it.
+///
+/// Durable before it is used: the retiring item is written first, so a crash between the two
+/// writes leaves both items holding the same key — which [`account_keys`] reads as no rotation
+/// and a retried call resumes.
+///
+/// # Errors
+/// - The installation's own secret: **it does not rotate lazily.** Rotating it re-derives every
+///   convergent blob address, which is a discard-and-refill of the blob store (D-43, D-76), and
+///   it MUST be presented as that rather than as a rotation like this one.
+/// - A previous rotation still has pages under its retiring key. The sealed header holds two
+///   generations; a third would leave pages under the oldest with nothing to open them.
+/// - The account has no key, or the credential store is unavailable.
+pub fn begin_account_key_rotation<S: CredentialStore>(
+    credentials: &S,
+    id: AccountId,
+) -> Result<(), String> {
+    if id == INSTALLATION {
+        return Err(
+            "the installation secret does not rotate lazily: rotating it re-derives every \
+             convergent blob address, which is a discard-and-refill of the blob store"
+                .to_owned(),
+        );
+    }
+    let current = credentials
+        .read(id, Item::DatabaseKey)
+        .map_err(|e| e.to_string())?;
+    match credentials.read(id, Item::RetiringDatabaseKey) {
+        // A crash between the two writes below: resume it.
+        Ok(retiring) if retiring == current => {}
+        Ok(_) => {
+            return Err(
+                "the previous key rotation is still retiring its key; it must finish first"
+                    .to_owned(),
+            );
+        }
+        Err(sift_credentials::store::StoreError::NotFound) => credentials
+            .write(id, Item::RetiringDatabaseKey, &current)
+            .map_err(|e| e.to_string())?,
+        Err(e) => return Err(e.to_string()),
+    }
+    let mut next = [0u8; 32];
+    getrandom::fill(&mut next).map_err(|e| format!("no randomness: {e}"))?;
+    credentials
+        .write(id, Item::DatabaseKey, &encode_secret(&next))
+        .map_err(|e| e.to_string())
+}
+
+/// The keys an account opens under — and, first, D-22's retirement.
+///
+/// **MUST be called with the account's files closed**, before they are opened: retirement
+/// counts the pages still under the retiring key from disk, and a count taken while the engine
+/// is rewriting pages would be of something other than what is durable.
+///
+/// Where a retiring key is held and no page carries it, it is struck from the files' headers
+/// and then destroyed — in that order, so a crash between the two leaves a key nothing needs
+/// rather than a header naming a key nothing holds. Where pages still carry it, it is returned
+/// alongside the current key so both generations open.
+///
+/// # Errors
+/// The credential store is unavailable, a stored value is not a key, or the account's files
+/// could not be read.
+pub fn account_keys<S: CredentialStore>(
+    credentials: &S,
+    root: &Path,
+    id: AccountId,
+) -> Result<AccountKeys, String> {
+    let current = account_secret(credentials, id)?;
+    let retiring = match credentials.read(id, Item::RetiringDatabaseKey) {
+        Ok(text) => Some(decode_secret(&text)?),
+        Err(sift_credentials::store::StoreError::NotFound) => None,
+        Err(e) => return Err(e.to_string()),
+    };
+    let Some(old) = retiring else {
+        return Ok(AccountKeys {
+            current,
+            retiring: None,
+        });
+    };
+    let paths = sift_store::account::AccountPaths::under(root, id);
+    // The same key under both items is a rotation that never got its new key: nothing to retire
+    // from any file, because nothing was ever sealed under a second generation.
+    let clear = old == current
+        || sift_store::account::Account::retiring_pages(&paths, &old).map_err(|e| e.to_string())?
+            == 0;
+    if !clear {
+        return Ok(AccountKeys {
+            current,
+            retiring: Some(old),
+        });
+    }
+    if old != current {
+        sift_store::account::Account::forget_retired(&paths, &old).map_err(|e| e.to_string())?;
+    }
+    credentials
+        .delete(id, Item::RetiringDatabaseKey)
+        .map_err(|e| e.to_string())?;
+    Ok(AccountKeys {
+        current,
+        retiring: None,
+    })
+}
+
 /// Hex, because the credential store holds strings and a key is bytes.
 fn encode_secret(secret: &[u8; 32]) -> String {
     secret.iter().fold(String::with_capacity(64), |mut s, b| {
