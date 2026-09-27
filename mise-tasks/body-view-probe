@@ -20,5 +20,7 @@ cd "${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
 
 mise run macos --release
 
-exec shells/macos/.build/xcode/Build/Products/Release/Sift.app/Contents/MacOS/Sift \
-    --probe-body-view shells/hostile-html/corpus.txt
+# The exported Developer ID bundle — where a Release build lands since D-45's signing (see
+# `mise-tasks/macos`) — so the probe runs the sandboxed, hardened binary that ships.
+exec shells/macos/.build/export/Sift.app/Contents/MacOS/Sift \
+    --probe-body-view - <shells/hostile-html/corpus.txt
