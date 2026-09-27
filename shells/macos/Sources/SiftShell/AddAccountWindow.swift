@@ -24,7 +24,13 @@ import CSift
 /// against a real mailbox something a person can watch without anxiety.
 final class AddAccountWindow: NSWindowController {
     private let app: OpaquePointer
-    private let onAdded: () -> Void
+    /// Told when an account was added, and whether it was a **sign-in** rather than the
+    /// recorded corpus — only a sign-in can be the same mailbox as an account it replaces.
+    private let onAdded: (_ signedIn: Bool) -> Void
+    /// The label of the account this sign-in is meant to replace, where it began from FR-2's
+    /// re-authentication prompt. D-89 makes the new account a new one; this only names it
+    /// and says what happens to the old one afterwards.
+    private let replacing: String?
     /// Told when the flow ends, added or not, so the shell releases this controller — and so a
     /// callback arriving afterwards is not handed to a screen that is gone.
     private let onDismissed: () -> Void
@@ -89,10 +95,12 @@ final class AddAccountWindow: NSWindowController {
 
     init(
         app: OpaquePointer,
-        onAdded: @escaping () -> Void,
+        replacing: String? = nil,
+        onAdded: @escaping (_ signedIn: Bool) -> Void,
         onDismissed: @escaping () -> Void
     ) {
         self.app = app
+        self.replacing = replacing
         self.onAdded = onAdded
         self.onDismissed = onDismissed
         self.choices = AddAccountWindow.offered(app: app)
@@ -134,7 +142,7 @@ final class AddAccountWindow: NSWindowController {
     }
 
     /// End the flow, in whichever frame it was presented in.
-    private func finish(added: Bool) {
+    private func finish(added: Bool, signedIn: Bool = false) {
         guard !finished else { return }
         finished = true
         // The session is cancelled when it is released, and a flow that has ended holds none.
@@ -145,7 +153,7 @@ final class AddAccountWindow: NSWindowController {
         } else {
             close()
         }
-        if added { onAdded() }
+        if added { onAdded(signedIn) }
         onDismissed()
     }
 
@@ -192,6 +200,9 @@ final class AddAccountWindow: NSWindowController {
         disclosure.preferredMaxLayoutWidth = 560
 
         nameField.placeholderString = "Work, Personal, …"
+        // The name the person already gave this mailbox. If it is still taken when the sign-in
+        // completes — it is, until the old account is removed — `chosenName` numbers it.
+        if let replacing { nameField.stringValue = replacing }
         nameField.widthAnchor.constraint(equalToConstant: 220).isActive = true
         let nameLabel = NSTextField(labelWithString: "Call this account")
         nameLabel.font = .preferredFont(forTextStyle: .body)
@@ -231,6 +242,14 @@ final class AddAccountWindow: NSWindowController {
                 This build has no OAuth client configured, so it cannot connect to a real \
                 account. "Look Around First" opens Sift with a recorded mailbox — no network, \
                 no credentials, and nobody's mail in it.
+                """
+        } else if let replacing {
+            // D-89: signing in again is adding the mailbox again, and the person is told so
+            // before they go to the browser rather than finding a second account afterwards.
+            status.stringValue = """
+                Sift will open your browser to sign in. Signing in again adds this mailbox as a \
+                new account; once it has, Sift offers to remove \u{201C}\(replacing)\u{201D}, the \
+                one it can no longer reach.
                 """
         } else {
             status.stringValue =
@@ -394,7 +413,7 @@ final class AddAccountWindow: NSWindowController {
         _ = SiftText.withBytes(name) { ptr, len in
             sift_sync_account(UnsafeMutablePointer(app), ptr, len)
         }
-        finish(added: true)
+        finish(added: true, signedIn: true)
     }
 
     /// The label to add the account under.
@@ -402,9 +421,19 @@ final class AddAccountWindow: NSWindowController {
     /// Empty is a name too, and it is the one that would make the account unnameable — so it
     /// is defaulted rather than refused. A person who typed nothing gets something they can
     /// rename later, not a dialog telling them what they did wrong.
+    ///
+    /// **Never one already in use.** The layer refuses a second account under a label, and it
+    /// refuses *after* the provider has issued a grant — so a second "Mail", or a re-sign-in
+    /// under the name of the account it replaces, used to consume the consent and add nothing.
+    /// A taken name is numbered instead: two mailboxes a person can tell apart in the sidebar.
     private func chosenName() -> String {
         let typed = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        return typed.isEmpty ? "Mail" : typed
+        let wanted = typed.isEmpty ? "Mail" : typed
+        let taken = Set(Account.all(app: app).map(\.name))
+        guard taken.contains(wanted) else { return wanted }
+        var n = 2
+        while taken.contains("\(wanted) \(n)") { n += 1 }
+        return "\(wanted) \(n)"
     }
 
     @objc private func useFixtures() {

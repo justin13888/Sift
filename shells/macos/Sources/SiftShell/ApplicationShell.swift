@@ -441,6 +441,14 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             // there is no intent for it, and the layer has no window to open.
             beginAddAccount()
             return
+        case "app.remove-account":
+            // FR-4. The shell's own work for the same reason adding is: there is no intent
+            // behind it, and the confirmation is prose only a shell may write (D-56). The
+            // account the front window is showing is offered first; the unified inbox is not
+            // an account, so from there the person chooses.
+            let shown = (windows.first(where: \.isKey) ?? windows.first)?.shownAccount
+            confirmRemoval(of: shown.flatMap { $0.same(as: .zero) ? nil : $0 })
+            return
         case "app.open-settings":
             guard let app else { return }
             let window = settingsWindow ?? SettingsWindow(app: app)
@@ -882,6 +890,9 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// Whether the re-authentication alert is on screen. Five accounts whose grants expired
     /// together are five announcements and must not be five stacked alerts.
     fileprivate var presentingReauthentication = false
+    /// Accounts whose announcement arrived while the alert was up for another, in arrival
+    /// order. Bounded by the number of accounts: an account is queued at most once.
+    fileprivate var waitingReauthentication: [SiftId] = []
     private var addAccount: AddAccountWindow?
     private var runtimePanel: RuntimePanel?
     private var settingsWindow: SettingsWindow?
@@ -895,15 +906,23 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
     /// user can reach once and one they can reach whenever they want another mailbox. D-97
     /// gives the two cases different frames and the same screen: a window of its own when
     /// there is nothing to attach to, a sheet on the window that asked otherwise.
-    private func beginAddAccount() {
+    ///
+    /// `replacing` is the account FR-2's re-authentication prompt was about, where the flow
+    /// began there. D-89 makes the sign-in a new account either way; what it changes is that
+    /// the person is told so first, and offered removal of the old one when it completes.
+    private func beginAddAccount(replacing: SiftId? = nil) {
         guard let app else { return }
         if let existing = addAccount {
             existing.raise()
             return
         }
+        let old = replacing.flatMap { id in
+            Account.all(app: app).first { $0.id.same(as: id) }
+        }
         let window = AddAccountWindow(
             app: app,
-            onAdded: { [weak self] in
+            replacing: old?.name,
+            onAdded: { [weak self] signedIn in
                 // FR-23's permission, asked **here**: the account's first sync has just been
                 // requested, so the prompt arrives attached to the mail it is about rather than
                 // at a launch that has nothing to say yet. Asked once; an answer either way is
@@ -913,6 +932,14 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
                 // The sidebar is where the account has to appear, and it is asked rather
                 // than told: the list it draws is the layer's.
                 self?.windows.forEach { $0.refreshAccounts() }
+                self?.settingsWindow?.reload()
+                // The replace half of re-authentication, **after** the sign-in rather than
+                // before it: removing first would leave a person whose sign-in then failed
+                // with neither account. Warned rather than refused, as D-89 requires — two
+                // accounts on one mailbox is a configuration Sift cannot tell from a mistake.
+                if signedIn, let old {
+                    DispatchQueue.main.async { self?.offerReplacement(of: old.id) }
+                }
             },
             onDismissed: { [weak self] in
                 self?.addAccount = nil
@@ -1058,10 +1085,13 @@ private func hostCallbacks() -> SiftHostCallbacks {
             // would leave the application unreachable.
             DispatchQueue.main.async { ApplicationShell.shared.destroyWindowShells() }
         },
-        reauthentication_needed: { _, _ in
+        reauthentication_needed: { _, account in
             // FR-2 — the one account condition that must reach the user with **no window
-            // open**, which is why it arrives here rather than through a view.
-            DispatchQueue.main.async { ApplicationShell.shared.raiseReauthenticationPrompt() }
+            // open**, which is why it arrives here rather than through a view. The account is
+            // named, because the alert offers to replace or remove that one and no other.
+            DispatchQueue.main.async {
+                ApplicationShell.shared.raiseReauthenticationPrompt(for: account)
+            }
         },
         bundle_replaced: { _ in
             // FR-26. Sift implements no self-update; the platform channel replaced the bundle
@@ -1117,28 +1147,175 @@ extension ApplicationShell {
     /// One at a time. The layer announces a change per account, and five accounts whose grants
     /// expired together would otherwise be five stacked alerts — which is NFR-34's cascade
     /// wearing a different coat.
-    func raiseReauthenticationPrompt() {
-        guard !presentingReauthentication else { return }
+    ///
+    /// **Queued rather than dropped.** The alert names one account, so a second account's
+    /// announcement arriving while it is up waits its turn instead of being lost — and is
+    /// skipped if, by then, it no longer needs anything.
+    func raiseReauthenticationPrompt(for account: SiftId) {
+        guard !presentingReauthentication else {
+            if !waitingReauthentication.contains(where: { $0.same(as: account) }) {
+                waitingReauthentication.append(account)
+            }
+            return
+        }
+        guard let app,
+            let named = Account.all(app: app).first(where: { $0.id.same(as: account) }),
+            named.condition == Annunciator.needsAuthentication
+        else {
+            raiseNextReauthenticationPrompt()
+            return
+        }
         presentingReauthentication = true
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
         let alert = NSAlert()
         // D-56: the layer returns identified states and this shell supplies every word.
-        alert.messageText = "Sign in again"
+        alert.messageText = "Sign in to \u{201C}\(named.name)\u{201D} again"
         alert.informativeText =
-            "Sift can no longer reach one of your accounts. It keeps everything it has already "
-            + "downloaded, and nothing has been changed or lost — signing in again is what lets "
-            + "it start syncing that account once more."
-        alert.addButton(withTitle: "Sign In…")
+            "Sift can no longer reach this account. It keeps everything it has already "
+            + "downloaded, and nothing has been changed or lost. Signing in again adds the "
+            + "mailbox as a new account, and Sift then offers to remove this one."
+        alert.addButton(withTitle: "Sign In Again…")
         alert.addButton(withTitle: "Later")
+        alert.addButton(withTitle: "Remove Account…")
         let response = alert.runModal()
         presentingReauthentication = false
-        // Adding the account again is the sign-in: D-89 makes re-adding a new account rather
-        // than a repair, and the alternative — a flow that re-attaches a grant to an existing
-        // identity — is a second authorization path with its own failure modes.
-        if response == .alertFirstButtonReturn { beginAddAccount() }
+        switch response {
+        case .alertFirstButtonReturn:
+            // Adding the account again is the sign-in: D-89 makes re-adding a new account
+            // rather than a repair, and the alternative — a flow that re-attaches a grant to an
+            // existing identity — is a second authorization path with its own failure modes.
+            // What this flow adds is the offer to remove the one it replaces.
+            beginAddAccount(replacing: named.id)
+        case .alertThirdButtonReturn:
+            confirmRemoval(of: named.id)
+        default:
+            break
+        }
         syncActivationPolicy()
+        raiseNextReauthenticationPrompt()
+    }
+
+    private func raiseNextReauthenticationPrompt() {
+        guard !waitingReauthentication.isEmpty else { return }
+        let next = waitingReauthentication.removeFirst()
+        DispatchQueue.main.async { self.raiseReauthenticationPrompt(for: next) }
+    }
+
+    /// FR-4's confirmation, and the one place removal is asked — the menu bar, the sidebar,
+    /// Settings and the re-authentication alert all arrive here, so the most destructive thing
+    /// the interface offers is worded once.
+    ///
+    /// **It says what is lost in D-89's terms**, not that data will be erased — which is what
+    /// the person wants — but that their decisions about this account will be, which is not.
+    /// And where triage has not reached the provider yet, it says that first: D-32 notes a
+    /// queued change is the one thing a resync cannot restore.
+    ///
+    /// `account` is the one to offer; `nil` asks the person to choose, which is what the menu
+    /// item does from the unified inbox.
+    func confirmRemoval(of account: SiftId?) {
+        guard let app else { return }
+        let accounts = Account.all(app: app)
+        guard !accounts.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        let offered = account.flatMap { id in accounts.firstIndex { $0.id.same(as: id) } }
+        if account != nil && offered == nil {
+            // Removed already, by another of the four ways in. Nothing to ask.
+            return
+        }
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        let chooser = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 26))
+        if let offered {
+            alert.messageText = "Remove \u{201C}\(accounts[offered].name)\u{201D}?"
+        } else {
+            alert.messageText = "Remove an account?"
+            chooser.addItems(withTitles: accounts.map(\.name))
+            alert.accessoryView = chooser
+        }
+        let pending = { (a: Account) -> String in
+            guard a.queued > 0 else { return "" }
+            let changes = a.queued == 1 ? "1 change" : "\(a.queued) changes"
+            return "\(changes) you made here — archiving, flagging, deleting and the like — "
+                + "\(a.queued == 1 ? "has" : "have") not reached the mailbox yet and will be "
+                + "discarded. They cannot be recovered.\n\n"
+        }
+        let words = { (a: Account?) -> String in
+            (a.map(pending) ?? "")
+                + "Sift erases everything it holds for this account on this Mac: the mail it "
+                + "downloaded, its sign-in, and the choices you made for it — which folders are "
+                + "kept up to date, the senders whose images you chose to load, and its "
+                + "notification rules. Adding the mailbox again starts from nothing and does not "
+                + "bring those back.\n\nNothing in the mailbox itself is changed."
+        }
+        alert.informativeText = words(offered.map { accounts[$0] })
+        alert.addButton(withTitle: "Remove Account")
+        alert.addButton(withTitle: "Cancel")
+        // The destructive choice is not the default one. Return cancels.
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            syncActivationPolicy()
+            return
+        }
+        let chosen = offered.map { accounts[$0] } ?? accounts[max(0, chooser.indexOfSelectedItem)]
+        // Chosen from a list, so the pending changes were not in the sentence it confirmed.
+        // Asked again rather than discarded silently.
+        if offered == nil && chosen.queued > 0 {
+            confirmRemoval(of: chosen.id)
+            return
+        }
+        removeAccount(chosen.id)
+    }
+
+    /// Remove it, then redraw every surface that listed it.
+    private func removeAccount(_ id: SiftId) {
+        guard let app else { return }
+        guard sift_forget_account(UnsafeMutablePointer(app), id) == Ok else {
+            let alert = NSAlert()
+            alert.messageText = "Sift could not remove this account."
+            alert.informativeText =
+                "Nothing was removed. If the account is still listed, try again; if it is not, "
+                + "it has already gone."
+            alert.runModal()
+            return
+        }
+        waitingReauthentication.removeAll { $0.same(as: id) }
+        for window in windows { window.refreshAccounts() }
+        settingsWindow?.reload()
+        refreshAnnunciator()
+        refreshTrayState()
+        // The account-less state is the add-account flow, not an empty inbox.
+        if !hasAnyAccount() { beginAddAccount() } else { syncActivationPolicy() }
+    }
+
+    /// The second half of re-authentication: the new sign-in completed, so offer to remove the
+    /// account it was meant to replace. Skipped if that account has gone in the meantime.
+    private func offerReplacement(of old: SiftId) {
+        guard let app,
+            let account = Account.all(app: app).first(where: { $0.id.same(as: old) })
+        else { return }
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Remove the old \u{201C}\(account.name)\u{201D}?"
+        alert.informativeText =
+            "You are signed in again, as a new account. The old one can no longer be reached. "
+            + "If both are the same mailbox, remove the old one; if they are different "
+            + "mailboxes, keep both."
+        alert.addButton(withTitle: "Remove Old Account…")
+        alert.addButton(withTitle: "Keep Both")
+        if alert.runModal() == .alertFirstButtonReturn {
+            confirmRemoval(of: account.id)
+        } else {
+            syncActivationPolicy()
+        }
     }
 
     /// FR-26 — the bundle was replaced underneath the running process.

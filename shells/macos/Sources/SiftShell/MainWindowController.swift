@@ -21,6 +21,9 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     /// What the list is anchored on. D-4's zero identity is every account merged, and it is
     /// where a window starts.
     private var account: SiftId = .zero
+    /// The account this window is showing, or D-4's zero identity for every account merged —
+    /// what `app.remove-account` offers first, because it is the one the person is looking at.
+    var shownAccount: SiftId { account }
     /// Accounts this process has already fetched for.
     ///
     /// **One round trip per account per run, and no more.** Nothing across this boundary runs

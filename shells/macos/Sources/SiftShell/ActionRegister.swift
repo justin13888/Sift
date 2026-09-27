@@ -51,6 +51,9 @@ enum ActionRegister {
             title: "Sift",
             items: [
                 Item("app.add-account", "Add Account…", "n", controlCommand),
+                // No key equivalent: the most destructive thing the interface offers is not
+                // one a stray chord should be able to reach, even behind its confirmation.
+                Item("app.remove-account", "Remove Account…"),
                 Item("app.open-settings", "Settings…", ",", command),
                 nil,
                 Item("app.pause-sync", "Pause Syncing", "p", controlCommand),

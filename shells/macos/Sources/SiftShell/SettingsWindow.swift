@@ -88,7 +88,9 @@ final class SettingsWindow: NSWindowController {
         window?.makeKeyAndOrderFront(nil)
     }
 
-    private func reload() {
+    /// Redraw from the layer. **Called by the shell after an account is removed**, because a
+    /// group for an account that no longer exists would offer to write settings to nothing.
+    func reload() {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         var rows = SiftRows_SiftSetting()
         guard sift_settings(UnsafeMutablePointer(app), &rows) == Ok, let ptr = rows.ptr else {
@@ -98,6 +100,7 @@ final class SettingsWindow: NSWindowController {
         }
 
         edits.removeAll()
+        removals.removeAll()
         let all = (0..<rows.len).map { ptr[$0] }
 
         stack.addArrangedSubview(heading("This installation"))
@@ -111,7 +114,6 @@ final class SettingsWindow: NSWindowController {
         // showing one account's values under a heading that claims to speak for all of them —
         // and there is nothing it could write them to.
         let accountRows = all.filter { $0.account_scoped != 0 }
-        guard !accountRows.isEmpty else { return }
         for account in Account.all(app: app) {
             stack.addArrangedSubview(heading(account.name))
             stack.addArrangedSubview(
@@ -119,7 +121,24 @@ final class SettingsWindow: NSWindowController {
             for row in accountRows {
                 add(view(for: row, account: account.name))
             }
+            // FR-4, beside the settings it erases. The confirmation is the application
+            // shell's, shared with every other way in, so the wording of what is lost is
+            // written once.
+            let remove = NSButton(
+                title: "Remove \u{201C}\(account.name)\u{201D}…", target: self,
+                action: #selector(removeAccount(_:)))
+            remove.bezelStyle = .rounded
+            removals[ObjectIdentifier(remove)] = account.id
+            stack.addArrangedSubview(remove)
         }
+    }
+
+    /// Which account each removal button names. By identity, which is what removal takes.
+    private var removals: [ObjectIdentifier: SiftId] = [:]
+
+    @objc private func removeAccount(_ sender: NSButton) {
+        guard let id = removals[ObjectIdentifier(sender)] else { return }
+        ApplicationShell.shared.confirmRemoval(of: id)
     }
 
     /// Add a row and give it the stack's width.
