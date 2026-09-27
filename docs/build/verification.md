@@ -174,10 +174,16 @@ pairs from both platforms, and the Linux shell is deferred. Until that run is re
 reports and blocks nothing. The remainder is #95; recording the number strikes
 Q-22.
 
-**NFR-47's contrast threshold** is deliberately deferred by its owning document to the same corpus, and
-that deferral stands. What is new is that the deferral is registered here as an outstanding gate value
-rather than left as a sentence in a rendering document, so that the set of gates with no pass condition is
-enumerable rather than discovered.
+**NFR-47's contrast threshold** was deferred by its owning document to the same corpus and registered
+here as an outstanding gate value, so that the set of gates with no pass condition was enumerable rather
+than discovered. *Amended: it is no longer outstanding.* Its metric, its two thresholds and the chroma
+threshold beside them are recorded with their derivation in [dark mode](../rendering/dark-mode.md), and
+the gate **blocks**: at least 95% of the fidelity-corpus messages the transform runs on must meet the
+threshold, at both the ordinary and the increased-contrast value, and a run on which the transform ran on
+no message fails as unperformed. The thresholds are the metric's own published levels rather than a corpus
+statistic, because the corpus's senders are not a set anybody agreed renders acceptably — the reason is
+recorded there. As recorded, the corpus presents the repair with no pair to measure, so the gate passes
+without discriminating; that is written down beside the figure rather than read as evidence.
 
 **What it costs:** a gate can exist, run, and block nothing for a period, which is uncomfortable and is
 still better than a threshold that means whatever the last failing build needed it to mean.
