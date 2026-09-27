@@ -215,6 +215,17 @@ pub fn refresh_body(client_id: &str, refresh_token: &str) -> String {
     ])
 }
 
+/// The body of a revocation — RFC 7009, which is what a profile's `revoke` endpoint speaks.
+///
+/// The refresh token rather than the access token, because revoking the refresh token is what
+/// ends the grant: an access token dies on its own within the hour, and one revoked alone
+/// leaves a grant that mints another. **No client secret**, for the same reason as every other
+/// body here.
+#[must_use]
+pub fn revoke_body(token: &str) -> String {
+    form(&[("token", token), ("token_type_hint", "refresh_token")])
+}
+
 fn form(fields: &[(&str, &str)]) -> String {
     fields
         .iter()
@@ -503,6 +514,13 @@ mod tests {
         let body = refresh_body("client", "r");
         assert!(!body.contains("client_secret"));
         assert!(body.contains("grant_type=refresh_token"));
+    }
+
+    #[test]
+    fn a_revocation_names_the_refresh_token_and_sends_no_secret() {
+        let body = revoke_body("r/t+1");
+        assert_eq!(body, "token=r%2Ft%2B1&token_type_hint=refresh_token");
+        assert!(!body.contains("client_secret"));
     }
 
     #[test]
