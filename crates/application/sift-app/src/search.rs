@@ -722,6 +722,46 @@ mod tests {
     }
 
     #[test]
+    fn the_field_credit_decides_which_rows_survive_an_accounts_cut() {
+        // D-79 within one account: the statement cuts at `limit`, so its ORDER BY — not the
+        // merge — decides which rows are read at all. The subject match is the oldest; recency
+        // alone would cut it at a limit of one.
+        let mut app = one_account();
+        let subject = put(
+            &mut app,
+            "work",
+            &Mail {
+                subject: "Your invoice",
+                received: 1,
+                ..Mail::default()
+            },
+        );
+        let sender = put(
+            &mut app,
+            "work",
+            &Mail {
+                sender: "invoices@example.test",
+                received: 5_000,
+                ..Mail::default()
+            },
+        );
+        let body = put(
+            &mut app,
+            "work",
+            &Mail {
+                received: 9_000,
+                ..Mail::default()
+            },
+        );
+        let account = app.account("work").unwrap();
+        crate::document::index_body(account, body, "The invoice is attached", &[]).unwrap();
+
+        assert_eq!(found(&mut app, "invoice", 1), vec![subject]);
+        assert_eq!(found(&mut app, "invoice", 2), vec![subject, sender]);
+        assert_eq!(found(&mut app, "invoice", 3), vec![subject, sender, body]);
+    }
+
+    #[test]
     fn typing_finds_a_word_before_it_is_finished() {
         // FR-19: results as the user types, so the last word is usually half a word.
         let mut app = one_account();
