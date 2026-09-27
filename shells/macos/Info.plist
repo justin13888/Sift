@@ -22,6 +22,9 @@
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<!-- The About panel's copyright line (D-118); the licence is named here, as #61 asks. -->
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Justin Chung. Licensed under the GNU AGPL-3.0-only.</string>
 
 	<!-- FR-25 and FR-22: Sift is resident with or without a window, so it launches as an
 	     accessory rather than a regular application and is reachable through the menu-bar
