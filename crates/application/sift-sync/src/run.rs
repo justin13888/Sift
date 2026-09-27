@@ -9,11 +9,54 @@
 //! It is not a scheduler. Nothing here sleeps, retries, or decides when to run again; a
 //! failure comes back classified, and D-25's wheel decides what to do with it. That is the
 //! same split D-87 draws for a stated delay, applied to every other failure too.
+//!
+//! # Where the store is reached from — D-122
+//!
+//! Every read and write of the account goes through a [`Hold`], and **no provider call is made
+//! inside one**. A caller that keeps the account behind a lock the shell's loop also takes
+//! releases it for every round trip, so a gesture waits for a store write rather than for a
+//! provider. Between two held steps the account may have been removed; the hold then answers
+//! [`None`], and the walk stops with [`RunError::Gone`] having written nothing further.
 
 use crate::ingest::{self, IngestError, PageReport};
 use sift_foundation::identity::LocalIdGenerator;
 use sift_provider::adapter::{Adapter, Change, Failure, RemoteFolderId, RemoteMessageId};
 use sift_store::account::Account;
+
+/// How the driver reaches the account's store — D-122.
+///
+/// Each call is one short, held step: the closure touches the store and nothing else. It is a
+/// trait rather than a `&mut Account` because the caller that matters holds the account inside
+/// the application, behind a lock, and must be able to let go of it between steps.
+pub trait Hold {
+    /// Run `step` against the account, or answer `None` where the account no longer exists.
+    fn with<R>(&mut self, step: impl FnOnce(&mut Account, &LocalIdGenerator) -> R) -> Option<R>;
+}
+
+/// An account the caller holds outright, for the whole walk.
+///
+/// What a caller with no lock to release uses — the harness, and the driver's own tests.
+#[derive(Debug)]
+pub struct Direct<'a> {
+    pub account: &'a mut Account,
+    pub ids: &'a LocalIdGenerator,
+}
+
+impl Hold for Direct<'_> {
+    fn with<R>(&mut self, step: impl FnOnce(&mut Account, &LocalIdGenerator) -> R) -> Option<R> {
+        Some(step(self.account, self.ids))
+    }
+}
+
+/// One held step whose store work can fail.
+fn held<H: Hold + ?Sized, R>(
+    hold: &mut H,
+    step: impl FnOnce(&mut Account, &LocalIdGenerator) -> Result<R, IngestError>,
+) -> Result<R, RunError> {
+    hold.with(step)
+        .ok_or(RunError::Gone)?
+        .map_err(RunError::Store)
+}
 
 /// What went wrong running a turn.
 #[derive(Debug)]
@@ -24,6 +67,8 @@ pub enum RunError {
         said: String,
     },
     Store(IngestError),
+    /// The account was removed between two held steps. Nothing after the removal was written.
+    Gone,
 }
 
 impl From<IngestError> for RunError {
@@ -37,6 +82,7 @@ impl core::fmt::Display for RunError {
         match self {
             Self::Provider { failure, said } => write!(f, "{said} ({failure:?})"),
             Self::Store(e) => write!(f, "{e}"),
+            Self::Gone => write!(f, "the account was removed while it was syncing"),
         }
     }
 }
@@ -68,6 +114,25 @@ where
     Ok(ingest::reconcile_folders(&account.store, &folders)?)
 }
 
+/// [`discover_folders`] through a [`Hold`]: the enumeration is not held, the reconciliation is.
+///
+/// # Errors
+/// See [`RunError`].
+pub fn discover_folders_held<A: Adapter + ?Sized, H: Hold + ?Sized>(
+    adapter: &A,
+    hold: &mut H,
+) -> Result<ingest::FolderReport, RunError>
+where
+    A::Error: core::fmt::Display,
+{
+    let folders = adapter
+        .enumerate_folders()
+        .map_err(|e| provider(adapter, e))?;
+    held(hold, |account, _| {
+        ingest::reconcile_folders(&account.store, &folders)
+    })
+}
+
 /// One page of one folder's sync.
 ///
 /// The order is normative and it is the reason this function exists rather than being
@@ -90,7 +155,29 @@ pub fn sync_one_page<A: Adapter + ?Sized>(
 where
     A::Error: core::fmt::Display,
 {
-    let cursor = ingest::cursor_of(&account.store, folder)?;
+    sync_one_page_held(adapter, &mut Direct { account, ids }, folder, remote)
+}
+
+/// [`sync_one_page`] through a [`Hold`] — D-122.
+///
+/// The three steps are held separately and the two round trips between them are not: the
+/// cursor and what is already known are read under one hold each, and the page, its rows and
+/// the next cursor are written under a third, in one transaction as before. The cursor read
+/// first is still the one the page is applied against, because nothing else writes it while
+/// this walk has the account's adapter.
+///
+/// # Errors
+/// See [`RunError`].
+pub fn sync_one_page_held<A: Adapter + ?Sized, H: Hold + ?Sized>(
+    adapter: &A,
+    hold: &mut H,
+    folder: i64,
+    remote: &RemoteFolderId,
+) -> Result<Turn, RunError>
+where
+    A::Error: core::fmt::Display,
+{
+    let cursor = held(hold, |account, _| ingest::cursor_of(&account.store, folder))?;
     let page = match adapter.delta(remote, cursor.as_ref()) {
         Ok(page) => page,
         Err(e) => {
@@ -103,7 +190,9 @@ where
                 ..
             } = &error
             {
-                ingest::mark_invalidated(&account.store, folder)?;
+                held(hold, |account, _| {
+                    ingest::mark_invalidated(&account.store, folder)
+                })?;
                 return Ok(Turn::Invalidated);
             }
             if let RunError::Provider {
@@ -112,7 +201,9 @@ where
             } = &error
             {
                 // NFR-29: surfaced with its reason, never hidden.
-                ingest::mark_degraded(&account.store, folder, said)?;
+                held(hold, |account, _| {
+                    ingest::mark_degraded(&account.store, folder, said)
+                })?;
             }
             return Err(error);
         }
@@ -131,7 +222,9 @@ where
     }
     wanted.sort();
     wanted.dedup();
-    let present_unknown = ingest::unknown_to_us(&account.store, &wanted)?;
+    let present_unknown = held(hold, |account, _| {
+        ingest::unknown_to_us(&account.store, &wanted)
+    })?;
     let flags_changed: Vec<RemoteMessageId> = page
         .changes
         .iter()
@@ -157,7 +250,9 @@ where
         );
     }
 
-    let report = ingest::apply_page(&mut account.store, folder, &page, &envelopes, ids)?;
+    let report = held(hold, |account, ids| {
+        ingest::apply_page(&mut account.store, folder, &page, &envelopes, ids)
+    })?;
     Ok(Turn::Applied {
         report,
         more: page.more,
@@ -194,9 +289,32 @@ pub fn sync_folder<A: Adapter + ?Sized>(
 where
     A::Error: core::fmt::Display,
 {
+    sync_folder_held(
+        adapter,
+        &mut Direct { account, ids },
+        folder,
+        remote,
+        max_pages,
+    )
+}
+
+/// [`sync_folder`] through a [`Hold`] — D-122.
+///
+/// # Errors
+/// See [`RunError`].
+pub fn sync_folder_held<A: Adapter + ?Sized, H: Hold + ?Sized>(
+    adapter: &A,
+    hold: &mut H,
+    folder: i64,
+    remote: &RemoteFolderId,
+    max_pages: usize,
+) -> Result<PageReport, RunError>
+where
+    A::Error: core::fmt::Display,
+{
     let mut total = PageReport::default();
     for _ in 0..max_pages {
-        match sync_one_page(adapter, account, folder, remote, ids)? {
+        match sync_one_page_held(adapter, hold, folder, remote)? {
             Turn::Applied { report, more } => {
                 total.absorb(&report);
                 if !more {
@@ -207,7 +325,8 @@ where
                 // D-84: a fresh cursor, a re-enumeration, and reconciliation. The stored
                 // cursor is cleared only by the recovery that replaces it, which is why the
                 // next turn starts from `None` and takes a new one before walking.
-                clear_cursor(account, folder)?;
+                hold.with(|account, _| clear_cursor(account, folder))
+                    .ok_or(RunError::Gone)??;
                 break;
             }
         }
@@ -247,10 +366,25 @@ pub fn sync_account<A: Adapter + ?Sized>(
 where
     A::Error: core::fmt::Display,
 {
-    let watched = ingest::watched_folders(&account.store)?;
+    sync_account_held(adapter, &mut Direct { account, ids }, max_pages_per_folder)
+}
+
+/// [`sync_account`] through a [`Hold`] — D-122.
+///
+/// # Errors
+/// See [`RunError`].
+pub fn sync_account_held<A: Adapter + ?Sized, H: Hold + ?Sized>(
+    adapter: &A,
+    hold: &mut H,
+    max_pages_per_folder: usize,
+) -> Result<PageReport, RunError>
+where
+    A::Error: core::fmt::Display,
+{
+    let watched = held(hold, |account, _| ingest::watched_folders(&account.store))?;
     let mut total = PageReport::default();
     for (folder, remote) in watched {
-        let report = sync_folder(adapter, account, folder, &remote, ids, max_pages_per_folder)?;
+        let report = sync_folder_held(adapter, hold, folder, &remote, max_pages_per_folder)?;
         total.absorb(&report);
     }
     Ok(total)
