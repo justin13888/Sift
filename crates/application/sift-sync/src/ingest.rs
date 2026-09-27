@@ -264,6 +264,22 @@ pub struct PageReport {
     /// The most recently received of those arrivals — what FR-23's notification names and
     /// opens. `None` exactly when `delivered` is zero.
     pub newest: Option<Arrival>,
+    /// Moves D-44 rejoined: an arrival that took back the local identity of the message that
+    /// departed in the same window. Not counted in `inserted` — no message was created.
+    pub rejoined: usize,
+    /// Arrivals the scope proposed candidates for and the join refused — D-44's near misses,
+    /// recorded for the FR-33 debug view rather than passed over silently.
+    pub near_misses: Vec<NearMiss>,
+}
+
+/// An arrival D-44 could have joined and did not, because the candidates the scope proposed
+/// did not corroborate to exactly one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NearMiss {
+    /// The arrival, which kept the new identity it was given.
+    pub arrival: LocalId,
+    /// How many departures the scope proposed for it.
+    pub candidates: usize,
 }
 
 /// One message FR-23 counts as new mail, as much of it as a notification needs to name it.
@@ -285,6 +301,8 @@ impl PageReport {
         self.removed += other.removed;
         self.delivered += other.delivered;
         self.newest = newer(self.newest, other.newest);
+        self.rejoined += other.rejoined;
+        self.near_misses.extend_from_slice(&other.near_misses);
     }
 
     fn arrived(&mut self, arrival: Arrival) {
@@ -314,6 +332,10 @@ fn newer(a: Option<Arrival>, b: Option<Arrival>) -> Option<Arrival> {
 /// whose envelope is missing is applied for what it is — a presence, a removal — without
 /// inventing content for it.
 ///
+/// A removal is applied at once: a message leaving its last folder leaves the store. On an
+/// account whose identifiers do not survive a move, that turns every move into a delete and an
+/// arrival — which [`apply_page_within`] and a [`MoveWindow`] exist to avoid.
+///
 /// # Errors
 /// See [`IngestError`].
 pub fn apply_page(
@@ -323,8 +345,82 @@ pub fn apply_page(
     envelopes: &[Envelope],
     ids: &LocalIdGenerator,
 ) -> Result<PageReport, IngestError> {
+    apply_page_within(
+        store,
+        folder,
+        page,
+        envelopes,
+        ids,
+        &mut MoveWindow::default(),
+    )
+}
+
+/// D-44's move window: one sync round, across every folder it walks.
+///
+/// Under an identifier that does not survive a move, a move is reported as a removal from one
+/// folder and a presence, under an identifier nobody has seen, in another — in either order,
+/// on different pages, in different folders' deltas. So a window that **holds** keeps each
+/// departure's row instead of deleting it, remembers each arrival, and [`settle_moves`] joins
+/// the two once both sides of the round have been applied. A rejoined arrival takes back the
+/// departed identity, so a selection, a queued intent or a notification that named it still
+/// names the same message.
+///
+/// **A held departure is marked in the store, not only here.** Its row loses its remote
+/// identifier (which is dead: the provider reissued it) along with its last location, so a
+/// round that ends early — an error, a crash between two pages — leaves rows the next
+/// [`settle_moves`] finds and resolves, rather than rows nothing will ever delete.
+#[derive(Debug, Default)]
+pub struct MoveWindow {
+    holding: bool,
+    arrived: Vec<Arrived>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Arrived {
+    id: LocalId,
+    received_millis: u64,
+    /// Whether the page counted it as FR-23 new mail.
+    delivered: bool,
+}
+
+impl MoveWindow {
+    /// A window for an account, from its declared capability. One whose identifiers survive a
+    /// move never holds: its removals are removals, and its presences are keyed on an
+    /// identifier that already joins.
+    #[must_use]
+    pub fn for_account(identifier_survives_a_move: bool) -> Self {
+        Self {
+            holding: !identifier_survives_a_move,
+            arrived: Vec::new(),
+        }
+    }
+
+    /// Whether this window holds departures for [`settle_moves`].
+    #[must_use]
+    pub const fn holds(&self) -> bool {
+        self.holding
+    }
+}
+
+/// [`apply_page`], inside a [`MoveWindow`]. The page and its cursor are still one
+/// transaction; what a holding window changes is only that a message leaving its last folder
+/// is held for [`settle_moves`] rather than deleted.
+///
+/// # Errors
+/// See [`IngestError`].
+pub fn apply_page_within(
+    store: &mut Connection,
+    folder: i64,
+    page: &Delta,
+    envelopes: &[Envelope],
+    ids: &LocalIdGenerator,
+    window: &mut MoveWindow,
+) -> Result<PageReport, IngestError> {
     let tx = store.transaction()?;
     let mut report = PageReport::default();
+    // Remembered only once the transaction commits: an arrival from a page that rolled back
+    // was never written, and settling it would reach for a row that does not exist.
+    let mut arrived = Vec::new();
 
     for change in &page.changes {
         match change {
@@ -335,13 +431,24 @@ pub fn apply_page(
                     Upsert::Inserted(local) => {
                         report.inserted += 1;
                         // FR-23: delivered, **and unread at this moment**.
-                        if *provenance == Provenance::Delivered
-                            && let Some(envelope) = envelope.filter(|e| !e.read)
-                        {
-                            report.arrived(Arrival {
-                                id: local,
-                                received_millis: envelope.received_at_millis,
-                            });
+                        let delivered = *provenance == Provenance::Delivered
+                            && envelope.is_some_and(|e| !e.read);
+                        if let Some(envelope) = envelope {
+                            if delivered {
+                                report.arrived(Arrival {
+                                    id: local,
+                                    received_millis: envelope.received_at_millis,
+                                });
+                            }
+                            // Only an arrival with an envelope has anything D-44 could scope
+                            // or corroborate on.
+                            if window.holding {
+                                arrived.push(Arrived {
+                                    id: local,
+                                    received_millis: envelope.received_at_millis,
+                                    delivered,
+                                });
+                            }
                         }
                     }
                     Upsert::Updated => report.updated += 1,
@@ -357,7 +464,7 @@ pub fn apply_page(
                 }
             }
             Change::Removed { id } => {
-                report.removed += remove_from(&tx, folder, id)?;
+                report.removed += remove_from(&tx, folder, id, window.holding)?;
             }
         }
     }
@@ -379,7 +486,204 @@ pub fn apply_page(
         ],
     )?;
     tx.commit()?;
+    window.arrived.extend(arrived);
     Ok(report)
+}
+
+/// Close a [`MoveWindow`]: rejoin what arrived to what departed under D-44, delete every
+/// departure nothing rejoined, and correct `report` — the round's summed report — for it.
+///
+/// One transaction. A rejoined arrival's row is folded into the departed one, which keeps its
+/// local identity, its **provenance** (a message moved into a folder was not delivered there,
+/// and FR-23 must not announce it) and everything cached against it, and takes the arrival's
+/// remote identifier, envelope, flags, tags and locations. The arrival's row is then deleted;
+/// its identity was never handed to anything but this round's report, which is corrected here.
+///
+/// An ambiguous arrival stays the distinct message it was inserted as, and is recorded as a
+/// near miss. A window that does not hold does nothing.
+///
+/// # Errors
+/// See [`IngestError`].
+pub fn settle_moves(
+    store: &mut Connection,
+    window: &mut MoveWindow,
+    report: &mut PageReport,
+) -> Result<(), IngestError> {
+    if !window.holding {
+        return Ok(());
+    }
+    let arrived = core::mem::take(&mut window.arrived);
+    let tx = store.transaction()?;
+
+    // Every held departure, including any a round that ended early left behind.
+    let departed: Vec<Held> = {
+        let mut stmt = tx.prepare(&format!(
+            "{HELD} WHERE m.remote_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM message_location l WHERE l.message_id = m.id)"
+        ))?;
+        let rows = stmt.query_map([], Held::read)?;
+        rows.collect::<Result<_, _>>()?
+    };
+    // The arrivals still held as rows. One a later page of the same round removed again is
+    // gone, and is not a candidate for anything.
+    let mut arrivals: Vec<(Arrived, Held)> = Vec::with_capacity(arrived.len());
+    {
+        // Still present: an arrival a later page removed again is itself a held departure,
+        // and must not be offered to itself.
+        let mut stmt = tx.prepare(&format!(
+            "{HELD} WHERE m.id = ?1 AND m.remote_id IS NOT NULL"
+        ))?;
+        for a in arrived {
+            if let Some(held) = stmt
+                .query_row(params![a.id.to_bytes().to_vec()], Held::read)
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    e => Err(e),
+                })?
+            {
+                arrivals.push((a, held));
+            }
+        }
+    }
+
+    let outcomes = if departed.is_empty() {
+        Vec::new()
+    } else {
+        join::rejoin(
+            &arrivals.iter().map(|(_, h)| h.side()).collect::<Vec<_>>(),
+            &departed.iter().map(Held::side).collect::<Vec<_>>(),
+        )
+    };
+    let mut kept = vec![false; departed.len()];
+    let mut rejoined = Vec::new();
+    for ((arrival, held), outcome) in arrivals.iter().zip(&outcomes) {
+        match *outcome {
+            join::Resolution::One(d) => {
+                merge_into(&tx, &departed[d], held)?;
+                kept[d] = true;
+                rejoined.push(arrival.id);
+                report.rejoined += 1;
+                report.inserted = report.inserted.saturating_sub(1);
+                if arrival.delivered {
+                    report.delivered = report.delivered.saturating_sub(1);
+                }
+            }
+            join::Resolution::Distinct { near_misses } if near_misses > 0 => {
+                report.near_misses.push(NearMiss {
+                    arrival: arrival.id,
+                    candidates: near_misses,
+                });
+            }
+            join::Resolution::Distinct { .. } => {}
+        }
+    }
+    for (held, kept) in departed.iter().zip(kept) {
+        if !kept {
+            tx.execute("DELETE FROM message WHERE id = ?1", params![held.id])?;
+        }
+    }
+    tx.commit()?;
+
+    // A rejoined arrival was never new mail. What FR-23 names is the newest of the rest.
+    if arrivals
+        .iter()
+        .any(|(a, _)| a.delivered && rejoined.contains(&a.id))
+    {
+        report.newest = arrivals
+            .iter()
+            .filter(|(a, _)| a.delivered && !rejoined.contains(&a.id))
+            .fold(None, |newest, (a, _)| {
+                newer(
+                    newest,
+                    Some(Arrival {
+                        id: a.id,
+                        received_millis: a.received_millis,
+                    }),
+                )
+            });
+    }
+    Ok(())
+}
+
+/// What [`settle_moves`] reads of one side of a move.
+#[derive(Debug)]
+struct Held {
+    id: Vec<u8>,
+    thread_id: Option<Vec<u8>>,
+    conversation: Option<String>,
+    internet_message_id: Option<String>,
+    digest: Vec<u8>,
+    rule_version: u32,
+}
+
+/// The scope is the thread's **remote** conversation identifier: a thread with none is a
+/// message's own fallback thread, and proposes nothing.
+const HELD: &str = "SELECT m.id, m.thread_id, t.remote_thread_id, m.internet_message_id,
+                           m.fallback_digest, m.digest_rule_version
+                    FROM message m LEFT JOIN thread t ON t.id = m.thread_id";
+
+impl Held {
+    fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: r.get(0)?,
+            thread_id: r.get(1)?,
+            conversation: r.get(2)?,
+            internet_message_id: r.get(3)?,
+            digest: r.get(4)?,
+            rule_version: r.get(5)?,
+        })
+    }
+
+    fn side(&self) -> join::Side<'_> {
+        join::Side {
+            conversation: self.conversation.as_deref(),
+            internet_message_id: self.internet_message_id.as_deref(),
+            digest: &self.digest,
+            rule_version: self.rule_version,
+        }
+    }
+}
+
+/// Fold an arrival's row into the departure it rejoined. The departure keeps its identity,
+/// its provenance and what was cached against it (its body, its index text, its attachment
+/// claims); everything the provider just said about the message comes from the arrival.
+fn merge_into(tx: &Transaction<'_>, departed: &Held, arrival: &Held) -> Result<(), IngestError> {
+    tx.execute(
+        "UPDATE message AS d SET
+            remote_id = a.remote_id, internet_message_id = a.internet_message_id,
+            fallback_digest = a.fallback_digest, digest_rule_version = a.digest_rule_version,
+            thread_id = a.thread_id, received_at_millis = a.received_at_millis,
+            origination_millis = a.origination_millis, sender = a.sender,
+            recipients = a.recipients, subject = a.subject, snippet = a.snippet,
+            flags = a.flags, size_bytes = a.size_bytes
+         FROM (SELECT * FROM message WHERE id = ?2) AS a
+         WHERE d.id = ?1",
+        params![departed.id, arrival.id],
+    )?;
+    tx.execute(
+        "DELETE FROM message_tag WHERE message_id = ?1",
+        params![departed.id],
+    )?;
+    tx.execute(
+        "UPDATE message_tag SET message_id = ?1 WHERE message_id = ?2",
+        params![departed.id, arrival.id],
+    )?;
+    tx.execute(
+        "UPDATE OR IGNORE message_location SET message_id = ?1 WHERE message_id = ?2",
+        params![departed.id, arrival.id],
+    )?;
+    // The arrival joined the departure's thread and counted itself into it. Two rows became
+    // one, so the thread holds one message fewer than that count says — D-102's count is of
+    // messages still held.
+    if arrival.thread_id.is_some() && arrival.thread_id == departed.thread_id {
+        tx.execute(
+            "UPDATE thread SET message_count = max(message_count - 1, 1) WHERE id = ?1",
+            params![arrival.thread_id],
+        )?;
+    }
+    tx.execute("DELETE FROM message WHERE id = ?1", params![arrival.id])?;
+    Ok(())
 }
 
 /// Ingest the envelopes a server-side search found — FR-21 — and say which local identity
@@ -698,10 +1002,15 @@ fn write_tags(tx: &Transaction<'_>, message: LocalId, tags: &[String]) -> Result
 /// A message that is still in another folder is **not** deleted: on a provider whose
 /// cardinality is one-or-more, leaving the inbox is an archive rather than a disappearance,
 /// and deleting the row would lose a message the user can still see everywhere else.
+///
+/// Where `hold` is set — a [`MoveWindow`] that holds — a message leaving its last folder is
+/// not deleted either: it keeps its row, loses its dead remote identifier, and waits for
+/// [`settle_moves`] to rejoin it to an arrival or delete it.
 fn remove_from(
     tx: &Transaction<'_>,
     folder: i64,
     remote: &RemoteMessageId,
+    hold: bool,
 ) -> Result<usize, IngestError> {
     let Ok(id) = tx.query_row::<Vec<u8>, _, _>(
         "SELECT id FROM message WHERE remote_id = ?1",
@@ -720,7 +1029,14 @@ fn remove_from(
         |r| r.get(0),
     )?;
     if remaining == 0 {
-        tx.execute("DELETE FROM message WHERE id = ?1", params![id])?;
+        if hold {
+            tx.execute(
+                "UPDATE message SET remote_id = NULL WHERE id = ?1",
+                params![id],
+            )?;
+        } else {
+            tx.execute("DELETE FROM message WHERE id = ?1", params![id])?;
+        }
     }
     Ok(1)
 }

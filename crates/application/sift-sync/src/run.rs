@@ -10,7 +10,7 @@
 //! failure comes back classified, and D-25's wheel decides what to do with it. That is the
 //! same split D-87 draws for a stated delay, applied to every other failure too.
 
-use crate::ingest::{self, IngestError, PageReport};
+use crate::ingest::{self, IngestError, MoveWindow, PageReport};
 use sift_foundation::identity::LocalIdGenerator;
 use sift_provider::adapter::{Adapter, Change, Failure, RemoteFolderId, RemoteMessageId};
 use sift_store::account::Account;
@@ -78,6 +78,9 @@ where
 /// 2. Fetch envelopes for what the page names, batched to the declared size.
 /// 3. Write the rows **and the next cursor in one transaction**.
 ///
+/// A page applied here stands alone: no [`MoveWindow`] is open, so a removal is applied as a
+/// removal. [`sync_folder`] and [`sync_account`] hold a window across their turns.
+///
 /// # Errors
 /// See [`RunError`].
 pub fn sync_one_page<A: Adapter + ?Sized>(
@@ -86,6 +89,27 @@ pub fn sync_one_page<A: Adapter + ?Sized>(
     folder: i64,
     remote: &RemoteFolderId,
     ids: &LocalIdGenerator,
+) -> Result<Turn, RunError>
+where
+    A::Error: core::fmt::Display,
+{
+    one_page(
+        adapter,
+        account,
+        folder,
+        remote,
+        ids,
+        &mut MoveWindow::default(),
+    )
+}
+
+fn one_page<A: Adapter + ?Sized>(
+    adapter: &A,
+    account: &mut Account,
+    folder: i64,
+    remote: &RemoteFolderId,
+    ids: &LocalIdGenerator,
+    window: &mut MoveWindow,
 ) -> Result<Turn, RunError>
 where
     A::Error: core::fmt::Display,
@@ -157,7 +181,8 @@ where
         );
     }
 
-    let report = ingest::apply_page(&mut account.store, folder, &page, &envelopes, ids)?;
+    let report =
+        ingest::apply_page_within(&mut account.store, folder, &page, &envelopes, ids, window)?;
     Ok(Turn::Applied {
         report,
         more: page.more,
@@ -181,6 +206,10 @@ pub enum Turn {
 /// the account — D-53's backfill is resumable precisely so it can be stopped, and L-26 is
 /// the granularity it rewinds to.
 ///
+/// The walk is one D-44 [`MoveWindow`], settled before this returns — which rejoins only a
+/// move inside this folder's own delta. A move between folders is two folders' deltas, and
+/// [`sync_account`] is what holds a window across both.
+///
 /// # Errors
 /// See [`RunError`].
 pub fn sync_folder<A: Adapter + ?Sized>(
@@ -194,9 +223,55 @@ pub fn sync_folder<A: Adapter + ?Sized>(
 where
     A::Error: core::fmt::Display,
 {
+    let mut window = MoveWindow::for_account(adapter.capabilities().identifier_survives_a_move());
+    let walked = walk_folder(
+        adapter,
+        account,
+        folder,
+        remote,
+        ids,
+        max_pages,
+        &mut window,
+    );
+    settled(account, &mut window, walked)
+}
+
+/// Close a window whatever the round came to. A round that failed part-way still settles
+/// what it applied, so a departure whose arrival was applied before the failure is rejoined
+/// now rather than deleted by the next round, which will not see that arrival again. The
+/// round's own error is the one returned.
+fn settled(
+    account: &mut Account,
+    window: &mut MoveWindow,
+    walked: Result<PageReport, RunError>,
+) -> Result<PageReport, RunError> {
+    match walked {
+        Ok(mut total) => {
+            ingest::settle_moves(&mut account.store, window, &mut total)?;
+            Ok(total)
+        }
+        Err(error) => {
+            let _ = ingest::settle_moves(&mut account.store, window, &mut PageReport::default());
+            Err(error)
+        }
+    }
+}
+
+fn walk_folder<A: Adapter + ?Sized>(
+    adapter: &A,
+    account: &mut Account,
+    folder: i64,
+    remote: &RemoteFolderId,
+    ids: &LocalIdGenerator,
+    max_pages: usize,
+    window: &mut MoveWindow,
+) -> Result<PageReport, RunError>
+where
+    A::Error: core::fmt::Display,
+{
     let mut total = PageReport::default();
     for _ in 0..max_pages {
-        match sync_one_page(adapter, account, folder, remote, ids)? {
+        match one_page(adapter, account, folder, remote, ids, window)? {
             Turn::Applied { report, more } => {
                 total.absorb(&report);
                 if !more {
@@ -236,6 +311,12 @@ pub fn clear_cursor(account: &Account, folder: i64) -> Result<(), RunError> {
 
 /// Sync every folder FR-43 says to watch.
 ///
+/// **The whole round is one D-44 [`MoveWindow`].** On an account whose identifiers do not
+/// survive a move, a move is a removal in one watched folder and an arrival in another, in
+/// whichever order the folders are walked; holding every departure until every folder has
+/// been walked is what lets an unambiguous move keep its local identity. A move to a folder
+/// this account does not watch has no arrival to rejoin, and is the delete it looks like.
+///
 /// # Errors
 /// See [`RunError`].
 pub fn sync_account<A: Adapter + ?Sized>(
@@ -248,10 +329,22 @@ where
     A::Error: core::fmt::Display,
 {
     let watched = ingest::watched_folders(&account.store)?;
-    let mut total = PageReport::default();
-    for (folder, remote) in watched {
-        let report = sync_folder(adapter, account, folder, &remote, ids, max_pages_per_folder)?;
-        total.absorb(&report);
-    }
-    Ok(total)
+    let mut window = MoveWindow::for_account(adapter.capabilities().identifier_survives_a_move());
+    let walked = (|| {
+        let mut total = PageReport::default();
+        for (folder, remote) in &watched {
+            let report = walk_folder(
+                adapter,
+                account,
+                *folder,
+                remote,
+                ids,
+                max_pages_per_folder,
+                &mut window,
+            )?;
+            total.absorb(&report);
+        }
+        Ok(total)
+    })();
+    settled(account, &mut window, walked)
 }
