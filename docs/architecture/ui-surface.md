@@ -2,7 +2,7 @@
 
 What screens exist, what a window is, and how a user reaches everything.
 
-**Owns:** D-97, D-98, D-101.
+**Owns:** D-97, D-98, D-101, D-118.
 
 [UI shell](ui-shell.md) argues why the shells are native and states the requirements they must satisfy.
 It describes no screen. The set implies more than twenty surfaces, names several of them inside
@@ -181,6 +181,51 @@ user with a Gmail account and an IMAP account will find that the same keystroke 
 them with no visible reason. Showing them disabled would explain it — at the cost of advertising
 capabilities the account does not have, which provider-model chose against for the affordance and this
 follows for the action.
+
+## D-118 — The register governs Sift's actions; each shell supplies its platform's standard commands beside them
+
+**Chosen:** a shell's menus carry the register's actions **and**, alongside them, the commands its platform
+gives every application — the clipboard (cut, copy, paste, select all), hiding and showing the
+application, the platform's services, minimizing, zooming and arranging windows, the open-window list, the
+help menu, and the application's about panel. Those commands are **not register actions**: they carry no
+identifier, are absent from the palette and the test harness, and are dispatched to whatever the platform
+says has focus rather than to the layer. **About is one of them**, not an action.
+**Rejected:** reimplementing the platform's commands as register actions; leaving them out of a menu built
+from the register; making about a register action so every shell gets it from one list.
+
+**Why they are not actions.** D-98 names every user-initiated *Sift* operation, because the palette, FR-24
+and the test harness must agree on one vocabulary. Copy, paste, hide and minimize are not Sift operations.
+They are the platform's own, identical in every application, delivered to the focused text field, web view
+or window by the platform's dispatch, with no enablement rule Sift decides — whether copy applies is a
+question only the focused control can answer. Registering them would have the layer decide something it
+cannot see, and a register that differs per platform is the "actions defined per shell" D-98 rejects,
+arriving from the other direction.
+
+**Why they must be present anyway.** On at least one platform the clipboard's keystrokes reach a text
+field only through the menu's standard items, so a menu built from the register alone leaves an address
+that cannot be pasted into the add-account sheet and a message whose text cannot be copied. The open-window
+list, hide and minimize are what a user of that platform reaches for without reading anything, and
+[FR-24](ui-shell.md)'s keyboard reachability does not stop at Sift's own verbs.
+
+**About is the borderline case, and it is the platform's.** It is application-scoped, which argues for the
+register, but it performs nothing in the layer: it shows the version and build the package carries,
+[D-62](../build/packaging.md)'s source revision where the build records one, and the licence. Each
+platform has a standard about surface that a user already knows where to find, and each shell presents
+it. The cost is that a shell can forget it, which the register would have prevented; the answer is that
+no platform's conventions omit it, so its absence is visible in a way a missing Sift action is not.
+
+**Two rules keep the two sets apart.**
+
+- **A platform command never takes a register binding.** A default key the platform assigns to one of its
+  commands is not given to an action, and an action's default is not given to a platform command; each
+  shell checks this at launch in its development build, as it checks the register against its menus.
+- **Enablement follows the owner.** A register action that is unavailable is absent, as D-98 requires; a
+  platform command follows its platform's convention, which on most platforms is to be shown disabled.
+  The two conventions sit in one menu deliberately, because each is what its owner's users expect.
+
+**Contestable because:** one menu now mixes items that disappear with items that grey out, and a
+reviewer reading the menu cannot tell from it which is which; and the platform commands are untested by
+the harness, so a shell that drops one is caught by a user rather than a test.
 
 ## D-101 — Settings are enumerated with their defaults, and the scope split is the storage split
 
