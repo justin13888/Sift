@@ -22,6 +22,12 @@ if CommandLine.arguments.contains(AccessibilityProbe.flag) {
     exit(AccessibilityProbe.run())
 }
 
+// The P0 residency spike's registration half: can this sandboxed bundle register itself as a
+// login item? It restores whatever state it found, then exits.
+if CommandLine.arguments.contains("--probe-login-item") {
+    exit(LoginItem.probe())
+}
+
 // D-35: core dumps off and the crash handler in place before the application shell exists, so
 // nothing the layer reads into memory — a credential included — is ever in a dump. After the
 // probes, which run with no container and so have nowhere to put a report.
@@ -40,11 +46,12 @@ application.delegate = ApplicationShell.shared
 // `.regular` while any window is open and lowers it again when the last one closes, which is
 // what makes "until one opens" true rather than aspirational.
 //
-// Note what that means today: a launch opens a window either way — the mail if the container
-// holds an account, the add-account screen if it does not. The window-less accessory state is
-// reached by closing it, not by starting.
+// Note what that means: a launch the user made opens a window — the mail if the container
+// holds an account, the add-account screen if it does not. A launch the login item made opens
+// none when there is an account, so the window-less accessory state is where it starts.
 //
 // Background residency itself is registered through the platform's own per-user mechanism — a
-// login item, never a system-wide service and never with elevated privileges.
+// login item registering this application (`LoginItem`, the tray's "Open at Login"), never a
+// system-wide service, never a helper executable, and never with elevated privileges.
 application.setActivationPolicy(.accessory)
 application.run()

@@ -1,6 +1,6 @@
 # Process model
 
-**Owns:** D-2, FR-25, FR-26.
+**Owns:** D-2, D-119, FR-25, FR-26.
 
 ## D-2 — One resident process, with a disposable web engine content process
 
@@ -38,9 +38,19 @@ worse than either uniform answer. See [roadmap](../product/roadmap.md).
 
 ## Lifecycle
 
-Sift MUST be registered for background residency using the platform's own per-user mechanism — a login
-item on macOS, the desktop portal's autostart request on Linux. It MUST NOT be a system-wide service,
-and MUST NOT require elevated privileges.
+Background residency, where the user turns it on, MUST use the platform's own per-user mechanism — a
+login item on macOS, the desktop portal's autostart request on Linux. It MUST NOT be a system-wide
+service, and MUST NOT require elevated privileges.
+
+**D-119 — Starting at login is the user's choice, off by default.** Sift MUST NOT register itself to
+start at login without the user asking it to: registration is a standing claim on the user's machine,
+the platform announces every one, and a claim the user did not make is the distrust FR-25 is written
+against. The choice lives where the process is reachable with no window open — the tray — because
+residency is a fact about the process rather than about any account, and the platform, not Sift, holds
+whether it is on. A launch the login mechanism made opens no window when an account exists; with none,
+there is nothing to be resident for, and it opens the add-account flow as any other launch does.
+Contestable because a user who never finds the toggle gets no notifications after a restart until they
+open Sift, which is the gap residency exists to close.
 
 The Linux mechanism is the portal rather than a systemd user unit, because
 [D-15](../product/platforms-and-distribution.md) distributes through Flatpak, and a sandboxed
