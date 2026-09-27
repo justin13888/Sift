@@ -227,3 +227,9 @@
 
 @ mx-067 | clean | variant of mx-066 carrying both links, the shape a sender would use
 <a href="https://a.example.test/"><table><tr><td>x</td></tr><a href="https://b.example.test/">y</a></table></a>
+
+@ mx-068 | clean | NFR-40 method 4 fuzzing, minimized: unwrapping an unknown element moves an rp into a p, whose implied end tags close it on a reparse (I8)
+<ruby><p><r><rp>
+
+@ mx-069 | clean | NFR-40 method 4 fuzzing, minimized: the adoption agency nests a heading inside a heading, which a reparse closes (I8)
+<a><h1><a><h6><a>

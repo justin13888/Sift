@@ -22,7 +22,19 @@ pub enum SanitizeError {
     TooManyNodes,
     /// L-8.
     TooManyAttributes,
+    /// I8 could not be established: after [`STABILITY_PASSES`] passes the output still
+    /// reparsed into a different document. Refused rather than rendered, because the tree the
+    /// engine would build is then one the policy never inspected.
+    Unstable,
 }
+
+/// How many policy passes [`sanitize`] may make before it refuses a document whose output
+/// will not settle — the first, and the ones over its own reparsed output.
+///
+/// One re-pass settles every instability the fuzzing has found so far; the margin is for
+/// constructions it has not. Each pass is a full parse, walk and serialization, so a document
+/// that settles costs two passes and one that never does costs this many and is refused.
+pub const STABILITY_PASSES: usize = 4;
 
 /// One rewritten fetching position.
 ///
@@ -75,10 +87,60 @@ fn internal_address(index: usize) -> String {
 
 /// Sanitize a document.
 ///
+/// # I8 by construction
+///
+/// The output is a **fixed point** of the policy pass: sanitizing it again changes nothing,
+/// so the tree the engine builds from it is the tree the policy inspected. A single pass does
+/// not guarantee that. The tree builder produces trees no markup reparses into — foster
+/// parenting nests an anchor inside an anchor, a formatting element's adoption places a
+/// heading inside a heading — and the policy's own unwrapping moves children into parents they
+/// were never parsed beside. Each of those serializes to bytes the engine builds a
+/// *different* document from, which is the mutation-XSS primitive I8 exists to close. NFR-40's
+/// fuzzing found them faster than they could be enumerated, so rather than chase each shape,
+/// the pass runs again over its own output until the output stops changing, and a document
+/// that has not settled within [`STABILITY_PASSES`] is refused.
+///
+/// A later pass sees the earlier pass's internal addresses in place of the sender's; the
+/// positions it reports are mapped back to the addresses the sender wrote, and the removals of
+/// every pass are kept, so the result describes the message rather than the previous pass.
+///
 /// # Errors
 ///
-/// On any bound in the limits register, so the message degrades to the raw view.
+/// On any bound in the limits register, or when the output will not settle, so the message
+/// degrades to the raw view.
 pub fn sanitize(html: &str) -> Result<Sanitized, SanitizeError> {
+    let mut out = pass(html)?;
+    for _ in 1..STABILITY_PASSES {
+        let again = pass(&out.html)?;
+        if again.html == out.html {
+            return Ok(out);
+        }
+        out = settle(again, out);
+    }
+    Err(SanitizeError::Unstable)
+}
+
+/// Carry what the earlier pass knew into the later pass's result.
+fn settle(mut later: Sanitized, earlier: Sanitized) -> Sanitized {
+    let prefix = format!("{}:/", sift_foundation::identifiers::INTERNAL_SCHEME);
+    for position in &mut later.positions {
+        let sender = position
+            .original
+            .strip_prefix(&prefix)
+            .and_then(|i| i.parse::<usize>().ok())
+            .and_then(|i| earlier.positions.get(i));
+        if let Some(sender) = sender {
+            position.original.clone_from(&sender.original);
+        }
+    }
+    let mut removals = earlier.removals;
+    removals.append(&mut later.removals);
+    later.removals = removals;
+    later
+}
+
+/// One policy pass: parse, walk, serialize.
+fn pass(html: &str) -> Result<Sanitized, SanitizeError> {
     // I10: the tree builder consumes bytes under the HTML encoding rules and yields UTF-8
     // regardless of what the document declared, including where declarations contradict.
     let dom = parse_document(RcDom::default(), ParseOpts::default()).one(html);
@@ -1021,6 +1083,49 @@ mod invariants {
                 "unstable for {html}"
             );
         }
+    }
+
+    #[test]
+    fn i8_a_single_pass_that_does_not_settle_is_passed_again() {
+        // Found by NFR-40's fuzzing, minimized. Each single pass serializes a tree no markup
+        // reparses into: an `rp` moved into a `p` by unwrapping, and headings nested by the
+        // adoption agency.
+        for html in ["<ruby><p><r><rp>", "<a><h1><a><h6><a>"] {
+            let once = pass(html).expect("bounded");
+            let twice = pass(&once.html).expect("bounded");
+            assert_ne!(once.html, twice.html, "{html} no longer needs a re-pass");
+            assert!(
+                check_parse_stability(html).expect("settles"),
+                "unstable for {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn i8_a_re_pass_reports_the_addresses_the_sender_wrote() {
+        // The later pass reads `sift-resource:/0`, not the sender's address; the broker and
+        // the debug view need the sender's.
+        let html = r#"<img src="https://a.example.test/0.png"><a><h1><a><h6><a><img src="https://a.example.test/1.png">"#;
+        let out = clean(html);
+        let originals: Vec<&str> = out.positions.iter().map(|p| p.original.as_str()).collect();
+        assert_eq!(
+            originals,
+            [
+                "https://a.example.test/0.png",
+                "https://a.example.test/1.png"
+            ]
+        );
+        assert!(out.html.contains("sift-resource:/1"));
+    }
+
+    #[test]
+    fn i8_removals_from_every_pass_are_kept() {
+        let out = clean("<ruby><p><r><rp>");
+        assert!(
+            out.removals.iter().any(|r| r.what == "<r>"),
+            "the first pass's removal was lost: {:?}",
+            out.removals
+        );
     }
 
     #[test]
