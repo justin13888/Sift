@@ -188,6 +188,7 @@ pub unsafe extern "C" fn sift_initialize(
             // running job holds another; whichever is dropped last frees it.
             let layer = std::sync::Arc::new(Layer {
                 session: std::sync::Mutex::new(Session::new(app)),
+                returned: std::sync::Condvar::new(),
                 host: callbacks,
                 schedule: init.schedule,
                 schedule_context: init.schedule_context as usize,
@@ -705,6 +706,10 @@ pub struct SiftFlush {
 /// an out-parameter for a call that has already returned. The flush a person never asked for —
 /// the wheel's, once a minute — runs on the worker (#49); this is the panel's deliberate one.
 ///
+/// It waits first for any round trip the worker has in flight, so that it finds its account's
+/// adapter home rather than lent, and then holds the session only across the queue work — its
+/// own round trip is made with the session released (D-122).
+///
 /// # Safety
 /// `app` and `out` must be valid; `label` must point to `label_len` bytes of UTF-8.
 #[unsafe(no_mangle)]
@@ -718,10 +723,9 @@ pub unsafe extern "C" fn sift_flush_account(
         guard_out(out, || {
             let name = borrowed(label, label_len)?;
             let layer = layer(app).ok_or(())?;
-            let flushed = {
-                let mut session = layer.session.lock().map_err(|_| ())?;
-                session.app_mut().flush(name).map_err(|_| ())?
-            };
+            let flushed =
+                sift_app::App::flush_held(&mut crate::layer::Held::after_settling(layer), name)
+                    .map_err(|_| ())?;
             // The list is an observation, and a settled intent removes the overlay row that was
             // hiding a message. Posted rather than run: running it here would hand the shell a
             // callback from inside the call that caused it, which is D-48's reentrancy.
@@ -1806,7 +1810,8 @@ fn rearm_accounts(layer: &Layer) {
 /// the main loop by D-48's contract; doing the work inside it was a network round trip that
 /// happened on its own, once a minute, on the thread that draws — so a slow or unreachable
 /// provider froze the UI at a moment nobody touched anything. It does not even take the
-/// session lock, because the worker may be holding it through a round trip a person started.
+/// session lock, because the worker may be holding it for a store step of work a person
+/// started.
 ///
 /// The timer stays claimed until the worker re-arms it, so nothing else arms a second one in
 /// between — see [`fire`].
@@ -1847,11 +1852,10 @@ fn run_job(layer: &Layer, job: crate::layer::Job) {
 /// One wheel fire, on the worker: do the work that came due, hop the completion to the
 /// shell's loop, and arm the next timer.
 ///
-/// **The session lock is taken per account, not per fire.** The cheap half — what is due,
-/// the governor, the re-arm — runs under one hold; each account's round trips run under
-/// their own. A gesture on the main loop then waits for at most one account's work rather
-/// than for every account's, which is the most this change can offer while `App::sync`
-/// itself holds the lock across its provider calls.
+/// **The session lock is never held across a provider round trip** — D-122. The cheap half —
+/// what is due, the governor, the re-arm — runs under one hold; each account's work takes the
+/// lock for each of its store steps and lets go of it for every round trip between them. A
+/// gesture on the main loop then waits for a store write, not for a provider.
 ///
 /// **The re-arm is unconditional and last.** A fire that did its work and did not re-arm is a
 /// process that syncs once and then never again — and because nothing else arms the timer,
@@ -1898,10 +1902,7 @@ fn fire(layer: &Layer) {
     // here either.
     let mut report = sift_app::TickReport::default();
     for item in &due {
-        let Ok(mut session) = layer.session.lock() else {
-            return;
-        };
-        session.app_mut().perform(item, &mut report);
+        sift_app::App::perform_held(&mut crate::layer::Held::new(layer), item, &mut report);
     }
     // **FR-23's new mail is the one part that is kept**, because it is the one part nothing
     // can recompute: "delivered and unread at that moment" is a fact about this fire. Held for
@@ -1914,15 +1915,11 @@ fn fire(layer: &Layer) {
 
 /// One account's sync, on the worker, then the completion hopped to the shell's loop.
 fn sync_now(layer: &Layer, name: &str) {
-    {
-        let Ok(mut session) = layer.session.lock() else {
-            return;
-        };
-        // A failure is not reported from here, because there is no call left to report it
-        // to: the shell returned long ago. What it changed about the account reaches the
-        // shell as a D-49 condition on the delivery that follows, as a wheel fire's does.
-        let _ = session.app_mut().sync(name, 20);
-    }
+    // A failure is not reported from here, because there is no call left to report it to: the
+    // shell returned long ago. What it changed about the account reaches the shell as a D-49
+    // condition on the delivery that follows, as a wheel fire's does. The session is taken per
+    // store step and released for every round trip — D-122.
+    let _ = sift_app::App::sync_held(&mut crate::layer::Held::new(layer), name, 20);
     complete(layer);
 }
 
@@ -2432,7 +2429,9 @@ pub unsafe extern "C" fn sift_open_document(
             };
             let id = sift_foundation::identity::LocalId::from_u128(message.to_u128());
             let document = {
-                let mut session = layer.session.lock().map_err(|_| ())?;
+                // The body comes from the provider, so this waits for a round trip the worker
+                // has in flight rather than finding the account's adapter out — D-122.
+                let mut session = layer.session_settled()?;
                 let document = session
                     .app_mut()
                     .open_document(id, dark != 0, increased_contrast != 0)
@@ -2718,7 +2717,8 @@ pub unsafe extern "C" fn sift_message_attachments(
         guard_out(out, || {
             let layer = layer(app).ok_or(())?;
             let listed = {
-                let mut session = layer.session.lock().map_err(|_| ())?;
+                // The structure comes from the provider — see `sift_open_document` (D-122).
+                let mut session = layer.session_settled()?;
                 session
                     .app_mut()
                     .attachments(sift_foundation::identity::LocalId::from_u128(
@@ -2852,7 +2852,8 @@ pub unsafe extern "C" fn sift_write_attachment(
                 .map_err(|_| ())?
                 .remove(&plan)
                 .ok_or(())?;
-            let mut session = layer.session.lock().map_err(|_| ())?;
+            // The bytes come from the provider — see `sift_open_document` (D-122).
+            let mut session = layer.session_settled()?;
             let (written, warning) = session.app_mut().write_attachment(&plan).map_err(|_| ())?;
             Ok(SiftSaveOutcome {
                 written,
@@ -5233,8 +5234,8 @@ mod tests {
 
     /// #49 — neither a sync a person asked for nor a wheel fire waits on the session.
     ///
-    /// The session lock is what a sync holds across its provider round trips, so holding it
-    /// here stands in for a provider that is slow to answer. Before this change both calls
+    /// Holding the session lock here stands in for work that holds it — which since D-122 is a
+    /// store step rather than a provider round trip. Before #49 both calls
     /// did the work inline, on the shell's loop, and would wait behind it — which is the
     /// freeze nobody touched anything to cause.
     #[test]
@@ -5461,6 +5462,65 @@ mod tests {
             posts,
             "a fire that finished after shutdown posted to a shell that is gone"
         );
+    }
+
+    /// D-122 — while a job has an account's adapter out, a call that needs no provider takes
+    /// the session at once, and a call that needs one waits for the adapter to come back and
+    /// no longer.
+    #[test]
+    fn a_call_that_needs_the_provider_waits_only_for_the_adapter_that_is_out() {
+        let asked: &'static Asked = Box::leak(Box::default());
+        let app = start_asking(asked);
+        let name = "mail";
+        let mut account = SiftId::from_u128(0);
+        assert_eq!(
+            unsafe { sift_add_replayed_account(app, name.as_ptr(), name.len(), &raw mut account) },
+            SiftStatus::Ok
+        );
+        let layer = unsafe { layer(app) }.expect("a live layer");
+
+        // What a job's first held step leaves behind while it talks to the provider.
+        let adapter = {
+            let mut session = layer.session.lock().expect("session");
+            let open = session.app_mut().account(name).expect("open");
+            open.lent = true;
+            open.adapter.take().expect("an adapter")
+        };
+
+        let handle = app as usize;
+        let (settled, waited) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let live = unsafe { super::layer(handle as *mut SiftApp) }.expect("a live layer");
+            let session = live.session_settled().expect("settled");
+            let _ = settled.send(session.app().any_lent());
+        });
+        assert!(
+            waited
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "a call that needs the provider went ahead with the account's adapter out"
+        );
+        assert!(
+            returns_promptly(move || {
+                let live = unsafe { super::layer(handle as *mut SiftApp) }.expect("a live layer");
+                drop(live.session.lock().expect("session"));
+            }),
+            "a gesture that needs no provider waited behind the adapter that is out"
+        );
+
+        // The job's last held step gives the adapter back, and the waiter goes ahead.
+        sift_app::Locked::with(&mut crate::layer::Held::new(layer), |app| {
+            let open = app.account(name).expect("open");
+            open.adapter = Some(adapter);
+            open.lent = false;
+        })
+        .expect("the session");
+        let lent = waited
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the waiter was not woken when the adapter came back");
+        assert!(!lent);
+
+        assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
     }
 
     /// #49 under D-70 — quitting does not wait for a sync in flight, and the sync that
