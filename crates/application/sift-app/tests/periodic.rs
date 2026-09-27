@@ -558,3 +558,53 @@ fn an_intent_made_while_a_flush_is_out_waits_behind_it() {
         "the intent made while the batch was out was lost or merged: {left:?}"
     );
 }
+
+#[test]
+fn an_account_removed_while_its_flush_is_out_settles_nothing_and_drops_its_adapter() {
+    use sift_mutations::intent::Intent;
+
+    let mut app = App::new();
+    app.add_replayed_account("mail").expect("added");
+    app.sync("mail", 1).expect("sync");
+    app.set_writes_enabled("mail", true).expect("authorized");
+    let message = sift_app::list_messages(app.account("mail").expect("open"))
+        .expect("list")
+        .first()
+        .expect("a message")
+        .0;
+    app.account("mail")
+        .expect("open")
+        .queue
+        .enqueue(1, message, Intent::Archive, 0);
+
+    let mut between = Between {
+        app,
+        steps: 0,
+        // Between the issue and the answer: the batch is out, and the account goes.
+        before_step: 2,
+        act: |app: &mut App| {
+            assert!(app.account("mail").expect("open").lent);
+            app.forget_account("mail").expect("forgotten");
+        },
+    };
+    let flushed = App::flush_held(&mut between, "mail");
+    assert!(
+        flushed.as_ref().is_err_and(|why| why.contains("removed")),
+        "an answer was settled against a queue that went with its account: {flushed:?}"
+    );
+    assert!(between.app.account("mail").is_err());
+    assert!(
+        !between.app.any_lent(),
+        "a removed account's adapter is still counted as out, so every provider call waits"
+    );
+
+    // An account added under the same label afterwards is a different one: the dropped
+    // adapter was not handed to it, and nothing of the removed queue is in it.
+    between
+        .app
+        .add_replayed_account("mail")
+        .expect("added again");
+    let account = between.app.account("mail").expect("open");
+    assert!(!account.lent && account.adapter.is_some());
+    assert!(account.queue.entries().is_empty());
+}
