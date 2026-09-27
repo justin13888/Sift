@@ -1,6 +1,6 @@
 //! Every numeric bound Sift enforces at runtime, in one place.
 //!
-//! Owns L-1 through L-34. See `docs/limits.md`.
+//! Owns L-1 through L-35. See `docs/limits.md`.
 //!
 //! # Why this is a register rather than a scattered set of constants
 //!
@@ -102,6 +102,15 @@ pub const L8_ATTRS_PER_ELEMENT: u64 = 256;
 ///
 /// The bound on D-27's cascade, which is the pass most likely to miss NFR-41.
 pub const L9_CSS_DECLARATIONS: u64 = 100_000;
+
+/// L-35 · Policy passes the sanitizer makes before refusing a document whose output will
+/// not settle — D-121.
+///
+/// The first pass and the ones over its own reparsed output. One re-pass settles every
+/// instability the fuzzing has found so far; the margin is for constructions it has not.
+/// Each pass is a full parse, walk and serialization, so a document that never settles
+/// costs this many before it is refused to the raw view.
+pub const L35_SANITIZE_PASSES: u64 = 4;
 
 // ---------------------------------------------------------------------------
 // Resource limits — asserted by the broker, *before* a decoder is handed bytes.
@@ -462,6 +471,12 @@ pub const ALL: &[Limit] = &[
         bounds: "CSS declarations resolved across all stylesheets and style attributes",
         consequence: RejectToRawView,
     },
+    Limit {
+        id: "L-35",
+        magnitude: Count(L35_SANITIZE_PASSES),
+        bounds: "sanitizer policy passes before a document whose output will not settle is refused",
+        consequence: RejectToRawView,
+    },
     // Resource limits.
     Limit {
         id: "L-10",
@@ -631,11 +646,11 @@ mod tests {
 
     #[test]
     fn the_register_holds_every_identifier_the_document_owns_exactly_once() {
-        // docs/limits.md says it owns L-1 through L-34. A gap here means a bound that
+        // docs/limits.md says it owns L-1 through L-35. A gap here means a bound that
         // exists in the specification and is enforced by nothing, or the reverse.
         let ids: BTreeSet<&str> = ALL.iter().map(|l| l.id).collect();
         assert_eq!(ids.len(), ALL.len(), "an identifier appears twice");
-        for n in 1..=34 {
+        for n in 1..=35 {
             let id = format!("L-{n}");
             assert!(
                 ids.contains(id.as_str()),
@@ -644,7 +659,7 @@ mod tests {
         }
         assert_eq!(
             ALL.len(),
-            34,
+            35,
             "an identifier is here and not in docs/limits.md"
         );
     }
@@ -655,7 +670,7 @@ mod tests {
         // output contract to the attacker: the sender chooses the document's structure by
         // choosing where the cap falls.
         for id in [
-            "L-1", "L-2", "L-3", "L-4", "L-5", "L-6", "L-7", "L-8", "L-9",
+            "L-1", "L-2", "L-3", "L-4", "L-5", "L-6", "L-7", "L-8", "L-9", "L-35",
         ] {
             let l = get(id).expect("present");
             assert_eq!(

@@ -18,7 +18,12 @@
 # `rust-version` in Cargo.toml, and `mise run check-floor` is what holds it.
 #
 # `profile = "default"` takes rustfmt and clippy from rustup's component set.
-rust = { version = "1.96.0", profile = "default" }
+#
+# `targets` must stay equal to `rust-toolchain.toml`'s. Installing them here completes the
+# toolchain before any `cargo:` tool below builds. Left to rustup's on-demand install, every
+# `cargo:` tool mise builds in parallel downloads the same missing target into one shared
+# path, and the installs race and fail.
+rust = { version = "1.96.0", profile = "default", targets = "aarch64-apple-darwin,x86_64-apple-darwin" }
 
 # Gates 1 and 2 of the dependency policy (`mise run deny`), configured in deny.toml. The
 # aqua backend ships prebuilt binaries, so no source build. Pinned so a new advisory-schema
@@ -37,6 +42,11 @@ hk = "1.57.0"
 # default-features off, so it vendors libgit2 with no openssl or system deps. mise caches
 # the compiled binary.
 "cargo:convco" = "0.7.1"
+
+# NFR-40 method 4's driver (`mise run fuzz`), built from source like convco. It is the cargo
+# subcommand only: the fuzz targets themselves build on the dated nightly `mise-tasks/fuzz`
+# installs (D-120), never on the stable pin above.
+"cargo:cargo-fuzz" = "0.13.2"
 
 # D-61 gives the macOS bundle to the platform's own toolchain, and `shells/macos/project.yml`
 # is the committed spec XcodeGen turns into that project. Pinned for the same reason as the
@@ -209,6 +219,7 @@ depends = [
   "trace",
   "deny",
   "check-floor",
+  "fuzz",
 ]
 # The macOS shell leg is the one part that cannot run everywhere — D-61 gives the bundle to
 # the platform toolchain, and "CI needs a macOS host for even a smoke build" is a stated cost
@@ -290,6 +301,17 @@ run = '''
 cargo build -q --release -p sift-soak --bins
 "${CARGO_TARGET_DIR:-target}/release/sift-soak" overhead "$@"
 '''
+
+# ── Fuzzing (NFR-40 method 4, D-120) ─────────────────────────────────────────
+#
+# `fuzz` is a script in mise-tasks/: the reproducible per-change leg CI runs, a fixed number of
+# executions from a fixed seed. `fuzz-continuous` is the same targets unbounded, for the
+# continuous tier. Both take target names (`sanitize`, `parse`); FUZZ_RUNS and FUZZ_SECONDS
+# set the bounds.
+
+[tasks.fuzz-continuous]
+description = "NFR-40 method 4 — fuzz until stopped (FUZZ_SECONDS bounds it), keeping the corpus. Args: [sanitize] [parse]"
+run = "{{config_root}}/mise-tasks/fuzz --continuous"
 
 # ── Live probes ───────────────────────────────────────────────────────────────
 #

@@ -6,6 +6,13 @@ logs
 /target
 **/*.rs.bk
 
+# cargo-fuzz's own defaults beside each fuzz workspace. `mise run fuzz` sends everything under
+# /target instead, but `cargo fuzz tmin` and a bare `cargo fuzz run` still write here.
+/crates/*/*/fuzz/target
+/crates/*/*/fuzz/corpus
+/crates/*/*/fuzz/artifacts
+/crates/*/*/fuzz/coverage
+
 # macOS
 .DS_Store
 

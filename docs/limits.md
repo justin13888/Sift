@@ -2,7 +2,7 @@
 
 Every numeric bound Sift enforces at runtime, in one place.
 
-**Owns:** L-1 through L-34.
+**Owns:** L-1 through L-35.
 
 **"Enforces at runtime" is the boundary, and it is narrower than the old wording.** This page previously
 claimed every numeric bound in the project, which reached two populations it does not own and should not.
@@ -67,6 +67,7 @@ Asserted by the [pipeline](rendering/pipeline.md)'s stages 1 through 3 and by
 | **L-7** | DOM nodes per document | 250,000 | This is the cap NFR-41's 30 ms budget is actually a function of, and the one most likely to move once measured |
 | **L-8** | Attributes per element | 256 | |
 | **L-9** | CSS declarations resolved across all stylesheets and style attributes | 100,000 | The bound on [D-27](rendering/dark-mode.md)'s cascade, which is the pass most likely to miss NFR-41 |
+| **L-35** | Policy passes the sanitizer makes before refusing a document whose output will not settle | 4 | The bound [D-121](rendering/sanitizer-invariants.md) requires and does not number: the first pass and the ones over its own reparsed output. One re-pass has settled every instability the fuzzing has found; the margin is for constructions nobody has found. Each pass is a full parse, walk and serialization, so a document that never settles costs this many before it is refused |
 
 ## Resource limits
 

@@ -2,10 +2,12 @@
 
 use crate::allowlist;
 use html5ever::driver::ParseOpts;
-use html5ever::tendril::TendrilSink;
+use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::{parse_document, serialize};
 use markup5ever_rcdom::{Handle, NodeData, RcDom, SerializableHandle};
-use sift_foundation::limits::{L6_DOM_DEPTH, L7_DOM_NODES, L8_ATTRS_PER_ELEMENT};
+use sift_foundation::limits::{
+    L6_DOM_DEPTH, L7_DOM_NODES, L8_ATTRS_PER_ELEMENT, L35_SANITIZE_PASSES,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -22,7 +24,19 @@ pub enum SanitizeError {
     TooManyNodes,
     /// L-8.
     TooManyAttributes,
+    /// L-35. I8 could not be established: after [`STABILITY_PASSES`] passes the output still
+    /// reparsed into a different document. Refused rather than rendered, because the tree the
+    /// engine would build is then one the policy never inspected.
+    Unstable,
 }
+
+/// How many policy passes [`sanitize`] may make before it refuses a document whose output
+/// will not settle — L-35, from the limits register like every other bound this pass
+/// enforces.
+///
+/// A document that settles costs two passes; one that never does costs this many and is
+/// refused.
+pub const STABILITY_PASSES: usize = L35_SANITIZE_PASSES as usize;
 
 /// One rewritten fetching position.
 ///
@@ -75,10 +89,60 @@ fn internal_address(index: usize) -> String {
 
 /// Sanitize a document.
 ///
+/// # I8 by construction
+///
+/// The output is a **fixed point** of the policy pass: sanitizing it again changes nothing,
+/// so the tree the engine builds from it is the tree the policy inspected. A single pass does
+/// not guarantee that. The tree builder produces trees no markup reparses into — foster
+/// parenting nests an anchor inside an anchor, a formatting element's adoption places a
+/// heading inside a heading — and the policy's own unwrapping moves children into parents they
+/// were never parsed beside. Each of those serializes to bytes the engine builds a
+/// *different* document from, which is the mutation-XSS primitive I8 exists to close. NFR-40's
+/// fuzzing found them faster than they could be enumerated, so rather than chase each shape,
+/// the pass runs again over its own output until the output stops changing, and a document
+/// that has not settled within [`STABILITY_PASSES`] is refused.
+///
+/// A later pass sees the earlier pass's internal addresses in place of the sender's; the
+/// positions it reports are mapped back to the addresses the sender wrote, and the removals of
+/// every pass are kept, so the result describes the message rather than the previous pass.
+///
 /// # Errors
 ///
-/// On any bound in the limits register, so the message degrades to the raw view.
+/// On any bound in the limits register, or when the output will not settle, so the message
+/// degrades to the raw view.
 pub fn sanitize(html: &str) -> Result<Sanitized, SanitizeError> {
+    let mut out = pass(html)?;
+    for _ in 1..STABILITY_PASSES {
+        let again = pass(&out.html)?;
+        if again.html == out.html {
+            return Ok(out);
+        }
+        out = settle(again, out);
+    }
+    Err(SanitizeError::Unstable)
+}
+
+/// Carry what the earlier pass knew into the later pass's result.
+fn settle(mut later: Sanitized, earlier: Sanitized) -> Sanitized {
+    let prefix = format!("{}:/", sift_foundation::identifiers::INTERNAL_SCHEME);
+    for position in &mut later.positions {
+        let sender = position
+            .original
+            .strip_prefix(&prefix)
+            .and_then(|i| i.parse::<usize>().ok())
+            .and_then(|i| earlier.positions.get(i));
+        if let Some(sender) = sender {
+            position.original.clone_from(&sender.original);
+        }
+    }
+    let mut removals = earlier.removals;
+    removals.append(&mut later.removals);
+    later.removals = removals;
+    later
+}
+
+/// One policy pass: parse, walk, serialize.
+fn pass(html: &str) -> Result<Sanitized, SanitizeError> {
     // I10: the tree builder consumes bytes under the HTML encoding rules and yields UTF-8
     // regardless of what the document declared, including where declarations contradict.
     let dom = parse_document(RcDom::default(), ParseOpts::default()).one(html);
@@ -91,8 +155,9 @@ pub fn sanitize(html: &str) -> Result<Sanitized, SanitizeError> {
         elements: 0,
     });
 
-    walk(&dom.document, 0, &state)?;
+    walk(&dom.document, 0, false, &state)?;
     drop_leading_whitespace(&dom.document);
+    restore_leading_newlines(&dom.document);
 
     let mut serialized = Vec::new();
     let handle: SerializableHandle = dom.document.clone().into();
@@ -124,7 +189,14 @@ struct State {
     elements: usize,
 }
 
-fn walk(node: &Handle, depth: u64, state: &RefCell<State>) -> Result<(), SanitizeError> {
+/// `in_anchor` is whether a kept `a` encloses `node` — the one piece of ancestry the policy
+/// needs, for [`classify`]'s nested-anchor rule.
+fn walk(
+    node: &Handle,
+    depth: u64,
+    in_anchor: bool,
+    state: &RefCell<State>,
+) -> Result<(), SanitizeError> {
     if depth > L6_DOM_DEPTH {
         return Err(SanitizeError::TooDeep);
     }
@@ -143,7 +215,7 @@ fn walk(node: &Handle, depth: u64, state: &RefCell<State>) -> Result<(), Sanitiz
     let mut keep: Vec<Handle> = Vec::new();
 
     for child in children {
-        let verdict = classify(&child, state)?;
+        let verdict = classify(&child, in_anchor, state)?;
         match verdict {
             Verdict::Drop => {}
             Verdict::Unwrap => {
@@ -151,7 +223,7 @@ fn walk(node: &Handle, depth: u64, state: &RefCell<State>) -> Result<(), Sanitiz
                 // forbidden but the text inside it is the user's mail — I9 permits removal
                 // and forbids invention, and discarding readable text is closer to
                 // invention of an empty message than removal is.
-                walk(&child, depth + 1, state)?;
+                walk(&child, depth + 1, in_anchor, state)?;
 
                 // `mem::take` rather than `clone`, and the reason is not tidiness.
                 //
@@ -175,7 +247,8 @@ fn walk(node: &Handle, depth: u64, state: &RefCell<State>) -> Result<(), Sanitiz
                 }
             }
             Verdict::Keep => {
-                walk(&child, depth + 1, state)?;
+                let anchor = in_anchor || is_element(&child, "a");
+                walk(&child, depth + 1, anchor, state)?;
                 keep.push(child);
             }
             Verdict::Replace(wrapper) => {
@@ -187,7 +260,7 @@ fn walk(node: &Handle, depth: u64, state: &RefCell<State>) -> Result<(), Sanitiz
                     g.parent.set(Some(Rc::downgrade(&wrapper)));
                 }
                 *wrapper.children.borrow_mut() = grandchildren;
-                walk(&wrapper, depth + 1, state)?;
+                walk(&wrapper, depth + 1, in_anchor, state)?;
                 wrapper.parent.set(Some(Rc::downgrade(node)));
                 keep.push(wrapper);
             }
@@ -214,6 +287,15 @@ fn walk(node: &Handle, depth: u64, state: &RefCell<State>) -> Result<(), Sanitiz
 /// "Whitespace" is the HTML parser's — tab, LF, FF, CR and space — not Unicode's. A
 /// no-break space or an ideographic space is text to the tree builder: a reparse puts it in
 /// the body and the engine renders it, so a node holding one is content and stays.
+///
+/// The same holds for the whitespace **prefix** of the first text that is content. The tree
+/// builder discards whitespace before the document's first element whatever follows it, so
+/// the leading tab of `"\t<"` is gone on a reparse even though the node is not whitespace
+/// alone. The first pass keeps it only when something invisible preceded it — a NUL, which
+/// the builder ignores in the body but which still moved it past the point where whitespace
+/// is discarded — and the two passes then write different bytes (found by NFR-40's fuzzing).
+/// A leading run of whitespace at the start of the body is collapsed by layout and never
+/// rendered, so trimming it loses nothing I9 protects.
 fn drop_leading_whitespace(document: &Handle) {
     let mut children = document.children.borrow_mut();
     let mut i = 0;
@@ -225,15 +307,56 @@ fn drop_leading_whitespace(document: &Handle) {
             NodeData::Element { name, .. } if name.local.eq_str_ignore_ascii_case("style") => {
                 i += 1;
             }
+            NodeData::Text { contents } => {
+                let mut text = contents.borrow_mut();
+                let content = text.trim_start_matches(is_html_whitespace_char).len();
+                let prefix = text.len() - content;
+                if prefix > 0 {
+                    // Whole characters, all of them one byte, so the cut is on a boundary.
+                    *text = StrTendril::from_slice(&text[prefix..]);
+                }
+                break;
+            }
             _ => break,
         }
     }
 }
 
+/// I8 and I9 over the newline the tree builder eats.
+///
+/// The tree builder drops a single LF straight after the start tag of `pre`, `listing` and
+/// `textarea`, and the HTML serialization algorithm writes one back where the element's text
+/// begins with LF; the serializer this crate uses does not. Without it every pass loses one
+/// leading line of preformatted text — a blank line the reader sees — and a `pre` opening on
+/// more newlines than L-35 allows passes never settles (found by NFR-40's fuzzing). So the
+/// LF is written back into the tree before it is serialized, where a reparse removes it again.
+fn restore_leading_newlines(node: &Handle) {
+    let children = node.children.borrow();
+    if let NodeData::Element { name, .. } = &node.data
+        && name.ns == html5ever::ns!(html)
+        && matches!(&*name.local, "pre" | "listing" | "textarea")
+        && let Some(first) = children.first()
+        && let NodeData::Text { contents } = &first.data
+    {
+        let mut text = contents.borrow_mut();
+        if text.starts_with('\n') {
+            let mut restored = StrTendril::from_slice("\n");
+            restored.push_tendril(&text);
+            *text = restored;
+        }
+    }
+    for child in children.iter() {
+        restore_leading_newlines(child);
+    }
+}
+
 /// Whether `text` is nothing but the tree builder's whitespace: tab, LF, FF, CR and space.
 fn is_html_whitespace(text: &str) -> bool {
-    text.bytes()
-        .all(|b| matches!(b, b'\t' | b'\n' | b'\x0C' | b'\r' | b' '))
+    text.chars().all(is_html_whitespace_char)
+}
+
+fn is_html_whitespace_char(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\x0C' | '\r' | ' ')
 }
 
 enum Verdict {
@@ -244,7 +367,15 @@ enum Verdict {
     Replace(Handle),
 }
 
-fn classify(node: &Handle, state: &RefCell<State>) -> Result<Verdict, SanitizeError> {
+fn is_element(node: &Handle, tag: &str) -> bool {
+    matches!(&node.data, NodeData::Element { name, .. } if name.local.eq_str_ignore_ascii_case(tag))
+}
+
+fn classify(
+    node: &Handle,
+    in_anchor: bool,
+    state: &RefCell<State>,
+) -> Result<Verdict, SanitizeError> {
     match &node.data {
         NodeData::Text { .. } => Ok(Verdict::Keep),
         // I4: no document control. A comment additionally carries the legacy conditional
@@ -299,6 +430,21 @@ fn classify(node: &Handle, state: &RefCell<State>) -> Result<Verdict, SanitizeEr
                 });
                 // Unwrap rather than drop: the text inside an unknown element is still the
                 // user's mail.
+                return Ok(Verdict::Unwrap);
+            }
+
+            // I8: an anchor inside an anchor has no markup that reparses into it. The tree
+            // builder can produce one — foster parenting moves an `a` out of a table and into
+            // the `a` enclosing that table — but the serialized `<a><a>` meets the adoption
+            // agency on the way back in, which closes the outer anchor and yields a different
+            // tree (found by NFR-40's fuzzing, from `<a><table><a>`). The inner one is
+            // unwrapped: its text stays, and a click on it follows the enclosing link, which
+            // is what the reader already saw it inside.
+            if tag == "a" && in_anchor {
+                state.borrow_mut().removals.push(Removal {
+                    rule: "I8 no anchor inside an anchor",
+                    what: "<a>".to_owned(),
+                });
                 return Ok(Verdict::Unwrap);
             }
 
@@ -989,10 +1135,35 @@ mod invariants {
             "<html>\n<head>\n<style>p{color:red}</style>\n</head>\n<body>\n<p>x</p>\n</body></html>",
             "<html><head></head><body>\n<style>p{color:red}</style>\n<style>b{color:blue}</style>\n<p>x</p></body></html>",
             "\n\n<p>x</p>",
+            // Found by NFR-40's fuzzing, minimized: an ignored NUL carries the tab past the
+            // point where the tree builder discards leading whitespace, and a reparse does not.
+            "\0\t<",
+            "\0 x",
         ] {
             let once = clean(html);
             let twice = clean(&once.html);
             assert_eq!(once.html, twice.html, "not idempotent for {html}");
+        }
+    }
+
+    #[test]
+    fn i8_a_leading_newline_in_pre_survives_the_round_trip() {
+        // Found by NFR-40's fuzzing once a document that will not settle became a finding,
+        // minimized to the first input: the tree builder drops one newline straight after
+        // `<pre>`, so each pass that serializes the text without writing that newline back
+        // loses one line — a blank line the reader would have seen, and four newlines outlast
+        // L-35's passes.
+        for (html, text) in [
+            ("<pre>\n\n\n\n", "\n\n\n"),
+            ("<pre>\n\nx</pre>", "\nx"),
+            ("<div><pre>\n\n\n\n\n</pre></div>", "\n\n\n\n"),
+        ] {
+            let once = sanitize(html).unwrap_or_else(|e| panic!("{html:?} refused: {e:?}"));
+            assert!(
+                once.html.contains(&format!(">\n{text}<")),
+                "{html:?} lost a line: {:?}",
+                once.html
+            );
         }
     }
 
@@ -1063,6 +1234,49 @@ mod invariants {
                 "unstable for {html}"
             );
         }
+    }
+
+    #[test]
+    fn i8_a_single_pass_that_does_not_settle_is_passed_again() {
+        // Found by NFR-40's fuzzing, minimized. Each single pass serializes a tree no markup
+        // reparses into: an `rp` moved into a `p` by unwrapping, and headings nested by the
+        // adoption agency.
+        for html in ["<ruby><p><r><rp>", "<a><h1><a><h6><a>"] {
+            let once = pass(html).expect("bounded");
+            let twice = pass(&once.html).expect("bounded");
+            assert_ne!(once.html, twice.html, "{html} no longer needs a re-pass");
+            assert!(
+                check_parse_stability(html).expect("settles"),
+                "unstable for {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn i8_a_re_pass_reports_the_addresses_the_sender_wrote() {
+        // The later pass reads `sift-resource:/0`, not the sender's address; the broker and
+        // the debug view need the sender's.
+        let html = r#"<img src="https://a.example.test/0.png"><a><h1><a><h6><a><img src="https://a.example.test/1.png">"#;
+        let out = clean(html);
+        let originals: Vec<&str> = out.positions.iter().map(|p| p.original.as_str()).collect();
+        assert_eq!(
+            originals,
+            [
+                "https://a.example.test/0.png",
+                "https://a.example.test/1.png"
+            ]
+        );
+        assert!(out.html.contains("sift-resource:/1"));
+    }
+
+    #[test]
+    fn i8_removals_from_every_pass_are_kept() {
+        let out = clean("<ruby><p><r><rp>");
+        assert!(
+            out.removals.iter().any(|r| r.what == "<r>"),
+            "the first pass's removal was lost: {:?}",
+            out.removals
+        );
     }
 
     #[test]
