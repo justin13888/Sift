@@ -14,12 +14,18 @@
 //! IMAP. So the hybrid is reachable only by asking the user, on the consent screen, to grant
 //! Sift the ability to send mail as them.
 //!
-//! D-88's second point forbids exactly that, in terms that leave no room: "a permanent
-//! minimum scope set with **no send or compose scope ever requested** — the no-send
-//! constraint expressed where a reviewer can check it against an authorization screen". A
-//! granted submission capability is an outbound message path whether or not any code calls
-//! it; `docs/product/scope.md` makes the constraint structural rather than a preference
-//! about which functions exist.
+//! D-88's second point refuses any scope wider than the minimum for read, search and the
+//! FR-13 intents. The full-mailbox scope is wider, and what it adds is a mail protocol with
+//! its own submission channel — a send path the committed endpoint list cannot bound;
+//! `docs/product/scope.md` makes the constraint structural rather than a preference about
+//! which functions exist.
+//!
+//! # The minimum can send too
+//!
+//! [`SCOPE`] itself authorizes sending and composing: the provider's send method accepts it,
+//! and no narrower scope archives, labels or trashes. D-88 as amended names this case. The
+//! no-send constraint is kept by absence rather than by the grant: the send methods are
+//! excluded from `schema/endpoints.txt`, and `schema`'s tests fail if either is ever added.
 //!
 //! So the doorbell goes, and the polling path D-7 already required to "exist and be good"
 //! is the only path. Two consequences are recorded in the capability table rather than
@@ -45,8 +51,13 @@ pub const API_HOST: &str = "gmail.googleapis.com";
 
 /// The scope Sift asks for, and the whole of it.
 ///
-/// Read, search, label, trash, untrash, and report junk in both directions. It cannot send,
-/// cannot compose, and cannot permanently delete.
+/// Read, search, label, trash, untrash, and report junk in both directions. It cannot
+/// permanently delete.
+///
+/// **It can send and compose**, and no narrower scope delivers FR-13. So the no-send
+/// constraint rests on the committed endpoint list, which excludes both send methods, and
+/// not on this grant — D-88 as amended, and `docs/mail/providers/gmail.md`'s authentication
+/// gate.
 pub const SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
 
 /// The scope Sift will not ask for, named so the refusal is checkable rather than implied.
@@ -82,7 +93,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_scope_set_is_one_scope_and_it_cannot_send() {
+    fn the_scope_set_is_one_scope_and_no_refused_scope() {
+        // `authorizes_sending` sees only the scopes refused as wider than the minimum. The
+        // modify scope can send as well; that is kept out of the binary by the endpoint list.
         let p = profile();
         assert_eq!(p.scopes, vec![SCOPE.to_owned()]);
         assert!(!p.authorizes_sending());

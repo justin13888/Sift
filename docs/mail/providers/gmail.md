@@ -64,11 +64,13 @@ fact about the provider's authorization model rather than about its protocols.
 **IMAP access over OAuth requires the provider's full-mailbox scope, and that same scope authorizes
 SMTP submission.** There is no read-only or modify-only scope that admits IMAP. So the hybrid is
 reachable only by asking the user, on the consent screen, to grant Sift the ability to send mail as
-them — and [D-88](../../security/credentials.md) forbids exactly that, in terms that leave no room: a
-permanent minimum scope set with **no send or compose scope ever requested**, so that the no-send
-constraint is checkable against an authorization screen. A granted submission capability is an
-outbound message path whether or not any code calls it, and [scope](../../product/scope.md) makes that
-constraint structural rather than a preference about which functions exist.
+them over a mail protocol — and [D-88](../../security/credentials.md) refuses any scope wider than
+the minimum for read, search and FR-13. The modify scope Sift does hold can already send (see
+[Authentication gate](#authentication-gate)), and the no-send constraint is kept there by the send
+methods' absence from the committed endpoint list. The full-mailbox scope adds a path that list cannot
+bound: a protocol with its own submission channel, outside the schema the drift check reads. So the
+refusal stands, and [scope](../../product/scope.md) makes it structural rather than a preference about
+which functions exist.
 
 The original decision recorded its own contestability — "a coalesced poll of the change feed on the
 order of every 30 seconds may be indistinguishable to the user, at half the code and one connection" —
@@ -114,7 +116,19 @@ ahead of general availability — are in
 [the Gmail verification blocker](../../security/credentials.md#the-gmail-verification-blocker).
 
 The scope set is exactly one scope — the provider's *modify* scope — and it is permanent. It reads,
-searches, labels, trashes, untrashes and reports junk in both directions. It cannot send, cannot
-compose, and cannot permanently delete. Widening it later would force the entire install base through
-re-consent, which is why [D-88](../../security/credentials.md) calls it a minimum rather than a
-starting point.
+searches, labels, trashes, untrashes and reports junk in both directions. It cannot permanently delete.
+Widening it later would force the entire install base through re-consent, which is why
+[D-88](../../security/credentials.md) calls it a minimum rather than a starting point.
+
+**The modify scope also authorizes sending and composing.** The provider's own catalogue describes it
+as reading, composing and sending, and its send method accepts it. No narrower scope delivers FR-13:
+the read-only scope cannot archive, label or trash, and the labels scope manages label definitions
+only. So this is the provider D-88 names whose minimum can send, and the consent screen says so to the
+user. The [no-send constraint](../../product/scope.md) is enforced by absence instead: the two send
+methods in the published schema are excluded from the committed endpoint list under
+[Client](#client), a test fails if either is ever added, and no submission protocol is spoken.
+
+**What it costs.** A reviewer can no longer confirm the no-send constraint from the authorization
+screen alone for this provider, and a user reading that screen is told Sift could send as them. The
+answer to both is the endpoint list, which is a file rather than a grant. Rejected: the read-only
+scope, which would make archive, label, trash and junk reporting absent on the largest provider.

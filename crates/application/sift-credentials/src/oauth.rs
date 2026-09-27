@@ -13,9 +13,10 @@
 //! 1. **A public client with PKCE and no embedded secret.** In
 //!    [`sift_provider::oauth`], because the request bodies are built there and a reviewer
 //!    checking for a client secret should have one place to look.
-//! 2. **A permanent minimum scope set with no send or compose scope ever requested.**
-//!    Declared by the adapter, and checked here by [`begin`] before the user is sent
-//!    anywhere.
+//! 2. **A permanent minimum scope set, with none requested for sending and none wider than
+//!    the minimum.** Declared by the adapter, and checked here by [`begin`] before the user
+//!    is sent anywhere. Where the minimum itself can send, the adapter's committed endpoint
+//!    list is the check instead.
 //! 3. **Single-flight refresh per account.** [`Broker::refresh`], over
 //!    [`SingleFlight`](crate::refresh::SingleFlight).
 //! 4. **Write before use, retaining the previous pair.** [`Broker::store_pair`], and the
