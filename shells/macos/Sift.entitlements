@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	D-45 — the one entitlement set both macOS channels ship, and nothing more.
+	`docs/product/platform-baseline.md` ("Entitlements, and the requirement that differs between
+	channels") owns the list; `mise run macos` reads the signed bundle back and fails if what it
+	carries is not exactly this.
+
+	Deliberately absent: `get-task-allow`, and every `com.apple.security.cs.*` relaxation. The
+	threat model places an in-address-space attacker out of scope *because the platform prevents
+	it*, and each of those keys is a way of telling the platform not to.
+-->
+<plist version="1.0">
+<dict>
+	<!-- D-45: both channels are sandboxed under one identity, so the container and the Keychain
+	     ACLs are the same whichever channel installed the copy. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+
+	<!-- sift-http: every provider request. Outgoing only — NFR-24 admits no listening socket, so
+	     `network.server` is not here and must never be. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+
+	<!-- FR-10's save: the save panel grants access to the one file the user named, and nothing
+	     else. -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+
+	<!-- NFR-23: credential items live in the data-protection keychain under this group. The
+	     team identifier prefixed to the bundle identifier — the register's value, published in
+	     the Cask zap stanza. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>854G577S2Y.net.justinchung.sift</string>
+	</array>
+
+	<!-- FR-40: contact names from the platform, read-only. Without it the feature is silently
+	     absent rather than degraded; the usage description is in Info.plist. -->
+	<key>com.apple.security.personal-information.addressbook</key>
+	<true/>
+</dict>
+</plist>
