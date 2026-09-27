@@ -1666,6 +1666,7 @@ version = "0.1.0"
 dependencies = [
  "sift-alloc",
  "sift-app",
+ "sift-block",
  "sift-broker",
  "sift-foundation",
  "sift-governor",

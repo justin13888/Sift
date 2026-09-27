@@ -1128,6 +1128,18 @@ typedef uint32_t SiftResourceAnswer;
 #define SiftResourceAnswer_UNAVAILABLE 2
 
 /**
+ * An allowed resource on its way to the body view. Opaque to a shell.
+ *
+ * Owns everything the fetch needs and **nothing of the layer's**: no session, no pointer back
+ * to the application. So a stream can be read on any thread, outlives nothing it depends on,
+ * and is untouched by a shutdown that happens while it is being read — the layer's part ended
+ * when the broker granted it.
+ */
+typedef struct {
+  uint8_t _private[0];
+} SiftResourceStream;
+
+/**
  * Initialize the layer.
  *
  * The shell supplies its host callbacks **once**, here — D-67's set is process-scoped and
@@ -1869,6 +1881,82 @@ SiftStatus sift_resolve_resource(SiftApp *app,
                                  const uint8_t *url,
                                  size_t url_len,
                                  SiftResourceAnswer *out);
+
+/**
+ * Answer one address under the internal scheme and, where the answer is the bytes, hand back
+ * a stream to read them from.
+ *
+ * **Fast, and safe on the engine's own thread**: this is the decision and the grant, taken
+ * under the session and nothing more. The fetch is [`sift_resource_begin`]'s, which the shell
+ * calls off that thread — D-91's rule that the engine's delivery thread never waits on the
+ * network.
+ *
+ * `*out_stream` is set for `BYTES` and only then, and the shell owns it until it passes it to
+ * [`sift_resource_close`]. For `BLOCKED` and `UNAVAILABLE` it is null.
+ *
+ * # Safety
+ * `app`, `out_answer` and `out_stream` must be valid; `url` must point to `url_len` bytes of
+ * UTF-8.
+ */
+SiftStatus sift_resource_open(SiftApp *app,
+                              const uint8_t *url,
+                              size_t url_len,
+                              SiftResourceAnswer *out_answer,
+                              SiftResourceStream **out_stream);
+
+/**
+ * Fetch and validate a granted resource, and say what it is.
+ *
+ * **Blocking** — the slot wait, the connection, and D-29's header validation all happen here,
+ * bounded by the load's deadline — so a shell calls it off the engine's thread. On success
+ * `*out_mime` is the media type **the bytes** establish, never the one the server claimed,
+ * and is static. On failure the resource was blocked or did not arrive, and the stream is
+ * finished: a shell answers the engine with a failure, and closes it.
+ *
+ * # Safety
+ * `stream` must have come from [`sift_resource_open`] and not been closed, and no other call
+ * may be using it; `out_mime` must be valid.
+ */
+SiftStatus sift_resource_begin(SiftResourceStream *stream, SiftStr *out_mime);
+
+/**
+ * Read the next bytes of a begun stream into `buf`. `*out_len` is zero at the end.
+ *
+ * **Blocking**, like [`sift_resource_begin`]. A failure means the load ended without its
+ * bytes — the document was revoked, the deadline passed, a bound was crossed by what arrived,
+ * or the body ended early — and the bytes already handed over are to be discarded rather
+ * than drawn: a truncated image shown as though it were whole is a lie told to the reader.
+ *
+ * # Safety
+ * As [`sift_resource_begin`]; `buf` must point to `buf_len` writable bytes and `out_len` must
+ * be valid.
+ */
+SiftStatus sift_resource_read(SiftResourceStream *stream,
+                              uint8_t *buf,
+                              size_t buf_len,
+                              size_t *out_len);
+
+/**
+ * Release a stream, whatever state it is in. Closing null is not a failure.
+ *
+ * This is what gives back the document's slot and drops the connection, so a shell closes
+ * every stream it was handed — including one whose load it abandoned because the engine
+ * stopped asking for it.
+ *
+ * # Safety
+ * `stream` must be null or have come from [`sift_resource_open`] and not been closed, and no
+ * other call may be using it. It must not be used afterwards.
+ */
+SiftStatus sift_resource_close(SiftResourceStream *stream);
+
+/**
+ * How many resource loads per document the broker lets run at once — L-29.
+ *
+ * A shell that dispatches more than this onto its own threads has them wait inside
+ * [`sift_resource_begin`] for a slot. That is correct and bounded, but a thread parked there
+ * is a thread; a shell that queues its own work to this width parks none.
+ */
+uint32_t sift_resource_concurrency(void);
 
 /**
  * How many actions the register holds.

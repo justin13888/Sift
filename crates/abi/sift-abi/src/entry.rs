@@ -2970,13 +2970,209 @@ pub unsafe extern "C" fn sift_resolve_resource(
                 let mut session = layer.session.lock().map_err(|_| ())?;
                 session.app_mut().resolve_resource(address, None)
             };
-            Ok(match answer {
-                sift_broker::broker::Answer::Bytes { .. } => SiftResourceAnswer::BYTES,
-                sift_broker::broker::Answer::Blocked(_) => SiftResourceAnswer::BLOCKED,
-                sift_broker::broker::Answer::Unavailable(_) => SiftResourceAnswer::UNAVAILABLE,
-            })
+            Ok(answer_code(&answer))
         })
     }
+}
+
+fn answer_code(answer: &sift_broker::broker::Answer) -> SiftResourceAnswer {
+    match answer {
+        sift_broker::broker::Answer::Bytes { .. } => SiftResourceAnswer::BYTES,
+        sift_broker::broker::Answer::Blocked(_) => SiftResourceAnswer::BLOCKED,
+        sift_broker::broker::Answer::Unavailable(_) => SiftResourceAnswer::UNAVAILABLE,
+    }
+}
+
+/// An allowed resource on its way to the body view. Opaque to a shell.
+///
+/// Owns everything the fetch needs and **nothing of the layer's**: no session, no pointer back
+/// to the application. So a stream can be read on any thread, outlives nothing it depends on,
+/// and is untouched by a shutdown that happens while it is being read — the layer's part ended
+/// when the broker granted it.
+#[derive(Debug)]
+#[repr(C)]
+pub struct SiftResourceStream {
+    _private: [u8; 0],
+}
+
+/// Where one stream is. Behind [`SiftResourceStream`].
+enum Fetching {
+    /// Decided and granted; nothing is on the wire yet.
+    Granted(sift_broker::broker::Grant),
+    /// Validated, with bytes to hand out.
+    Open(Box<sift_app::document::ResourceStream>),
+    /// Ended, one way or the other. Every later call fails.
+    Finished,
+}
+
+/// Answer one address under the internal scheme and, where the answer is the bytes, hand back
+/// a stream to read them from.
+///
+/// **Fast, and safe on the engine's own thread**: this is the decision and the grant, taken
+/// under the session and nothing more. The fetch is [`sift_resource_begin`]'s, which the shell
+/// calls off that thread — D-91's rule that the engine's delivery thread never waits on the
+/// network.
+///
+/// `*out_stream` is set for `BYTES` and only then, and the shell owns it until it passes it to
+/// [`sift_resource_close`]. For `BLOCKED` and `UNAVAILABLE` it is null.
+///
+/// # Safety
+/// `app`, `out_answer` and `out_stream` must be valid; `url` must point to `url_len` bytes of
+/// UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_resource_open(
+    app: *mut SiftApp,
+    url: *const u8,
+    url_len: usize,
+    out_answer: *mut SiftResourceAnswer,
+    out_stream: *mut *mut SiftResourceStream,
+) -> SiftStatus {
+    unsafe {
+        if out_answer.is_null() || out_stream.is_null() {
+            return SiftStatus::Failed;
+        }
+        let mut stream = core::ptr::null_mut();
+        let status = guard_out(out_answer, || {
+            let address = borrowed(url, url_len)?;
+            let layer = layer(app).ok_or(())?;
+            let granted = {
+                let mut session = layer.session.lock().map_err(|_| ())?;
+                session.app_mut().grant_resource(address)
+            };
+            Ok(match granted {
+                Ok(grant) => {
+                    stream = Box::into_raw(Box::new(Fetching::Granted(grant)))
+                        .cast::<SiftResourceStream>();
+                    SiftResourceAnswer::BYTES
+                }
+                Err(refused) => answer_code(&refused),
+            })
+        });
+        *out_stream = if status == SiftStatus::Ok {
+            stream
+        } else {
+            core::ptr::null_mut()
+        };
+        status
+    }
+}
+
+/// Fetch and validate a granted resource, and say what it is.
+///
+/// **Blocking** — the slot wait, the connection, and D-29's header validation all happen here,
+/// bounded by the load's deadline — so a shell calls it off the engine's thread. On success
+/// `*out_mime` is the media type **the bytes** establish, never the one the server claimed,
+/// and is static. On failure the resource was blocked or did not arrive, and the stream is
+/// finished: a shell answers the engine with a failure, and closes it.
+///
+/// # Safety
+/// `stream` must have come from [`sift_resource_open`] and not been closed, and no other call
+/// may be using it; `out_mime` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_resource_begin(
+    stream: *mut SiftResourceStream,
+    out_mime: *mut SiftStr<'static>,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out_mime, || {
+            let fetching = fetching(stream)?;
+            let Fetching::Granted(grant) = core::mem::replace(fetching, Fetching::Finished) else {
+                return Err(());
+            };
+            let open = sift_app::document::fetch_resource(grant).map_err(|_| ())?;
+            let mime = open.format().mime();
+            *fetching = Fetching::Open(Box::new(open));
+            Ok(SiftStr::new(mime))
+        })
+    }
+}
+
+/// Read the next bytes of a begun stream into `buf`. `*out_len` is zero at the end.
+///
+/// **Blocking**, like [`sift_resource_begin`]. A failure means the load ended without its
+/// bytes — the document was revoked, the deadline passed, a bound was crossed by what arrived,
+/// or the body ended early — and the bytes already handed over are to be discarded rather
+/// than drawn: a truncated image shown as though it were whole is a lie told to the reader.
+///
+/// # Safety
+/// As [`sift_resource_begin`]; `buf` must point to `buf_len` writable bytes and `out_len` must
+/// be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_resource_read(
+    stream: *mut SiftResourceStream,
+    buf: *mut u8,
+    buf_len: usize,
+    out_len: *mut usize,
+) -> SiftStatus {
+    unsafe {
+        guard_out(out_len, || {
+            if buf.is_null() || buf_len == 0 {
+                return Err(());
+            }
+            let fetching = fetching(stream)?;
+            let Fetching::Open(open) = fetching else {
+                return Err(());
+            };
+            // SAFETY: the caller's obligation.
+            let buf = core::slice::from_raw_parts_mut(buf, buf_len);
+            match open.read(buf) {
+                Ok(n) => {
+                    if n == 0 {
+                        // Ended: the connection and the slot go now, not at close.
+                        *fetching = Fetching::Finished;
+                    }
+                    Ok(n)
+                }
+                Err(_) => {
+                    *fetching = Fetching::Finished;
+                    Err(())
+                }
+            }
+        })
+    }
+}
+
+/// Release a stream, whatever state it is in. Closing null is not a failure.
+///
+/// This is what gives back the document's slot and drops the connection, so a shell closes
+/// every stream it was handed — including one whose load it abandoned because the engine
+/// stopped asking for it.
+///
+/// # Safety
+/// `stream` must be null or have come from [`sift_resource_open`] and not been closed, and no
+/// other call may be using it. It must not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sift_resource_close(stream: *mut SiftResourceStream) -> SiftStatus {
+    guard(|| {
+        if !stream.is_null() {
+            // SAFETY: the caller's obligation — this pointer came from `Box::into_raw` in
+            // `sift_resource_open` and is released exactly once, here.
+            drop(unsafe { Box::from_raw(stream.cast::<Fetching>()) });
+        }
+        Ok(())
+    })
+}
+
+/// How many resource loads per document the broker lets run at once — L-29.
+///
+/// A shell that dispatches more than this onto its own threads has them wait inside
+/// [`sift_resource_begin`] for a slot. That is correct and bounded, but a thread parked there
+/// is a thread; a shell that queues its own work to this width parks none.
+#[unsafe(no_mangle)]
+pub extern "C" fn sift_resource_concurrency() -> u32 {
+    u32::try_from(sift_foundation::limits::L29_DOC_CONCURRENCY).unwrap_or(u32::MAX)
+}
+
+/// The state behind a stream handle.
+///
+/// # Safety
+/// `stream` must be a live handle from [`sift_resource_open`] that no other call is using.
+unsafe fn fetching<'a>(stream: *mut SiftResourceStream) -> Result<&'a mut Fetching, ()> {
+    if stream.is_null() {
+        return Err(());
+    }
+    // SAFETY: the caller's obligation.
+    Ok(unsafe { &mut *stream.cast::<Fetching>() })
 }
 
 /// Borrow layer-owned text for as long as the document that owns it is open.
@@ -4072,6 +4268,134 @@ mod tests {
     /// A token the layer never minted, or one already revoked, is a failure rather than a
     /// silent success — the shell would otherwise report that content was allowed and show a
     /// document that still blocks it.
+    /// A fabricated address is answered — unavailable, with no stream — rather than failing
+    /// the call or handing out something to read.
+    #[test]
+    fn a_fabricated_address_opens_no_stream() {
+        let app = start(run_inline, scratch_str());
+        let url = "sift-resource://deadbeef/0";
+        let mut answer = SiftResourceAnswer::BYTES;
+        let mut stream = core::ptr::dangling_mut::<SiftResourceStream>();
+        assert_eq!(
+            unsafe {
+                sift_resource_open(
+                    app,
+                    url.as_ptr(),
+                    url.len(),
+                    &raw mut answer,
+                    &raw mut stream,
+                )
+            },
+            SiftStatus::Ok
+        );
+        assert_eq!(answer, SiftResourceAnswer::UNAVAILABLE);
+        assert!(stream.is_null(), "a refused load was handed a stream");
+        let _ = unsafe { sift_shutdown(app) };
+    }
+
+    #[test]
+    fn a_stream_call_without_a_stream_fails_rather_than_dereferencing() {
+        let mut mime = SiftStr::new("");
+        let mut len = 0usize;
+        let mut buf = [0u8; 4];
+        unsafe {
+            assert_eq!(
+                sift_resource_begin(core::ptr::null_mut(), &raw mut mime),
+                SiftStatus::Failed
+            );
+            assert_eq!(
+                sift_resource_read(
+                    core::ptr::null_mut(),
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &raw mut len
+                ),
+                SiftStatus::Failed
+            );
+            assert_eq!(sift_resource_close(core::ptr::null_mut()), SiftStatus::Ok);
+            let url = "x";
+            let mut answer = SiftResourceAnswer::BYTES;
+            assert_eq!(
+                sift_resource_open(
+                    core::ptr::null_mut(),
+                    url.as_ptr(),
+                    url.len(),
+                    &raw mut answer,
+                    core::ptr::null_mut()
+                ),
+                SiftStatus::Failed
+            );
+        }
+    }
+
+    /// D-91: navigation cancels a load and answers it. A grant whose document was revoked
+    /// before the fetch began fails at `begin` — before anything reaches the network — and
+    /// every later read fails too, rather than reading from a load that was never made.
+    #[test]
+    fn a_stream_whose_document_went_fails_before_it_fetches() {
+        use sift_block::origin::{Authentication, Infrastructure, Origin};
+        let mut broker = sift_broker::broker::Broker::new();
+        let token = broker.open_document(
+            Origin::derive(&Authentication {
+                signing_domain: Some("sender.test".to_owned()),
+                ..Authentication::default()
+            }),
+            vec![sift_broker::broker::Position {
+                url: "https://cdn.sender.test/x.png".to_owned(),
+                declared_length: None,
+                declared_width: Some(600),
+                declared_height: Some(400),
+                declared_pixels: None,
+                style: None,
+                alt: Some("an image".to_owned()),
+                in_zero_height_container: false,
+                request_type: "image".to_owned(),
+            }],
+        );
+        assert!(broker.allow_once(token.as_str()));
+        let grant = broker
+            .grant(
+                &sift_broker::broker::Request {
+                    url: sift_broker::token::Address {
+                        token: token.clone(),
+                        position: 0,
+                    }
+                    .to_url(),
+                    transferred_length: None,
+                },
+                &sift_block::engine::Authority::Loaded(Box::new(
+                    sift_block::engine::Blocker::from_rules(&[]),
+                )),
+                &Infrastructure::default(),
+            )
+            .expect("allowed");
+        assert!(broker.revoke(&token));
+
+        let stream = Box::into_raw(Box::new(Fetching::Granted(grant))).cast::<SiftResourceStream>();
+        let mut mime = SiftStr::new("");
+        let mut len = 0usize;
+        let mut buf = [0u8; 4];
+        unsafe {
+            assert_eq!(
+                sift_resource_begin(stream, &raw mut mime),
+                SiftStatus::Failed
+            );
+            assert_eq!(
+                sift_resource_read(stream, buf.as_mut_ptr(), buf.len(), &raw mut len),
+                SiftStatus::Failed
+            );
+            assert_eq!(sift_resource_close(stream), SiftStatus::Ok);
+        }
+    }
+
+    #[test]
+    fn the_concurrency_a_shell_is_told_is_the_registered_bound() {
+        assert_eq!(
+            u64::from(sift_resource_concurrency()),
+            sift_foundation::limits::L29_DOC_CONCURRENCY
+        );
+    }
+
     #[test]
     fn allowing_an_unknown_token_fails() {
         let app = start(run_inline, scratch_str());
