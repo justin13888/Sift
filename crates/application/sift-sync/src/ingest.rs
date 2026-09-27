@@ -515,7 +515,9 @@ pub fn settle_moves(
     let arrived = core::mem::take(&mut window.arrived);
     let tx = store.transaction()?;
 
-    // Every held departure, including any a round that ended early left behind.
+    // Every held departure, including any a round that ended early left behind. Found through
+    // the store's `message_held` index, which holds only these rows, so a round that held
+    // nothing reads nothing here.
     let departed: Vec<Held> = {
         let mut stmt = tx.prepare(&format!(
             "{HELD} WHERE m.remote_id IS NULL

@@ -40,7 +40,8 @@ use rusqlite::{Connection, Result as SqlResult};
 ///
 /// Version 2 is [`STORE_MIGRATION_V2`]: the two lookups ingest makes per message, indexed.
 /// Version 3 is [`STORE_MIGRATION_V3`]: D-80's full-text index.
-pub const CURRENT_VERSION: u32 = 3;
+/// Version 4 is [`STORE_MIGRATION_V4`]: D-44's held departures, indexed.
+pub const CURRENT_VERSION: u32 = 4;
 
 /// The oldest version this build can migrate forward from — D-62's migration floor.
 ///
@@ -361,7 +362,8 @@ CREATE INDEX overlay_message ON overlay(message_id);
 /// did not finish. The scale corpus found it, by being written through that path.
 ///
 /// Partial, because a message recorded as present before its envelope arrived may have no
-/// conversation identifier, and neither column is ever looked up by its absence. **Not
+/// conversation identifier, and these indexes serve only lookups by value. The one lookup by a
+/// message's *absent* provider identifier is version 4's ([`STORE_MIGRATION_V4`]). **Not
 /// unique**: that would be a claim about provider identifiers this layer has no standing to
 /// make, and a violation would turn a delta page into a refused transaction.
 pub const STORE_MIGRATION_V2: &str = r"
@@ -431,6 +433,22 @@ CREATE TRIGGER message_text_delete AFTER DELETE ON message BEGIN
 END;
 ";
 
+/// Version 4 of the store: D-44's held departures, found without a scan.
+///
+/// On an account whose provider identifiers do not survive a move, sync holds a message that
+/// left its last folder rather than deleting it, until the round that may rejoin it to its
+/// arrival settles. A held departure is the row whose provider identifier was cleared (the
+/// provider reissued it), and every settle looks for those rows — once per sync round, beneath
+/// the page-decryption layer. [`STORE_MIGRATION_V2`]'s index cannot serve that lookup, because
+/// it holds only rows that *have* an identifier, so without this one every round of such an
+/// account read the whole message table to find what is almost always nothing.
+///
+/// Partial on the absence itself, so it holds only the held rows: empty outside a round that
+/// saw a move, and costing nothing on the ordinary write path.
+pub const STORE_MIGRATION_V4: &str = r"
+CREATE INDEX message_held ON message(remote_id) WHERE remote_id IS NULL;
+";
+
 /// Apply a schema to a fresh connection.
 pub fn create(conn: &Connection, sql: &str, version: u32) -> SqlResult<()> {
     conn.execute_batch(sql)?;
@@ -443,6 +461,7 @@ const fn step(version: u32) -> (&'static str, &'static str) {
     match version {
         2 => ("", STORE_MIGRATION_V2),
         3 => ("", STORE_MIGRATION_V3),
+        4 => ("", STORE_MIGRATION_V4),
         _ => ("", ""),
     }
 }

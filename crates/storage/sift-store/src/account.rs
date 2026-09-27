@@ -575,6 +575,36 @@ mod tests {
     }
 
     #[test]
+    fn the_held_departures_a_sync_round_settles_are_found_without_a_scan() {
+        // D-44: every sync round of an account whose identifiers do not survive a move looks
+        // for its held departures, which are marked by an absent provider identifier. The
+        // statement is sift-sync's settle, verbatim.
+        let s = Scratch::new("held");
+        let a = Account::open(&s.paths(), AccountId::from_u128(1)).expect("open");
+        let mut stmt = a
+            .store
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT m.id, m.thread_id, t.remote_thread_id, m.internet_message_id,
+                        m.fallback_digest, m.digest_rule_version
+                 FROM message m LEFT JOIN thread t ON t.id = m.thread_id
+                 WHERE m.remote_id IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM message_location l WHERE l.message_id = m.id)",
+            )
+            .expect("explain");
+        let chosen = stmt
+            .query_map([], |r| r.get::<_, String>(3))
+            .expect("plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows")
+            .join("; ");
+        assert!(
+            chosen.contains("message_held") && !chosen.contains("SCAN m"),
+            "the settle scans the message table: {chosen}"
+        );
+    }
+
+    #[test]
     fn a_version_one_account_is_carried_forward_with_its_mail() {
         // The migration fixture packaging.md asks for: an account exactly as a version-1
         // build wrote it, holding a message, opened by this build.
