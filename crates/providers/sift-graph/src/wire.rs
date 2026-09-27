@@ -206,8 +206,11 @@ pub fn search_query(terms: &[SearchTerm]) -> Result<String, &'static str> {
             SearchTerm::Sender(t) => ("from:", t.as_str()),
             SearchTerm::Recipient(t) => ("to:", t.as_str()),
             SearchTerm::Subject(t) => ("subject:", t.as_str()),
+            // The searchable property is `hasAttachment`, singular: Exchange's searchable
+            // properties list names it so, and so does the provider's `$search` property table
+            // (whose one example writes the plural, which is the outlier).
             SearchTerm::HasAttachment(want) => {
-                parts.push(format!("hasAttachments:{want}"));
+                parts.push(format!("hasAttachment:{want}"));
                 continue;
             }
             SearchTerm::Phrase(_)

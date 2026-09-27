@@ -1518,7 +1518,10 @@ fn a_search_is_one_request_for_identifiers_across_every_folder() {
         SearchTerm::HasAttachment(true),
     ];
     let query = wire::search_query(&terms).unwrap();
-    assert_eq!(query, "quokka from:ops@example.invalid hasAttachments:true");
+    // `hasAttachment`, singular: the searchable property's name in Exchange's list and in the
+    // provider's `$search` property table. Written out here rather than derived, so a change to
+    // it is a change to this line.
+    assert_eq!(query, "quokka from:ops@example.invalid hasAttachment:true");
     let target = wire::rooted(&wire::search_target(&query, 50));
     assert!(target.starts_with("/v1.0/me/messages?$search="));
     assert!(target.ends_with("&$top=50&$select=id"), "{target}");
