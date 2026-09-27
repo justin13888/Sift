@@ -134,6 +134,16 @@ assumption that is wrong unless the grant is revoked at the provider. So removal
 already expired, must still be able to remove it; the local erasure FR-4 specifies is what is provable,
 and revocation is best-effort on top.
 
+**Revocation is withheld while another account of the same provider remains.** A grant belongs to a
+client and a person, not to a Sift account, and a provider that revokes a token revokes the grant it came
+from — so revoking on removal would sign out any other account on the same mailbox. That is exactly the
+state re-authentication produces under [D-89](../mail/accounts.md): the new sign-in is a second account on
+the mailbox, and the old one is removed after it. No address reaches the layer that decides this, so it
+cannot tell a second mailbox from the same one, and it takes the conservative answer. The cost is a grant
+left standing when two different mailboxes of one provider are configured and one is removed; the person
+can still revoke it from the provider's own console, whereas an account signed out behind their back is a
+silent failure of the kind FR-2 exists to prevent.
+
 **The in-flight flow's secrets are held in memory and nowhere else.** The PKCE verifier and the state
 parameter exist before the account does, so they cannot live in an account store, and they are worthless
 afterwards, so they MUST NOT live in the credential store either. They are held for the duration of one
