@@ -87,7 +87,9 @@ pub enum Subsystem {
     Bodyview,
     /// D-93's pressure governor and its tier state.
     Governor,
-    /// NFR-55's bounded local log buffer.
+    /// NFR-55's bounded local log: the line buffer `sift_observe::log::Log` formats into and
+    /// the segment handles it holds. The file's own bytes are on disk and bounded by L-32,
+    /// not counted here — this row is the log's memory, which is small and must stay flat.
     Logging,
     /// The async runtime, thread stacks, and allocator metadata.
     Runtime,
