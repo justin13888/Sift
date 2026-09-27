@@ -16,10 +16,10 @@
 //! # Bounded, oldest first, and retained for a stated period
 //!
 //! Two segments: the one being written and the one before it. A segment is closed and becomes
-//! the previous one when appending would take it past half of [`BUDGET_BYTES`] (L-32), which
+//! the previous one when appending would take it past half of [`BUDGET_BYTES`] (L-33), which
 //! discards whatever the previous one held — so the file set never exceeds the budget and what
 //! goes is always the oldest. The same rotation happens when the current segment's first line
-//! is half of [`RETENTION`] (L-33) old, and the previous segment is deleted once its last line
+//! is half of [`RETENTION`] (L-34) old, and the previous segment is deleted once its last line
 //! is half of it old, which together keep every line for no longer than the retention period.
 //! Both checks run whenever the log is opened or written, and [`Log::prune`] runs them for a
 //! caller whose scheduler fires without anything to record.
@@ -52,10 +52,10 @@ pub const PREVIOUS: &str = "diagnostic.log.1";
 /// construction rather than by a budget.
 pub const CRASH_REPORT: &str = "crash-report.txt";
 
-/// L-32 — the log's byte budget, across both segments.
+/// L-33 — the log's byte budget, across both segments.
 pub const BUDGET_BYTES: u64 = 4 * 1024 * 1024;
 
-/// L-33 — how long a line is retained.
+/// L-34 — how long a line is retained.
 pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// The most fields one event carries. Fixed so an event is a value with no allocation of its
@@ -339,7 +339,7 @@ pub struct Log {
 }
 
 impl Log {
-    /// Open the log under `dir` with L-32's budget and L-33's retention.
+    /// Open the log under `dir` with L-33's budget and L-34's retention.
     ///
     /// # Errors
     ///

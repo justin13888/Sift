@@ -30,13 +30,13 @@ import MachO
 /// user's own analytics settings. The runtime panel says so rather than implying D-35's
 /// guarantee covers it.
 enum Diagnostics {
-    /// `sift_observe::log::DIRECTORY`, `CRASH_REPORT` and `BUDGET_BYTES` (L-32). The Rust log
+    /// `sift_observe::log::DIRECTORY`, `CRASH_REPORT` and `BUDGET_BYTES` (L-33). The Rust log
     /// and this shell name the same files; the spellings change together.
     static let directoryName = "Diagnostics"
     static let reportName = "crash-report.txt"
     static let logNames = ["diagnostic.log", "diagnostic.log.1"]
     static let logBudgetBytes: Int64 = 4 * 1024 * 1024
-    /// L-33, in days, for the sentence the runtime panel shows.
+    /// L-34, in days, for the sentence the runtime panel shows.
     static let logRetentionDays = 7
 
     /// What happened when core dumps were disabled at launch.
@@ -302,7 +302,7 @@ enum Diagnostics {
         }
     }
 
-    /// The log's live size on disk, against L-32's budget.
+    /// The log's live size on disk, against L-33's budget.
     static func logBytes() -> Int64 {
         guard let directory else { return 0 }
         return logNames.reduce(0) { total, name in
