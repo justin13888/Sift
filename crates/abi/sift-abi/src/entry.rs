@@ -4279,7 +4279,7 @@ mod tests {
     /// the call or handing out something to read.
     #[test]
     fn a_fabricated_address_opens_no_stream() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let url = "sift-resource://deadbeef/0";
         let mut answer = SiftResourceAnswer::BYTES;
         let mut stream = core::ptr::dangling_mut::<SiftResourceStream>();
