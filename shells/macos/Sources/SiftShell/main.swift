@@ -22,6 +22,16 @@ if CommandLine.arguments.contains(AccessibilityProbe.flag) {
     exit(AccessibilityProbe.run())
 }
 
+// D-35: core dumps off and the crash handler in place before the application shell exists, so
+// nothing the layer reads into memory — a credential included — is ever in a dump. After the
+// probes, which run with no container and so have nowhere to put a report.
+Diagnostics.install()
+// D-114: last run's report, shown once the run loop is up. Queued rather than run here, so it
+// is presented as a modal over a running application rather than before there is one.
+if Diagnostics.pendingReport != nil {
+    DispatchQueue.main.async { Diagnostics.presentPendingReport() }
+}
+
 application.delegate = ApplicationShell.shared
 // The application is resident with or without a window, so it is an accessory rather than a
 // regular application until one opens. `LSUIElement` in the bundle states the same thing to

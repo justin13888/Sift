@@ -12,5 +12,8 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+# L-33 and L-34, the log's budget and retention, from the one register docs/limits.md is
+# checked against.
+sift-foundation.workspace = true
 sift-subsystem.workspace = true
 sift-alloc.workspace = true

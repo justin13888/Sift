@@ -2,7 +2,7 @@
 
 Every numeric bound Sift enforces at runtime, in one place.
 
-**Owns:** L-1 through L-32.
+**Owns:** L-1 through L-34.
 
 **"Enforces at runtime" is the boundary, and it is narrower than the old wording.** This page previously
 claimed every numeric bound in the project, which reached two populations it does not own and should not.
@@ -97,6 +97,7 @@ Asserted by the [resource broker](architecture/resource-broker.md), before a dec
 | **L-20** | Default envelope and index budget | 1 GB | The value NFR-52 in [cache and blobs](storage/cache-and-blobs.md) calls user-configurable and does not supply, and which [D-53](mail/sync-engine.md) makes the *sole* bound on first sync. At roughly two kilobytes per message including its index entry it lands near the 500,000 messages [NFR-5](storage/search.md) is measured over, so the benchmark and the shipped default describe the same product rather than two |
 | **L-25** | Characters in a header-derived display value | 998 | The length bound NFR-54 in [presentation layer](architecture/presentation-layer.md) requires and does not state, over display names, subjects, folder and tag names and attachment names. Chosen as the internet message format's own line bound, which is far above any legitimate value and far below a denial of service against native chrome. Truncation is at a grapheme boundary and follows normalization, per [D-100](architecture/presentation-layer.md) |
 | **L-16** | Characters in a snippet | 280 | Truncated rather than rejected, per the exception above. Bounds the envelope, which NFR-52 in [cache and blobs](storage/cache-and-blobs.md) budgets and which is retained far longer than any body |
+| **L-33** | Bytes of the local diagnostic log, across both of its segments | 4 MB | The byte budget [NFR-55](product/platform-baseline.md) requires and does not supply. The log is two segments, each bounded at half; appending past that closes the current segment and discards the previous one, so eviction is oldest-first and the files on disk never exceed the budget. Lines carry only subsystems, local identifiers, classes, counts and timings, a few dozen bytes each, so this holds tens of thousands of events — days of ordinary running, which is the window a bug report is filed in. Counted on disk and shown in the runtime panel; the log's memory is the Logging row of the attribution partition, not this |
 
 ## Time limits
 
@@ -118,6 +119,7 @@ does rather than how fast it does it.
 | **L-30** | Aligned interval at which an idle account polls for new mail | 60 seconds | The cadence [scheduling](runtime/scheduling.md) requires and does not number. Aligned to the wall clock rather than to its own arming, so two accounts land on one instant without coordinating — which is how they share a wakeup instead of taking two. [D-94](runtime/scheduling.md) makes NFR-11's budget two wakeups per minute for the whole application, so a minute is the largest interval leaving room for a flush in the same minute and the smallest that does not spend the budget on polling alone. A floor on freshness rather than the only way mail arrives: push is preferred where a provider offers it |
 | **L-31** | The scheduler's coalescing window | 5 seconds | Deadlines inside one window fire together, so this *is* [D-25](runtime/scheduling.md)'s "this may fire late, batch it" hint expressed as structure, and it is what the platform timer is given as its leeway. Larger means fewer wakeups and later work |
 | **L-19** | Time the pressure signal must stay clear before a shed tier is released | 60 seconds | The hysteresis [D-93](runtime/memory-pressure.md) requires. Without it a system oscillating around the threshold reparses the 40 MB filter engine on every crossing. One value serves every tier, which that decision records as its weakest point |
+| **L-34** | Age beyond which a line of the local diagnostic log is deleted | 7 days | The retention period [NFR-55](product/platform-baseline.md) requires be stated. A segment is closed once its first line is half the period old and deleted once its last line is, which together keep no line longer than the period; both are checked whenever the log is opened or written. Long enough to cover the days between a failure and the report about it, and short enough that the log does not become a long record of when the machine was in use |
 
 ## Changing a limit
 
