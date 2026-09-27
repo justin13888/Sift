@@ -26,6 +26,34 @@
 //! implementations would produce a list that reorders itself when an account is added.
 
 use core::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// D-44's fallback digest, as the merge compares it: the whole digest, and the rule that
+/// produced it.
+///
+/// D-104 makes digests from different rule versions not comparable, so the version is part of
+/// the key rather than beside it — two equal byte strings under different rules are not a
+/// match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Digest {
+    pub rule_version: u32,
+    pub bytes: [u8; 32],
+}
+
+impl Digest {
+    /// The digest a stored row carries, or `None` where it carries none.
+    ///
+    /// A presence ingested without an envelope is stored with the all-zero digest; that is the
+    /// absence of a digest rather than one, and every envelope-less row shares it, so it never
+    /// stands for a message.
+    #[must_use]
+    pub fn from_stored(rule_version: u32, bytes: [u8; 32]) -> Option<Self> {
+        (bytes != [0; 32]).then_some(Self {
+            rule_version,
+            bytes,
+        })
+    }
+}
 
 /// A row, as the merge sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,8 +63,9 @@ pub struct Row {
     pub account: u128,
     /// **Server-assigned.** Not the `Date` header.
     pub received_millis: u64,
-    /// D-44's digest, used at display time to mark cross-account duplicates.
-    pub digest: u64,
+    /// D-44's digest, used at display time to mark cross-account duplicates. `None` for a row
+    /// with no envelope, which is never marked.
+    pub digest: Option<Digest>,
 }
 
 /// D-55's comparator. Newest first.
@@ -76,20 +105,29 @@ pub fn merge_page(streams: &[Vec<Row>], offset: usize, limit: usize) -> Vec<Merg
     // Duplicates are marked from the digest, across the whole merged set rather than within
     // a page — otherwise whether a message was marked would depend on where the page
     // boundary fell.
-    let mut seen_digest_accounts: std::collections::BTreeMap<u64, Vec<u128>> =
-        std::collections::BTreeMap::new();
+    //
+    // Keyed on the whole digest and its rule version, and counting distinct accounts: two rows
+    // in one account that share a digest are not "in another account". A row without a
+    // digest — or with the all-zero one an envelope-less presence is stored with, however it
+    // was built — takes no part.
+    let key = |row: &Row| row.digest.filter(|d| d.bytes != [0; 32]);
+    let mut accounts_by_digest: BTreeMap<Digest, BTreeSet<u128>> = BTreeMap::new();
     for row in &all {
-        seen_digest_accounts
-            .entry(row.digest)
-            .or_default()
-            .push(row.account);
+        if let Some(digest) = key(row) {
+            accounts_by_digest
+                .entry(digest)
+                .or_default()
+                .insert(row.account);
+        }
     }
 
     all.into_iter()
         .skip(offset)
         .take(limit)
         .map(|row| {
-            let accounts = seen_digest_accounts.get(&row.digest).map_or(1, Vec::len);
+            let accounts = key(&row)
+                .and_then(|d| accounts_by_digest.get(&d))
+                .map_or(1, BTreeSet::len);
             Merged {
                 row,
                 duplicate_of_another_account: accounts > 1,
@@ -119,13 +157,91 @@ pub const fn marking_writes_anything() -> bool {
 mod tests {
     use super::*;
 
-    fn row(id: u128, account: u128, received: u64, digest: u64) -> Row {
+    /// A non-zero digest under rule version 2 whose first eight bytes are `n`.
+    fn digest(n: u64) -> [u8; 32] {
+        let mut bytes = [0; 32];
+        bytes[..8].copy_from_slice(&n.to_le_bytes());
+        bytes[31] = 1;
+        bytes
+    }
+
+    fn row(id: u128, account: u128, received: u64, n: u64) -> Row {
+        row_with(id, account, received, Digest::from_stored(2, digest(n)))
+    }
+
+    fn row_with(id: u128, account: u128, received: u64, digest: Option<Digest>) -> Row {
         Row {
             id,
             account,
             received_millis: received,
             digest,
         }
+    }
+
+    fn marks(streams: &[Vec<Row>]) -> Vec<(u128, bool)> {
+        let mut marks: Vec<(u128, bool)> = merge_page(streams, 0, usize::MAX)
+            .iter()
+            .map(|m| (m.row.id, m.duplicate_of_another_account))
+            .collect();
+        marks.sort_unstable();
+        marks
+    }
+
+    #[test]
+    fn digests_that_differ_only_after_the_eighth_byte_are_not_duplicates() {
+        // The whole digest is the key, not a prefix of it.
+        let mut late = digest(42);
+        late[20] = 0xAB;
+        let streams = [
+            vec![row(1, 1, 100, 42)],
+            vec![row_with(2, 2, 100, Digest::from_stored(2, late))],
+        ];
+        assert_eq!(marks(&streams), [(1, false), (2, false)]);
+    }
+
+    #[test]
+    fn equal_digests_under_different_rule_versions_are_not_duplicates() {
+        // D-104: digests from different rule versions are not comparable.
+        let streams = [
+            vec![row_with(1, 1, 100, Digest::from_stored(1, digest(42)))],
+            vec![row_with(2, 2, 100, Digest::from_stored(2, digest(42)))],
+        ];
+        assert_eq!(marks(&streams), [(1, false), (2, false)]);
+    }
+
+    #[test]
+    fn two_rows_sharing_a_digest_in_one_account_are_not_marked() {
+        // "Another account" counts accounts, not rows.
+        let streams = [vec![row(1, 1, 200, 42), row(2, 1, 100, 42)]];
+        assert_eq!(marks(&streams), [(1, false), (2, false)]);
+    }
+
+    #[test]
+    fn a_digest_shared_within_one_account_and_with_another_marks_all_three() {
+        let streams = [
+            vec![row(1, 1, 300, 42), row(2, 1, 200, 42)],
+            vec![row(3, 2, 100, 42)],
+        ];
+        assert_eq!(marks(&streams), [(1, true), (2, true), (3, true)]);
+    }
+
+    #[test]
+    fn envelope_less_rows_are_never_marked() {
+        // Every presence without an envelope is stored with the all-zero digest; that is no
+        // digest, and sharing it says nothing about the message.
+        assert_eq!(Digest::from_stored(2, [0; 32]), None);
+        let zero = Some(Digest {
+            rule_version: 2,
+            bytes: [0; 32],
+        });
+        let streams = [
+            vec![row_with(1, 1, 400, None), row_with(2, 1, 300, zero)],
+            vec![row_with(3, 2, 200, None), row_with(4, 2, 100, zero)],
+        ];
+        assert_eq!(
+            marks(&streams),
+            [(1, false), (2, false), (3, false), (4, false)]
+        );
     }
 
     #[test]
