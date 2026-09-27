@@ -180,8 +180,13 @@ fn connect_gmail(host: &str, access_token: &str) -> Connected {
     Ok(Box::new(sift_gmail::Gmail::new(api, access_token)))
 }
 
+/// Unrecorded: boxed behind the adapter, nothing can read what the replay asked for, and a
+/// record kept anyway grows with every request for the life of the account (#89).
 fn replay_gmail() -> Box<dyn ErasedAdapter> {
-    Box::new(sift_gmail::Gmail::new(corpus::gmail(), "a-fixture-token"))
+    Box::new(sift_gmail::Gmail::new(
+        corpus::gmail().unrecorded(),
+        "a-fixture-token",
+    ))
 }
 
 fn connect_graph(host: &str, access_token: &str) -> Connected {
@@ -189,8 +194,12 @@ fn connect_graph(host: &str, access_token: &str) -> Connected {
     Ok(Box::new(sift_graph::Graph::new(api, access_token)))
 }
 
+/// Unrecorded, for the reason [`replay_gmail`] gives.
 fn replay_graph() -> Box<dyn ErasedAdapter> {
-    Box::new(sift_graph::Graph::new(corpus::graph(), "a-fixture-token"))
+    Box::new(sift_graph::Graph::new(
+        corpus::graph().unrecorded(),
+        "a-fixture-token",
+    ))
 }
 
 /// Resolve a persisted kind.

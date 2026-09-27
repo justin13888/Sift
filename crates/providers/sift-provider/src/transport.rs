@@ -192,12 +192,36 @@ pub struct Replay {
     pub bodies: Vec<Vec<u8>>,
     /// Deliberate failures, keyed by how many times the exchange has been seen.
     faults: BTreeMap<(Exchange, usize), TransportError>,
+    /// How many times each exchange has been performed.
+    ///
+    /// Kept apart from the record, because which fixture answers — the *n*th page, the *n*th
+    /// fault — depends on it whether or not anything is recorded. One entry per distinct
+    /// exchange, and an exchange the fixtures do not know fails loudly, so it is bounded by
+    /// the corpus rather than by how long the replay runs.
+    seen: BTreeMap<Exchange, usize>,
+    /// Whether `performed`, `headers` and `bodies` are kept.
+    ///
+    /// A test asserts on them, so they are kept by default. A replay handed to the
+    /// application as a recorded account is boxed behind an adapter where nothing can read
+    /// them, and it lives as long as the account: kept there, they are one entry per request
+    /// for the life of the process — NFR-12's ratchet, found by the soak (#89).
+    unrecorded: bool,
 }
 
 impl Replay {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Stop recording what is asked for. Answers, paging and faults are unchanged.
+    ///
+    /// For a replay nothing will inspect — the recorded corpus an account is added from —
+    /// so that its memory is bounded by its fixtures rather than growing with every request.
+    #[must_use]
+    pub fn unrecorded(mut self) -> Self {
+        self.unrecorded = true;
+        self
     }
 
     /// Record a successful response. Repeated calls queue successive responses for the same
@@ -234,10 +258,10 @@ impl Replay {
     /// How many times an exchange has been performed.
     #[must_use]
     pub fn count_of(&self, verb: &str, target: &str) -> usize {
-        self.performed
-            .iter()
-            .filter(|e| e.verb == verb && e.target == target)
-            .count()
+        self.seen
+            .get(&Exchange::new(verb, target))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The headers of the *n*th performed request.
@@ -256,10 +280,24 @@ impl Replay {
 impl Transport for Replay {
     fn exchange(&mut self, request: &Request<'_>) -> Result<Response, TransportError> {
         let exchange = &request.exchange;
-        let seen = self.count_of(&exchange.verb, &exchange.target);
-        self.performed.push(exchange.clone());
-        self.headers.push(request.headers.clone());
-        self.bodies.push(request.body.to_vec());
+        // Counted by lookup rather than by scanning the record: a scan made every request
+        // cost time linear in the requests before it, which is why the soak's round rate
+        // fell the longer it ran.
+        let seen = match self.seen.get_mut(exchange) {
+            Some(n) => {
+                *n += 1;
+                *n - 1
+            }
+            None => {
+                self.seen.insert(exchange.clone(), 1);
+                0
+            }
+        };
+        if !self.unrecorded {
+            self.performed.push(exchange.clone());
+            self.headers.push(request.headers.clone());
+            self.bodies.push(request.body.to_vec());
+        }
 
         if let Some(fault) = self.faults.get(&(exchange.clone(), seen)) {
             return Err(fault.clone());
@@ -347,6 +385,28 @@ mod tests {
         assert_eq!(r.performed, vec![Exchange::new("GET", "/envelopes")]);
         assert_eq!(r.count_of("GET", "/envelopes"), 1);
         assert_eq!(r.header_of(0, "authorization"), Some("Bearer x"));
+    }
+
+    #[test]
+    fn an_unrecorded_replay_keeps_nothing_per_request_and_still_pages_and_faults() {
+        // #89: a recorded account's replay lives as long as the account, and a record kept
+        // there grew by one entry per request for the life of the process.
+        let mut r = Replay::new().unrecorded();
+        r.on("POST", "/delta", b"page1")
+            .on("POST", "/delta", b"page2")
+            .fail_nth("POST", "/delta", 2, TransportError::Transient);
+        let q = Request::new("POST", "/delta").header("Authorization", "Bearer x");
+        assert_eq!(r.exchange(&q).map(|x| x.body), Ok(b"page1".to_vec()));
+        assert_eq!(r.exchange(&q).map(|x| x.body), Ok(b"page2".to_vec()));
+        assert!(matches!(r.exchange(&q), Err(TransportError::Transient)));
+        for _ in 0..1_000 {
+            let _ = r.exchange(&q);
+        }
+        assert_eq!(r.count_of("POST", "/delta"), 1_003);
+        assert!(r.performed.is_empty());
+        assert!(r.headers.is_empty());
+        assert!(r.bodies.is_empty());
+        assert_eq!(r.seen.len(), 1, "one entry per distinct exchange");
     }
 
     #[test]
