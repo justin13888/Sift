@@ -152,9 +152,12 @@ final class ApplicationShell: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         addFixtureAccountIfAsked()
 
-        // Both branches open a window; what differs is what the window is *for*. The
+        // An ordinary launch opens a window; what differs is what the window is *for*. The
         // account-less state *is* the add-account flow rather than an empty inbox, because an
         // empty inbox tells a new user the product is broken.
+        //
+        // **Except a launch the login item made**, with an account to be resident for: that
+        // opens no window at all (below).
         //
         // **Except a launch a notification caused.** That person asked for one message, and
         // D-97's standalone reader exists so that the answer is that message rather than the
@@ -333,7 +336,10 @@ final class ApplicationShell: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleLoginItem() {
         switch LoginItem.status {
         case .enabled:
-            LoginItem.unregister()
+            if case .failure(let error) = LoginItem.unregister() {
+                // The same rule as registering: a tick that survives the click needs a reason.
+                presentLoginItemFailure("Sift could not stop opening at login.", error)
+            }
         case .requiresApproval:
             // Already registered; the one step left is the user's, in System Settings.
             SMAppService.openSystemSettingsLoginItems()
@@ -346,13 +352,17 @@ final class ApplicationShell: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .failure(let error):
                 // Said, not swallowed: a menu item that stays unticked after a click, with no
                 // reason given, is indistinguishable from one that did nothing.
-                let alert = NSAlert()
-                alert.messageText = "Sift could not be set to open at login."
-                alert.informativeText = error.localizedDescription
-                NSApp.activate(ignoringOtherApps: true)
-                alert.runModal()
+                presentLoginItemFailure("Sift could not be set to open at login.", error)
             }
         }
+    }
+
+    private func presentLoginItemFailure(_ message: String, _ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = error.localizedDescription
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     /// The application menu. Deliberately the same three verbs as the tray, plus the window
@@ -1458,13 +1468,13 @@ enum LoginItem {
         }
     }
 
-    @discardableResult
-    static func unregister() -> Bool {
+    /// Unregister, carrying the platform's reason on failure so the caller can say it.
+    static func unregister() -> Result<Void, Error> {
         do {
             try SMAppService.mainApp.unregister()
-            return true
+            return .success(())
         } catch {
-            return false
+            return .failure(error)
         }
     }
 
@@ -1518,8 +1528,11 @@ enum LoginItem {
         }
         print("login-item: registered \(describe(registered))")
         if madeHere {
-            let restored = unregister()
-            print("login-item: restored   \(describe(status))\(restored ? "" : " (unregister failed)")")
+            var failure = ""
+            if case .failure(let error) = unregister() {
+                failure = " (unregister failed — \(error.localizedDescription))"
+            }
+            print("login-item: restored   \(describe(status))\(failure)")
         }
         print("login-item: not observed — a login starting the process; that needs a login session")
         let pass = sandboxed && (registered == .enabled || registered == .requiresApproval)
