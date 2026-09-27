@@ -136,12 +136,11 @@ impl Rgb {
     }
 }
 
-/// The contrast ratio between two colours.
+/// The contrast ratio between two colours — NFR-47's metric.
 ///
-/// **The threshold this is compared against is not recorded anywhere**, which is why NFR-47
-/// is registered as an outstanding gate value: the number has to be calibrated against
-/// fidelity-corpus pairs already agreed to render acceptably, and that corpus does not
-/// exist yet. [`ACCEPTABLE_CONTRAST`] is a stated starting value and says so.
+/// The WCAG 2 ratio. Its thresholds, [`ACCEPTABLE_CONTRAST`] and
+/// [`INCREASED_CONTRAST_THRESHOLD`], and how they were derived are recorded under NFR-47 in
+/// [dark mode](../../../../docs/rendering/dark-mode.md).
 #[must_use]
 pub fn contrast_ratio(a: Rgb, b: Rgb) -> f64 {
     let (x, y) = (a.relative_luminance(), b.relative_luminance());
@@ -149,23 +148,26 @@ pub fn contrast_ratio(a: Rgb, b: Rgb) -> f64 {
     (lighter + 0.05) / (darker + 0.05)
 }
 
-/// Provisional. See NFR-47's outstanding-value issue: this is a starting point, not a
-/// derived threshold, and moving it is an amendment rather than a tuning.
+/// NFR-47's threshold: the ratio step 5 repairs every text-on-background pair toward.
+///
+/// **Derived, not chosen:** the metric is the WCAG 2 ratio, and this is the minimum level that
+/// ratio's own definition sets for body text. The fidelity corpus is what the gate measures
+/// against it, not where it came from — see NFR-47 in
+/// [dark mode](../../../../docs/rendering/dark-mode.md). Moving it is an amendment there,
+/// never a tuning here.
 pub const ACCEPTABLE_CONTRAST: f64 = 4.5;
 
 /// The raised contrast threshold, for a reader whose system asks for increased contrast.
 ///
 /// [The UI shell](../../../../docs/architecture/ui-shell.md) requires the dark transform's
-/// repair target to move under that preference —
-/// a user who asked the system for more contrast has not asked for it everywhere except
-/// inside the message — and does not say to what. This is the third value of the same
-/// unrecorded set as [`ACCEPTABLE_CONTRAST`] and [`NEAR_NEUTRAL_CHROMA`], registered in
-/// issue #26 and blocked on the fidelity corpus (Q-10).
+/// repair target to move under that preference — a user who asked the system for more
+/// contrast has not asked for it everywhere except inside the message.
 ///
-/// **Provisional.** A stated starting value rather than a derived one: the enhanced-contrast
-/// ratio accessibility guidance already names for body text. It MUST stay above
+/// **Derived the same way as [`ACCEPTABLE_CONTRAST`]:** the enhanced level the WCAG 2 ratio's
+/// definition sets for body text, recorded under NFR-47 in
+/// [dark mode](../../../../docs/rendering/dark-mode.md). It MUST stay above
 /// [`ACCEPTABLE_CONTRAST`], or the preference would lower the bar it exists to raise; the
-/// build holds that. Moving it is an amendment rather than a tuning.
+/// build holds that.
 pub const INCREASED_CONTRAST_THRESHOLD: f64 = 7.0;
 
 // An amendment that moved either value past the other fails to compile rather than shipping
@@ -174,8 +176,8 @@ const _: () = assert!(INCREASED_CONTRAST_THRESHOLD > ACCEPTABLE_CONTRAST);
 
 /// The threshold step 5 of the dark transform repairs toward.
 ///
-/// One place decides which of the two provisional values applies, so the transform and
-/// anything that later reports against NFR-47 cannot disagree about it.
+/// One place decides which of the two values applies, so the transform and NFR-47's gate
+/// cannot disagree about it.
 #[must_use]
 pub const fn contrast_threshold(increased_contrast: bool) -> f64 {
     if increased_contrast {
@@ -191,8 +193,14 @@ pub const fn contrast_threshold(increased_contrast: bool) -> f64 {
 /// when all of its stops are below it, so a mixed-stop gradient is excluded by construction
 /// rather than by a special case. The same threshold governs borders, shadows and outlines.
 ///
-/// Also provisional, and from the same unrecorded set.
-pub const NEAR_NEUTRAL_CHROMA: f64 = 0.04;
+/// **Derived:** one just-noticeable difference in Oklab — the space step 4 works in — as CSS
+/// Color 4's gamut mapping takes it. A colour within one such difference of the grey at its
+/// own lightness cannot be told from that grey, so calling it neutral changes nothing a reader
+/// could recognise as a brand colour. The fidelity corpus falsifies it rather than choosing
+/// it: the value must fall above every neutral decoration colour the corpus draws and below
+/// every brand colour, which the tests below hold. Recorded, with the corpus figures, in
+/// [dark mode](../../../../docs/rendering/dark-mode.md).
+pub const NEAR_NEUTRAL_CHROMA: f64 = 0.02;
 
 /// Parse a CSS colour.
 ///
@@ -341,9 +349,38 @@ mod tests {
     }
 
     #[test]
+    fn the_near_neutral_threshold_separates_the_fidelity_corpus_neutrals_from_its_brand_colours() {
+        // NFR-47's falsifier for the chroma threshold, over the colours the fidelity corpus
+        // (`sift-sanitize/fixtures/messages`) draws. The corpus bounds the value; the
+        // just-noticeable difference picks it inside the bound. A corpus colour on the wrong
+        // side reopens the derivation in docs/rendering/dark-mode.md rather than moving the
+        // constant.
+        let neutral = [
+            "#d0d7de", // transactional-receipt: the item-row border, a cool grey
+            "#1f2328", // transactional-receipt: body text, a blue-black
+            "#cccccc", // mailing-list-reply: the quote rule
+            "#f4f4f4", // marketing-newsletter: the page ground
+            "#eeeeee", // marketing-newsletter: the footer ground
+            "#666666", // marketing-newsletter: footer text
+            "#555555", // cjk-japanese: the note
+        ];
+        let brand = [
+            "#1a5d3a", // marketing-newsletter: the call-to-action ground
+        ];
+        for c in neutral {
+            let chroma = parse(c).expect("corpus colour").to_oklab().chroma();
+            assert!(chroma < NEAR_NEUTRAL_CHROMA, "{c} has chroma {chroma}");
+        }
+        for c in brand {
+            let chroma = parse(c).expect("corpus colour").to_oklab().chroma();
+            assert!(chroma > NEAR_NEUTRAL_CHROMA, "{c} has chroma {chroma}");
+        }
+    }
+
+    #[test]
     fn the_increased_contrast_preference_raises_the_bar_rather_than_lowering_it() {
         // The UI shell's requirement: a user who asked the system for more contrast has not
-        // asked for it everywhere except inside the message. A provisional value that fell
+        // asked for it everywhere except inside the message. A value that fell
         // below the ordinary one would invert that request; the ordering itself is held at
         // compile time beside the constant, and this holds the selection.
         assert!(contrast_threshold(true) > contrast_threshold(false));
