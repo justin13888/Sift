@@ -199,6 +199,15 @@ pub struct OpenAccount {
     /// when the user adds it, and after that every command plans against what the account
     /// declares.
     pub adapter: Option<Live>,
+    /// The adapter is out, lent to the one job having a conversation with the provider —
+    /// D-122.
+    ///
+    /// **Not the same as having no adapter**, and the difference is what this field is for:
+    /// an account with none is reconnected, and one whose adapter is lent must not be — that
+    /// would be a second conversation with the provider, and a token refresh on the thread
+    /// that asked, for an account that is reachable and busy. A second sync or flush of a
+    /// lent account is refused as busy instead.
+    pub lent: bool,
     /// Whether Sift may issue this account's mutations to the provider — the read-only
     /// posture.
     ///
@@ -226,6 +235,47 @@ impl std::fmt::Debug for OpenAccount {
         f.debug_struct("OpenAccount")
             .field("id", &self.id)
             .finish_non_exhaustive()
+    }
+}
+
+/// How a job that reaches a provider reaches the application — D-122.
+///
+/// Each call is one short, held step. The work that reaches the provider — a sync, a flush,
+/// a fire — is written against this rather than against `&mut App`, so that a caller keeping
+/// the application behind a lock the shell's loop also takes can let go of it for every round
+/// trip. A caller that owns the application outright passes it: [`App`] is its own hold.
+pub trait Locked {
+    /// Run `step` against the application, or answer `None` where it can no longer be reached
+    /// — a lock poisoned by a panic in another step.
+    fn with<R>(&mut self, step: impl FnOnce(&mut App) -> R) -> Option<R>;
+}
+
+impl Locked for App {
+    fn with<R>(&mut self, step: impl FnOnce(&mut App) -> R) -> Option<R> {
+        Some(step(self))
+    }
+}
+
+/// What a job says when the application it was working against can no longer be reached.
+const UNREACHABLE: &str = "the application could not be reached";
+
+/// One account's store, reached by identity through a [`Locked`] for each of the driver's
+/// held steps.
+///
+/// **By identity rather than by name**, because an account removed between two steps and
+/// another added under the same label is a different account, and a page fetched for the
+/// first must not be written into the second.
+struct AccountHold<'l, L: ?Sized> {
+    lock: &'l mut L,
+    id: AccountId,
+}
+
+impl<L: Locked + ?Sized> sift_sync::run::Hold for AccountHold<'_, L> {
+    fn with<R>(&mut self, step: impl FnOnce(&mut Account, &LocalIdGenerator) -> R) -> Option<R> {
+        let id = self.id;
+        self.lock
+            .with(|app| app.by_id(id).map(|a| step(&mut a.store, &a.ids)))
+            .flatten()
     }
 }
 
@@ -474,6 +524,7 @@ impl App {
                     queue,
                     ids: LocalIdGenerator::new(row.ordinal),
                     adapter: None,
+                    lent: false,
                     // Not latched across a restart: the grant may have been repaired in the
                     // provider's own console since, and a stale prompt asking a person to sign
                     // in to an account that works is a prompt they learn to dismiss.
@@ -717,6 +768,7 @@ impl App {
                 queue: Queue::new(),
                 ids: LocalIdGenerator::new(ordinal),
                 adapter: None,
+                lent: false,
                 needs_authentication: false,
                 // Read-only until somebody says otherwise. The safe state is the default,
                 // and it is the default at construction rather than at a call site that
@@ -1073,18 +1125,88 @@ impl App {
     /// The account has no provider behind it, or the walk failed. The adapter is returned to
     /// the account either way — a failed sync must not leave an account unreachable.
     pub fn sync(&mut self, name: &str, pages: usize) -> Result<SyncReport, String> {
+        Self::sync_held(self, name, pages)
+    }
+
+    /// [`App::sync`] through a [`Locked`], holding it only across store work — D-122.
+    ///
+    /// The adapter is lent to this call for the walk and the application is let go of for
+    /// every round trip, so a gesture on the shell's loop waits for a store write rather than
+    /// for a provider.
+    ///
+    /// # Errors
+    /// As [`App::sync`]; and the account was removed mid-walk, or is already talking to its
+    /// provider, or the application could not be reached.
+    pub fn sync_held<L: Locked + ?Sized>(
+        lock: &mut L,
+        name: &str,
+        pages: usize,
+    ) -> Result<SyncReport, String> {
         // D-95's pause, honoured where the work is rather than only where the badge is. It was
         // a flag that produced a condition and nothing else read it, so "Pause Syncing"
         // painted the annunciator and the next gesture that reached this function synced
         // anyway.
-        if self.is_paused(name) {
+        let Some((id, adapter)) = lock
+            .with(|app| {
+                if app.is_paused(name) {
+                    return Ok(None);
+                }
+                app.lend(name).map(Some)
+            })
+            .ok_or(UNREACHABLE)??
+        else {
             return Ok(SyncReport::default());
+        };
+
+        let mut hold = AccountHold { lock, id };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sift_sync::run::discover_folders_held(adapter.as_ref(), &mut hold).and_then(|folders| {
+                sift_sync::run::sync_account_held(adapter.as_ref(), &mut hold, pages).map(|page| {
+                    SyncReport {
+                        discovered: folders.discovered.len(),
+                        inserted: page.inserted,
+                        updated: page.updated,
+                        removed: page.removed,
+                        delivered: page.delivered,
+                        newest: page.newest.map(|a| a.id),
+                    }
+                })
+            })
+        }));
+
+        // The adapter goes back before the result is examined — and before a panic travels
+        // on, which is why the walk is caught at all. An account whose sync failed is an
+        // account in a condition, not one that can never be reached again, and one left lent
+        // to a job that has ended would be refused as busy for the life of the process.
+        hold.lock.with(|app| app.give_back(id, adapter));
+        match outcome {
+            Ok(outcome) => outcome.map_err(|e| e.to_string()),
+            Err(panic) => std::panic::resume_unwind(panic),
         }
-        // An account the last run left behind opens with no adapter: the store is sealed on
-        // disk and its queue is rebuilt from the journal, but nothing reaches the provider.
-        // Reconnecting here rather than at `open_container` is deliberate — it is a network
-        // round trip, and a launch that waits on the network is the opposite of what a
-        // resident mail client should do. This is already a network call.
+    }
+
+    /// The account by identity, which is how every held step after the first finds it.
+    fn by_id(&mut self, id: AccountId) -> Option<&mut OpenAccount> {
+        self.accounts.values_mut().find(|a| a.id == id)
+    }
+
+    /// Lend this account's adapter to the caller for one conversation with its provider —
+    /// D-122.
+    ///
+    /// An account the last run left behind opens with no adapter: the store is sealed on disk
+    /// and its queue is rebuilt from the journal, but nothing reaches the provider. It is
+    /// reconnected here rather than at `open_container` deliberately — that is a network round
+    /// trip, and a launch that waits on the network is the opposite of what a resident mail
+    /// client should do. The caller is already about to make a network call.
+    ///
+    /// # Errors
+    /// There is no such account, it has no provider behind it, reconnecting failed, or **its
+    /// adapter is already lent**. That last is refused rather than waited for or reconnected
+    /// around: one conversation per account at a time.
+    fn lend(&mut self, name: &str) -> Result<(AccountId, Live), String> {
+        if self.account(name)?.lent {
+            return Err(format!("`{name}` is already talking to its provider"));
+        }
         if self.account(name)?.adapter.is_none() {
             self.reconnect(name)?;
         }
@@ -1093,30 +1215,24 @@ impl App {
             .adapter
             .take()
             .ok_or("this account has no provider behind it")?;
+        account.lent = true;
+        Ok((account.id, adapter))
+    }
 
-        let outcome = sift_sync::run::discover_folders(adapter.as_ref(), &account.store).and_then(
-            |folders| {
-                sift_sync::run::sync_account(
-                    adapter.as_ref(),
-                    &mut account.store,
-                    &account.ids,
-                    pages,
-                )
-                .map(|page| SyncReport {
-                    discovered: folders.discovered.len(),
-                    inserted: page.inserted,
-                    updated: page.updated,
-                    removed: page.removed,
-                    delivered: page.delivered,
-                    newest: page.newest.map(|a| a.id),
-                })
-            },
-        );
+    /// Return a lent adapter. An account removed while it was out has nothing to return it to,
+    /// and the adapter is dropped.
+    fn give_back(&mut self, id: AccountId, adapter: Live) {
+        if let Some(account) = self.by_id(id) {
+            account.adapter = Some(adapter);
+            account.lent = false;
+        }
+    }
 
-        // The adapter goes back before the result is examined. An account whose sync failed
-        // is an account in a condition, not one that can never be reached again.
-        account.adapter = Some(adapter);
-        outcome.map_err(|e| e.to_string())
+    /// Whether any account's adapter is out — what a caller that needs a provider waits on
+    /// before it starts, so that it waits for one round trip rather than being refused.
+    #[must_use]
+    pub fn any_lent(&self) -> bool {
+        self.accounts.values().any(|a| a.lent)
     }
 }
 
@@ -1255,9 +1371,10 @@ impl App {
     /// 5. **Nothing in front of the user still names it** — the selection, the open message
     ///    and FR-8's show-once allowance are dropped where they belonged to it.
     ///
-    /// Work already running for this account is not something this has to wait for: every
-    /// sync and flush holds the application for its whole duration, so a caller that has it
-    /// has already waited.
+    /// Work already running for this account is not something this has to wait for. A sync
+    /// or flush holds the application only across its store work (D-122), so this can run
+    /// while one is inside a round trip: its next held step finds no account with that
+    /// identity, writes nothing, and drops the adapter it was lent.
     ///
     /// # Errors
     /// There is no such account, or the registry refused.
@@ -1355,40 +1472,78 @@ impl App {
     /// There is no such account, it has no provider behind it, or the journal refused the
     /// durable marker D-85 requires before a request goes out.
     pub fn flush(&mut self, name: &str) -> Result<Flushed, String> {
+        Self::flush_held(self, name)
+    }
+
+    /// [`App::flush`] through a [`Locked`], holding it only across the queue work — D-122.
+    ///
+    /// Three steps, and only the middle one is not held: choose the batch and make it durable
+    /// as `Issued` (held — D-85's marker still precedes the request); send it (not held); and
+    /// record the answer (held). A person may triage between the first and the last, which
+    /// [`sift_mutations::flush::settle`] is written to tolerate.
+    ///
+    /// # Errors
+    /// As [`App::flush`]; and the account was removed while its batch was out, or is already
+    /// talking to its provider, or the application could not be reached.
+    pub fn flush_held<L: Locked + ?Sized>(lock: &mut L, name: &str) -> Result<Flushed, String> {
+        let (id, adapter, issued) = match lock
+            .with(|app| app.begin_flush(name))
+            .ok_or(UNREACHABLE)??
+        {
+            Begun::Done(flushed) => return Ok(flushed),
+            Begun::Out {
+                id,
+                adapter,
+                issued,
+            } => (id, adapter, issued),
+        };
+        let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sift_mutations::flush::send(adapter.as_ref(), &issued)
+        }));
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(panic) => {
+                // Returned before the panic travels on, for the reason a sync returns it. The
+                // batch stays `Issued`, which is exactly what a crash in the same place leaves
+                // and what D-85's recovery already answers.
+                lock.with(|app| app.give_back(id, adapter));
+                std::panic::resume_unwind(panic)
+            }
+        };
+        lock.with(|app| app.end_flush(id, adapter, issued, answer))
+            .ok_or(UNREACHABLE)?
+    }
+
+    /// The first held step of a flush: the gates, the loan, and the durable `Issued` marker.
+    fn begin_flush(&mut self, name: &str) -> Result<Begun, String> {
         // A paused account holds its queue for the same reason a watched one does: the user
         // asked it to stop. D-58 makes pause a policy tier everything resolves to, and the
         // tier that still flushes is the network's rather than the user's.
         if self.is_paused(name) {
-            return Ok(Flushed {
+            return Ok(Begun::Done(Flushed {
                 authorized: false,
                 held: self.account(name)?.queue.len(),
                 report: sift_mutations::flush::FlushReport::default(),
                 queued: self.account(name)?.queue.len(),
                 error: None,
-            });
+            }));
         }
         if !self.may_issue(name) {
-            return Ok(Flushed {
+            return Ok(Begun::Done(Flushed {
                 authorized: false,
                 held: self.held(name),
                 report: sift_mutations::flush::FlushReport::default(),
                 queued: self.account(name)?.queue.len(),
                 error: None,
-            });
+            }));
         }
         // Reconnect for the same reason `sync` does: an account the last run left behind
         // opens with no adapter, and someone who triaged before the first sync of a session
         // would be told Sift cannot reach an account it can reach. This is already the one
         // call that goes to the provider, so the round trip costs nothing that was not
         // already being paid.
-        if self.account(name)?.adapter.is_none() {
-            self.reconnect(name)?;
-        }
+        let (id, adapter) = self.lend(name)?;
         let account = self.account(name)?;
-        let adapter = account
-            .adapter
-            .take()
-            .ok_or("this account has no provider behind it")?;
 
         // The durable half of D-85's marker. It is a callback because the journal is the
         // store's and the queue cannot reach it — the two sit side by side in this layer and
@@ -1408,19 +1563,59 @@ impl App {
         };
 
         let resolve = Remote(&account.store.store);
-        let outcome = sift_mutations::flush::flush_once(
-            adapter.as_ref(),
+        let issued = sift_mutations::flush::issue(
+            adapter.capabilities(),
             &mut account.queue,
             &resolve,
             &mut mark_issued,
         );
-        // Returned either way — a failed flush must not leave an account unreachable, for the
-        // same reason a failed sync must not.
+        let (report, error) = match issued {
+            Ok(issued) if !issued.is_empty() => {
+                return Ok(Begun::Out {
+                    id,
+                    adapter,
+                    issued,
+                });
+            }
+            Ok(issued) => (issued.report().clone(), None),
+            Err(failure) => (failure.report, Some(failure.error.to_string())),
+        };
+        // Nothing to send, or the marker could not be written: returned at once, because a
+        // failed flush must not leave an account unreachable, for the same reason a failed
+        // sync must not.
         account.adapter = Some(adapter);
+        account.lent = false;
+        Ok(Begun::Done(Flushed {
+            authorized: true,
+            held: 0,
+            report,
+            queued: account.queue.len(),
+            error,
+        }))
+    }
 
+    /// The last held step of a flush: the answer recorded, and the adapter returned.
+    fn end_flush(
+        &mut self,
+        id: AccountId,
+        adapter: Live,
+        issued: sift_mutations::flush::Issued,
+        answer: Result<
+            Vec<sift_provider::adapter::MutationOutcome>,
+            sift_mutations::flush::FlushError,
+        >,
+    ) -> Result<Flushed, String> {
+        // Removed while the batch was out: its queue went with it under FR-4, so the answer
+        // has nothing to settle, and the adapter nothing to go back to.
+        let account = self
+            .by_id(id)
+            .ok_or("the account was removed while its queue was being sent")?;
+        let outcome = sift_mutations::flush::settle(&mut account.queue, issued, answer);
+        account.adapter = Some(adapter);
+        account.lent = false;
         let (report, error) = match outcome {
             Ok(report) => (report, None),
-            Err(failure) => (failure.report.clone(), Some(failure.error.to_string())),
+            Err(failure) => (failure.report, Some(failure.error.to_string())),
         };
         Ok(Flushed {
             authorized: true,
@@ -1494,8 +1689,8 @@ impl App {
     ///
     /// This is [`App::begin_fire`] followed by [`App::perform`] for each item, in one call.
     /// A caller that holds the application behind a lock — the boundary does — calls the two
-    /// halves itself, so that the lock is released between accounts rather than held across
-    /// every provider round trip the fire makes.
+    /// halves itself, through [`App::perform_held`], so that the lock is held across store
+    /// work only and never across a provider round trip the fire makes (D-122).
     pub fn tick(&mut self) -> TickReport {
         let mut report = TickReport::default();
         for due in self.begin_fire() {
@@ -1557,8 +1752,22 @@ impl App {
     /// apart: an account removed in between has nothing left to do, and is skipped rather than
     /// reported as a failure it did not have.
     pub fn perform(&mut self, due: &Due, report: &mut TickReport) {
+        Self::perform_held(self, due, report);
+    }
+
+    /// [`App::perform`] through a [`Locked`], holding it only across store work — D-122.
+    ///
+    /// What [`App::tick`]'s documentation says a caller behind a lock does, one step further:
+    /// the lock was already let go of between accounts, and is now let go of between round
+    /// trips within one.
+    pub fn perform_held<L: Locked + ?Sized>(lock: &mut L, due: &Due, report: &mut TickReport) {
         let (Due::Sync(id) | Due::Flush(id)) = *due;
-        let Some(name) = self.name_of(id) else {
+        let Some(Some((name, paused))) = lock.with(|app| {
+            app.name_of(id).map(|name| {
+                let paused = app.is_paused(&name);
+                (name, paused)
+            })
+        }) else {
             return;
         };
         match due {
@@ -1566,16 +1775,17 @@ impl App {
             // to re-arm from somewhere — but it is not *reported* as having polled. `sync`
             // returns an empty report for it, so recording the name here would make FR-34's
             // panel show a paused account polling every minute.
-            Due::Sync(_) if self.is_paused(&name) => report.paused.push(name),
-            Due::Sync(_) => match self.sync(&name, 1) {
+            Due::Sync(_) if paused => report.paused.push(name),
+            Due::Sync(_) => match Self::sync_held(lock, &name, 1) {
                 Ok(outcome) => {
                     report.inserted += outcome.inserted;
                     if outcome.delivered > 0 {
-                        // Read now, while the fire holds the account, so that what is
-                        // announced is the row as it stood the moment it arrived.
+                        // Read in the held step straight after the write, so that what is
+                        // announced is the row as near as possible to how it arrived.
                         let newest = outcome
                             .newest
-                            .and_then(|m| self.message_row(m).ok().flatten());
+                            .and_then(|m| lock.with(|app| app.message_row(m).ok().flatten()))
+                            .flatten();
                         report.new_mail.push(NewMail {
                             account: id,
                             delivered: outcome.delivered,
@@ -1586,8 +1796,8 @@ impl App {
                 }
                 Err(why) => report.failures.push((name, why)),
             },
-            Due::Flush(_) if self.is_paused(&name) => {}
-            Due::Flush(_) => match self.flush(&name) {
+            Due::Flush(_) if paused => {}
+            Due::Flush(_) => match Self::flush_held(lock, &name) {
                 Ok(f) if f.report.issued > 0 => report.flushed.push(name),
                 Ok(_) => {}
                 Err(why) => report.failures.push((name, why)),
@@ -1754,6 +1964,18 @@ pub struct Flushed {
     pub queued: usize,
     /// The provider or the journal refused, in the layer's own words.
     pub error: Option<String>,
+}
+
+/// Where a flush stands after its first held step.
+enum Begun {
+    /// Nothing leaves: held, paused, empty, or refused before anything was sent.
+    Done(Flushed),
+    /// A batch is durable as `Issued` and the adapter is lent to send it.
+    Out {
+        id: AccountId,
+        adapter: Live,
+        issued: sift_mutations::flush::Issued,
+    },
 }
 
 /// What removing an account came to — FR-4.

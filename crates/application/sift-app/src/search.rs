@@ -482,6 +482,11 @@ impl App {
                  already holds was searched there."
             )
         };
+        // A lent adapter is busy rather than missing, and reconnecting it would be a second
+        // conversation with the provider — D-122.
+        if self.account(name)?.lent {
+            return Ok(Err(failed("it is already talking to its provider")));
+        }
         // A restored account is reconnected the way a sync reconnects it: this is already a
         // network call, and a launch that reconnected every account up front would be one that
         // waits on the network.
