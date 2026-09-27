@@ -73,8 +73,11 @@ For each release candidate, in order:
 
 1. Write the version's section in `RELEASE_NOTES.md`. For each issue listed under *Known
    limitations*, run `gh issue view N` and remove the ones that have closed. Name every security
-   advisory fixed since the previous release.
-2. `mise run release-rc -- <version>`.
+   advisory fixed since the previous release. Merge the section to the default branch through a
+   pull request before step 2: `release-rc` refuses a dirty worktree and a revision that is not
+   on the default branch's first-parent history, and the notes belong to the revision released.
+2. `git switch --detach origin/master` after `git fetch origin master`, then
+   `mise run release-rc -- <version>`.
 3. Publish the pre-release with the commands that task prints, adding the version's section as the
    notes: `--notes-file` with a file holding that section.
 4. Run `QA_CHECKLIST.md` against the published artefact, adding a new run column, and file every
