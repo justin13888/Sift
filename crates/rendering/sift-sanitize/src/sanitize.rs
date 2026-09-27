@@ -157,6 +157,7 @@ fn pass(html: &str) -> Result<Sanitized, SanitizeError> {
 
     walk(&dom.document, 0, false, &state)?;
     drop_leading_whitespace(&dom.document);
+    restore_leading_newlines(&dom.document);
 
     let mut serialized = Vec::new();
     let handle: SerializableHandle = dom.document.clone().into();
@@ -318,6 +319,34 @@ fn drop_leading_whitespace(document: &Handle) {
             }
             _ => break,
         }
+    }
+}
+
+/// I8 and I9 over the newline the tree builder eats.
+///
+/// The tree builder drops a single LF straight after the start tag of `pre`, `listing` and
+/// `textarea`, and the HTML serialization algorithm writes one back where the element's text
+/// begins with LF; the serializer this crate uses does not. Without it every pass loses one
+/// leading line of preformatted text — a blank line the reader sees — and a `pre` opening on
+/// more newlines than L-35 allows passes never settles (found by NFR-40's fuzzing). So the
+/// LF is written back into the tree before it is serialized, where a reparse removes it again.
+fn restore_leading_newlines(node: &Handle) {
+    let children = node.children.borrow();
+    if let NodeData::Element { name, .. } = &node.data
+        && name.ns == html5ever::ns!(html)
+        && matches!(&*name.local, "pre" | "listing" | "textarea")
+        && let Some(first) = children.first()
+        && let NodeData::Text { contents } = &first.data
+    {
+        let mut text = contents.borrow_mut();
+        if text.starts_with('\n') {
+            let mut restored = StrTendril::from_slice("\n");
+            restored.push_tendril(&text);
+            *text = restored;
+        }
+    }
+    for child in children.iter() {
+        restore_leading_newlines(child);
     }
 }
 
@@ -1114,6 +1143,27 @@ mod invariants {
             let once = clean(html);
             let twice = clean(&once.html);
             assert_eq!(once.html, twice.html, "not idempotent for {html}");
+        }
+    }
+
+    #[test]
+    fn i8_a_leading_newline_in_pre_survives_the_round_trip() {
+        // Found by NFR-40's fuzzing once a document that will not settle became a finding,
+        // minimized to the first input: the tree builder drops one newline straight after
+        // `<pre>`, so each pass that serializes the text without writing that newline back
+        // loses one line — a blank line the reader would have seen, and four newlines outlast
+        // L-35's passes.
+        for (html, text) in [
+            ("<pre>\n\n\n\n", "\n\n\n"),
+            ("<pre>\n\nx</pre>", "\nx"),
+            ("<div><pre>\n\n\n\n\n</pre></div>", "\n\n\n\n"),
+        ] {
+            let once = sanitize(html).unwrap_or_else(|e| panic!("{html:?} refused: {e:?}"));
+            assert!(
+                once.html.contains(&format!(">\n{text}<")),
+                "{html:?} lost a line: {:?}",
+                once.html
+            );
         }
     }
 
