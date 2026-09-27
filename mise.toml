@@ -18,7 +18,12 @@
 # `rust-version` in Cargo.toml, and `mise run check-floor` is what holds it.
 #
 # `profile = "default"` takes rustfmt and clippy from rustup's component set.
-rust = { version = "1.96.0", profile = "default" }
+#
+# `targets` must stay equal to `rust-toolchain.toml`'s. Installing them here completes the
+# toolchain before any `cargo:` tool below builds. Left to rustup's on-demand install, every
+# `cargo:` tool mise builds in parallel downloads the same missing target into one shared
+# path, and the installs race and fail.
+rust = { version = "1.96.0", profile = "default", targets = "aarch64-apple-darwin,x86_64-apple-darwin" }
 
 # Gates 1 and 2 of the dependency policy (`mise run deny`), configured in deny.toml. The
 # aqua backend ships prebuilt binaries, so no source build. Pinned so a new advisory-schema
