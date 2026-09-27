@@ -391,6 +391,9 @@ fn a_page_and_its_cursor_land_together() {
 
     assert_eq!(report.inserted, 2);
     assert_eq!(report.delivered, 2);
+    // FR-23's rules are per folder, so each arrival says which folder it arrived in.
+    assert_eq!(report.arrivals.len(), report.delivered);
+    assert!(report.arrivals.iter().all(|a| a.folder == folder));
     assert_eq!(
         ingest::cursor_of(&account.store, folder).unwrap(),
         Some(Cursor(b"c1".to_vec()))
@@ -609,18 +612,21 @@ fn absorbing_reports_keeps_the_newest_arrival_across_them() {
     let arrival = |n: u128, at: u64| ingest::Arrival {
         id: LocalId::from_u128(n),
         received_millis: at,
+        folder: 1,
     };
     let mut total = ingest::PageReport::default();
     let first = ingest::PageReport {
         inserted: 1,
         delivered: 1,
         newest: Some(arrival(1, 500)),
+        arrivals: vec![arrival(1, 500)],
         ..Default::default()
     };
     let second = ingest::PageReport {
         inserted: 2,
         delivered: 1,
         newest: Some(arrival(2, 200)),
+        arrivals: vec![arrival(2, 200)],
         ..Default::default()
     };
     total.absorb(&first);
@@ -629,6 +635,7 @@ fn absorbing_reports_keeps_the_newest_arrival_across_them() {
     assert_eq!(total.inserted, 3);
     assert_eq!(total.delivered, 2);
     assert_eq!(total.newest, Some(arrival(1, 500)));
+    assert_eq!(total.arrivals, vec![arrival(1, 500), arrival(2, 200)]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1446,6 +1453,11 @@ mod moves {
         assert_eq!(local_of(&account, "m1-moved"), before);
         assert_eq!(report.delivered, 0, "a move was announced as new mail");
         assert_eq!(report.newest, None);
+        assert!(
+            report.arrivals.is_empty(),
+            "a rejoined arrival is still offered to FR-23's rules: {:?}",
+            report.arrivals
+        );
         assert_eq!(report.rejoined, 1);
         assert_eq!(
             count(

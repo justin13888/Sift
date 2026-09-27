@@ -138,7 +138,10 @@ pub fn reconcile_folders(
     Ok(report)
 }
 
-const fn special_use_name(use_: SpecialUse) -> &'static str {
+/// The text the store's `folder.special_use` column holds for a special use — written here,
+/// and read by anything that matches against that column rather than spelling it again.
+#[must_use]
+pub const fn special_use_name(use_: SpecialUse) -> &'static str {
     match use_ {
         SpecialUse::Inbox => "Inbox",
         SpecialUse::Archive => "Archive",
@@ -265,6 +268,13 @@ pub struct PageReport {
     /// The most recently received of those arrivals — what FR-23's notification names and
     /// opens. `None` exactly when `delivered` is zero.
     pub newest: Option<Arrival>,
+    /// Every one of those arrivals, with the folder it arrived in — what FR-23's per-folder
+    /// rules and its one-banner-per-duplicate comparison are applied to. `delivered` is its
+    /// length and `newest` its latest; the two are kept because a count and a name are what
+    /// most readers want, and this is what the few that must look closer read.
+    ///
+    /// Bounded by what one walk applies: a page per folder per fire on the wheel's path.
+    pub arrivals: Vec<Arrival>,
     /// Moves D-44 rejoined: an arrival that took back the local identity of the message that
     /// departed in the same window. Not counted in `inserted` — no message was created.
     pub rejoined: usize,
@@ -289,6 +299,9 @@ pub struct Arrival {
     pub id: LocalId,
     /// D-55's server-assigned received time — what "newest" is ordered by.
     pub received_millis: u64,
+    /// The local identity of the folder the delta delivered it to — D-83's key, which is what
+    /// FR-23's per-folder rules are written against.
+    pub folder: i64,
 }
 
 impl PageReport {
@@ -302,6 +315,7 @@ impl PageReport {
         self.removed += other.removed;
         self.delivered += other.delivered;
         self.newest = newer(self.newest, other.newest);
+        self.arrivals.extend_from_slice(&other.arrivals);
         self.rejoined += other.rejoined;
         self.near_misses.extend_from_slice(&other.near_misses);
     }
@@ -309,6 +323,7 @@ impl PageReport {
     fn arrived(&mut self, arrival: Arrival) {
         self.delivered += 1;
         self.newest = newer(self.newest, Some(arrival));
+        self.arrivals.push(arrival);
     }
 }
 
@@ -380,6 +395,8 @@ pub struct MoveWindow {
 struct Arrived {
     id: LocalId,
     received_millis: u64,
+    /// The folder it was applied to — carried so a recomputed newest still names it.
+    folder: i64,
     /// Whether the page counted it as FR-23 new mail.
     delivered: bool,
 }
@@ -439,6 +456,7 @@ pub fn apply_page_within(
                                 report.arrived(Arrival {
                                     id: local,
                                     received_millis: envelope.received_at_millis,
+                                    folder,
                                 });
                             }
                             // Only an arrival with an envelope has anything D-44 could scope
@@ -447,6 +465,7 @@ pub fn apply_page_within(
                                 arrived.push(Arrived {
                                     id: local,
                                     received_millis: envelope.received_at_millis,
+                                    folder,
                                     delivered,
                                 });
                             }
@@ -585,11 +604,13 @@ pub fn settle_moves(
     }
     tx.commit()?;
 
-    // A rejoined arrival was never new mail. What FR-23 names is the newest of the rest.
+    // A rejoined arrival was never new mail. What FR-23 names is the newest of the rest, and
+    // what its rules and its duplicate comparison see is the rest.
     if arrivals
         .iter()
         .any(|(a, _)| a.delivered && rejoined.contains(&a.id))
     {
+        report.arrivals.retain(|a| !rejoined.contains(&a.id));
         report.newest = arrivals
             .iter()
             .filter(|(a, _)| a.delivered && !rejoined.contains(&a.id))
@@ -599,6 +620,7 @@ pub fn settle_moves(
                     Some(Arrival {
                         id: a.id,
                         received_millis: a.received_millis,
+                        folder: a.folder,
                     }),
                 )
             });

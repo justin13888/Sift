@@ -189,6 +189,44 @@ fn a_fire_that_brings_new_mail_says_which_account_and_which_message() {
 }
 
 #[test]
+fn the_same_arrival_in_two_accounts_is_one_announcement() {
+    // FR-23, #123: across accounts, the same message is announced once. Two accounts over
+    // the same recorded corpus receive the same arrival in the same fire, with the same D-44
+    // digest — which is exactly a message sent to two of a person's addresses.
+    let hand = std::sync::Arc::new(Hand::new());
+    let mut app = App::with_clock(Box::new(Shared(std::sync::Arc::clone(&hand))));
+    let first = app.add_replayed_account("first").expect("added");
+    let second = app.add_replayed_account("second").expect("added");
+    app.arm_periodic();
+
+    let mut delta = None;
+    for _ in 0..6 {
+        advance(&hand, Duration::from_secs(65));
+        let report = app.tick();
+        if !report.new_mail.is_empty() {
+            delta = Some(report);
+            break;
+        }
+    }
+    let delta = delta.expect("no fire announced the delta's arrival");
+    assert_eq!(
+        delta.synced.len(),
+        2,
+        "both accounts must have synced in the announcing fire, or nothing was compared: {delta:?}"
+    );
+    assert_eq!(
+        delta.new_mail.len(),
+        1,
+        "one message, two banners: {:?}",
+        delta.new_mail
+    );
+    let new = &delta.new_mail[0];
+    assert!([first, second].contains(&new.account));
+    assert_eq!(new.delivered, 1);
+    assert!(new.newest.is_some(), "the one banner has nothing to open");
+}
+
+#[test]
 fn a_message_is_found_by_identity_alone_and_an_unknown_one_is_not() {
     // Activation may arrive on a relaunched process with no window and no list, carrying only
     // an identity. One that names nothing — a message since removed by the server — must come

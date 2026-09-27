@@ -414,6 +414,10 @@ pub fn clear_cursor(account: &Account, folder: i64) -> Result<(), RunError> {
 
 /// Sync every folder FR-43 says to watch.
 ///
+/// The report is summed across folders, and FR-23 must not announce what arrived in a folder
+/// its rules leave out — so each of its arrivals keeps the folder it arrived in, and the count
+/// is not the thing a notification is decided on.
+///
 /// # Errors
 /// See [`RunError`].
 pub fn sync_account<A: Adapter + ?Sized>(

@@ -245,6 +245,21 @@ pub enum SpecialUse {
     Drafts,
 }
 
+impl SpecialUse {
+    /// Every special use, in declaration order — the one list of them, kept beside the enum
+    /// so that a variant added above is added here in the same edit, and every layer that
+    /// enumerates special uses (FR-23's rule grammar among them) reads it rather than keeping
+    /// its own copy.
+    pub const ALL: [Self; 6] = [
+        Self::Inbox,
+        Self::Archive,
+        Self::Sent,
+        Self::Trash,
+        Self::Spam,
+        Self::Drafts,
+    ];
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteFolder {
     pub id: RemoteFolderId,

@@ -830,6 +830,18 @@ impl App {
                 subjects: BTreeMap::new(),
             },
         );
+
+        // FR-23: the per-folder rule is *inherited from the installation default at account
+        // creation* — recorded now, so that changing the default later changes what new
+        // accounts start with and leaves this one as it was added. Without a container there
+        // is nowhere to record it, and the account reads the default live instead.
+        //
+        // A refused write is not a refused account: an account with no recorded rule reads the
+        // default, which at this moment is the same rule.
+        let inherited = self.default_notification_rule().as_text();
+        if let Some(container) = self.container.as_mut() {
+            let _ = container.set_account_setting(id, settings::FOLDER_RULES, &inherited);
+        }
         Ok(id)
     }
 
@@ -1222,6 +1234,7 @@ impl App {
                         removed: page.removed,
                         delivered: page.delivered,
                         newest: page.newest.map(|a| a.id),
+                        arrivals: page.arrivals,
                     }
                 })
             })
@@ -1396,6 +1409,11 @@ impl App {
             .get(name)
             .ok_or_else(|| format!("no account named `{name}`"))?
             .id;
+        // FR-23's rule is text with a grammar, and a rule that cannot be read is refused here
+        // rather than stored and quietly read back as the default.
+        if key == settings::FOLDER_RULES {
+            settings::FolderRule::parse(value)?;
+        }
         let container = self
             .container
             .as_mut()
@@ -1834,17 +1852,17 @@ impl App {
                 Ok(outcome) => {
                     report.inserted += outcome.inserted;
                     if outcome.delivered > 0 {
-                        // Read in the held step straight after the write, so that what is
-                        // announced is the row as near as possible to how it arrived.
-                        let newest = outcome
-                            .newest
-                            .and_then(|m| lock.with(|app| app.message_row(m).ok().flatten()))
-                            .flatten();
-                        report.new_mail.push(NewMail {
-                            account: id,
-                            delivered: outcome.delivered,
-                            newest,
-                        });
+                        // One held step straight after the write, so that what is announced is
+                        // the row as near as possible to how it arrived — and so that quiet
+                        // mode, the account's rule and the fire's earlier announcements are
+                        // read together rather than across a gap something could change in.
+                        let announced = &mut report.announced;
+                        if let Some(new) = lock
+                            .with(|app| app.announcement(id, &name, &outcome.arrivals, announced))
+                            .flatten()
+                        {
+                            report.new_mail.push(new);
+                        }
                     }
                     report.synced.push(name);
                 }
@@ -1865,6 +1883,120 @@ impl App {
             .iter()
             .find(|(_, a)| a.id == id)
             .map(|(name, _)| name.clone())
+    }
+
+    /// FR-23's per-folder rule for an account: its own, or — where it has none, or holds text
+    /// that is not a rule — the installation default.
+    ///
+    /// Unreadable text falls back to the default rather than to silence or to everything: the
+    /// default is what the user was last told an account without a rule does, and a stored
+    /// value this build cannot read is closer to "no rule" than to either extreme.
+    #[must_use]
+    pub fn notification_rule(&self, name: &str) -> settings::FolderRule {
+        let own = match self.account_setting(name, settings::FOLDER_RULES) {
+            Ok(settings::Value::Text(text)) => settings::FolderRule::parse(&text).ok().flatten(),
+            _ => None,
+        };
+        own.unwrap_or_else(|| self.default_notification_rule())
+    }
+
+    /// The rule a new account inherits — D-101's *notification defaults for new accounts*.
+    fn default_notification_rule(&self) -> settings::FolderRule {
+        let inbox = !matches!(
+            self.setting("notify.new-mail-in-inbox"),
+            Ok(settings::Value::Flag(false))
+        );
+        settings::FolderRule::installation_default(inbox)
+    }
+
+    /// What FR-23 announces of one account's arrivals in one wheel fire, if anything.
+    ///
+    /// Three filters, in the order that makes the later ones cheapest:
+    ///
+    /// 1. **Quiet mode** announces nothing, and reads nothing else.
+    /// 2. **The account's per-folder rule** drops what arrived in a folder it leaves out. The
+    ///    count was summed across every watched folder, so without this a watched archive's
+    ///    arrivals were announced as though they were the inbox's.
+    /// 3. **Across accounts, the same message is announced once.** An arrival whose D-44
+    ///    fallback digest another account already announced in this fire is dropped. The
+    ///    comparison is the list's FR-7 marker's — the whole digest under its rule version,
+    ///    and never the all-zero digest an envelope-less row carries — and it is legal for
+    ///    the same reason: nothing durable is written and no candidate crosses an account
+    ///    boundary. Only an arrival this account *announces* is recorded, so an account whose
+    ///    rule leaves a folder out does not silence another whose rule includes it.
+    ///
+    /// What survives is counted, and the newest of it is read through the overlay as the list
+    /// reads it. `None` where nothing survives.
+    fn announcement(
+        &self,
+        id: AccountId,
+        name: &str,
+        arrivals: &[sift_sync::ingest::Arrival],
+        announced: &mut BTreeMap<(u32, Vec<u8>), AccountId>,
+    ) -> Option<NewMail> {
+        let quiet = matches!(
+            self.setting("notify.quiet-mode"),
+            Ok(settings::Value::Flag(true))
+        );
+        if quiet {
+            return None;
+        }
+        let rule = self.notification_rule(name);
+        self.announcement_under(&rule, id, name, arrivals, announced)
+    }
+
+    /// [`Self::announcement`]'s second and third filters, under a rule already resolved.
+    fn announcement_under(
+        &self,
+        rule: &settings::FolderRule,
+        id: AccountId,
+        name: &str,
+        arrivals: &[sift_sync::ingest::Arrival],
+        announced: &mut BTreeMap<(u32, Vec<u8>), AccountId>,
+    ) -> Option<NewMail> {
+        let store = &self.accounts.get(name)?.store.store;
+
+        let mut kept: Vec<sift_sync::ingest::Arrival> = Vec::with_capacity(arrivals.len());
+        for arrival in arrivals {
+            let special_use: Option<String> = store
+                .query_row(
+                    "SELECT special_use FROM folder WHERE id = ?1",
+                    [arrival.folder],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            if !rule.admits(arrival.folder, special_use.as_deref()) {
+                continue;
+            }
+            let digest: Option<(u32, Vec<u8>)> = store
+                .query_row(
+                    "SELECT digest_rule_version, fallback_digest FROM message WHERE id = ?1",
+                    [arrival.id.to_bytes().to_vec()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok()
+                .filter(|(_, bytes): &(u32, Vec<u8>)| bytes.iter().any(|b| *b != 0));
+            if let Some(digest) = digest {
+                match announced.get(&digest) {
+                    Some(first) if *first != id => continue,
+                    Some(_) => {}
+                    None => {
+                        announced.insert(digest, id);
+                    }
+                }
+            }
+            kept.push(*arrival);
+        }
+
+        let newest = kept
+            .iter()
+            .max_by_key(|a| (a.received_millis, a.id.as_u128()))?;
+        Some(NewMail {
+            account: id,
+            delivered: kept.len(),
+            newest: self.message_row(newest.id).ok().flatten(),
+        })
     }
 
     /// FR-8 — the user accepted this message's withheld content for this session.
@@ -2089,7 +2221,7 @@ impl Revocation {
 }
 
 /// What one turn of the sync loop did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncReport {
     pub discovered: usize,
     pub inserted: usize,
@@ -2100,6 +2232,9 @@ pub struct SyncReport {
     /// The most recently received of those — what FR-23's notification names and opens.
     /// `None` exactly when `delivered` is zero.
     pub newest: Option<LocalId>,
+    /// Each of those arrivals, with the folder it arrived in — what FR-23's per-folder rules
+    /// and its cross-account duplicate comparison are applied to.
+    pub arrivals: Vec<sift_sync::ingest::Arrival>,
 }
 
 /// D-49's annunciator, resolved per account.
@@ -2305,7 +2440,14 @@ pub struct TickReport {
     /// Carried out of the fire rather than recomputed later, because it cannot be: "delivered
     /// and unread at that moment" is a fact about this turn, and a fire whose announcement is
     /// dropped has nothing afterwards to recover it from.
+    ///
+    /// Already filtered: quiet mode, each account's per-folder rule, and one entry per message
+    /// however many accounts it arrived in.
     pub new_mail: Vec<NewMail>,
+    /// The D-44 digests `new_mail` has announced in this fire, and which account announced
+    /// each — FR-23's cross-account comparison. Held for one fire and no longer, so it is
+    /// bounded by what one fire brings in and writes nothing durable.
+    announced: BTreeMap<(u32, Vec<u8>), AccountId>,
 }
 
 /// One account's new mail from one wheel fire — FR-23.
@@ -2324,6 +2466,323 @@ pub struct NewMail {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sift_sync::ingest::Arrival;
+
+    /// FR-23's filters, over two shape accounts that each hold an inbox (folder 1) and an
+    /// archive (folder 2), with messages written as ingest would leave them.
+    struct Notices {
+        app: App,
+        one: AccountId,
+        two: AccountId,
+    }
+
+    impl Notices {
+        fn new() -> Self {
+            let mut app = App::new();
+            app.add_account("one", "rich").expect("one");
+            app.add_account("two", "rich").expect("two");
+            for name in ["one", "two"] {
+                app.account(name)
+                    .expect("open")
+                    .store
+                    .store
+                    .execute(
+                        "INSERT INTO folder (id, remote_id, special_use, display_name, watched)
+                         VALUES (2, 'ARCHIVE', 'Archive', 'Archive', 1)",
+                        [],
+                    )
+                    .expect("archive");
+            }
+            let one = app.account("one").expect("one").id;
+            let two = app.account("two").expect("two").id;
+            Self { app, one, two }
+        }
+
+        /// A message arrived in `folder`, carrying D-44 digest `digest` (all zero for none).
+        fn arrived(&mut self, name: &str, n: u128, folder: i64, digest: u8) -> Arrival {
+            let id = LocalId::from_u128(n);
+            let received = u64::try_from(n).expect("small") * 100;
+            let account = self.app.account(name).expect("open");
+            insert_message(account, id, &format!("message {n}"), received).expect("insert");
+            account
+                .store
+                .store
+                .execute(
+                    "UPDATE message SET fallback_digest = ?2 WHERE id = ?1",
+                    rusqlite::params![id.to_bytes().to_vec(), vec![digest; 32]],
+                )
+                .expect("digest");
+            Arrival {
+                id,
+                received_millis: received,
+                folder,
+            }
+        }
+
+        fn announce(
+            &self,
+            rule: &settings::FolderRule,
+            name: &str,
+            arrivals: &[Arrival],
+            announced: &mut BTreeMap<(u32, Vec<u8>), AccountId>,
+        ) -> Option<(usize, Option<LocalId>)> {
+            let id = if name == "one" { self.one } else { self.two };
+            self.app
+                .announcement_under(rule, id, name, arrivals, announced)
+                .map(|n| {
+                    assert_eq!(n.account, id);
+                    (n.delivered, n.newest.map(|r| r.id))
+                })
+        }
+    }
+
+    #[test]
+    fn the_default_rule_announces_the_inbox_and_not_a_watched_archive() {
+        // #123: the count was summed across every watched folder, so an archive's arrival was
+        // announced — and could be the one the banner named.
+        let mut n = Notices::new();
+        let inbox = n.arrived("one", 1, 1, 1);
+        let archive = n.arrived("one", 2, 2, 2);
+        let rule = n.app.notification_rule("one");
+        assert_eq!(rule, settings::FolderRule::installation_default(true));
+
+        let mut announced = BTreeMap::new();
+        assert_eq!(
+            n.announce(&rule, "one", &[inbox, archive], &mut announced),
+            Some((1, Some(inbox.id))),
+            "the archive's newer arrival was counted or named"
+        );
+        assert_eq!(
+            n.announce(&rule, "one", &[archive], &mut announced),
+            None,
+            "an account whose only arrival its rule leaves out still has an entry"
+        );
+    }
+
+    #[test]
+    fn a_rule_of_all_or_none_or_one_folder_is_what_is_announced() {
+        let mut n = Notices::new();
+        let inbox = n.arrived("one", 1, 1, 1);
+        let archive = n.arrived("one", 2, 2, 2);
+        let both = [inbox, archive];
+        let rules = [
+            (settings::FolderRule::All, Some((2, Some(archive.id)))),
+            (settings::FolderRule::None, None),
+            (
+                settings::FolderRule::Only(vec![settings::FolderSelector::Folder(2)]),
+                Some((1, Some(archive.id))),
+            ),
+        ];
+        for (rule, expected) in rules {
+            assert_eq!(
+                n.announce(&rule, "one", &both, &mut BTreeMap::new()),
+                expected,
+                "{rule:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_in_two_accounts_is_announced_once_in_one_fire() {
+        // FR-23: across accounts, the same message is announced once, by D-44's digest.
+        let mut n = Notices::new();
+        let rule = settings::FolderRule::All;
+        let first = n.arrived("one", 1, 1, 7);
+        let same = n.arrived("two", 2, 1, 7);
+        let other = n.arrived("two", 3, 1, 8);
+
+        let mut announced = BTreeMap::new();
+        assert_eq!(
+            n.announce(&rule, "one", &[first], &mut announced),
+            Some((1, Some(first.id)))
+        );
+        assert_eq!(
+            n.announce(&rule, "two", &[same], &mut announced),
+            None,
+            "a duplicate of a message another account announced got a banner of its own"
+        );
+        assert_eq!(
+            n.announce(&rule, "two", &[same, other], &mut announced),
+            Some((1, Some(other.id))),
+            "the duplicate was counted, or took the distinct message down with it"
+        );
+    }
+
+    #[test]
+    fn what_is_not_a_duplicate_is_announced_by_both_accounts() {
+        let mut n = Notices::new();
+        let all = settings::FolderRule::All;
+
+        // The all-zero digest an envelope-less row carries stands for no message.
+        let mut announced = BTreeMap::new();
+        let a = n.arrived("one", 1, 1, 0);
+        let b = n.arrived("two", 2, 1, 0);
+        assert!(n.announce(&all, "one", &[a], &mut announced).is_some());
+        assert!(
+            n.announce(&all, "two", &[b], &mut announced).is_some(),
+            "two rows with no digest were taken for one message"
+        );
+
+        // Equal bytes under different rule versions are not comparable — D-104.
+        let mut announced = BTreeMap::new();
+        let c = n.arrived("one", 3, 1, 9);
+        let d = n.arrived("two", 4, 1, 9);
+        n.app
+            .account("two")
+            .expect("open")
+            .store
+            .store
+            .execute(
+                "UPDATE message SET digest_rule_version = 2 WHERE id = ?1",
+                [d.id.to_bytes().to_vec()],
+            )
+            .expect("version");
+        assert!(n.announce(&all, "one", &[c], &mut announced).is_some());
+        assert!(
+            n.announce(&all, "two", &[d], &mut announced).is_some(),
+            "digests under different rule versions were compared"
+        );
+
+        // An account whose rule leaves the message out does not silence one whose rule
+        // includes it.
+        let mut announced = BTreeMap::new();
+        let e = n.arrived("one", 5, 2, 11);
+        let f = n.arrived("two", 6, 1, 11);
+        let inbox = settings::FolderRule::installation_default(true);
+        assert_eq!(n.announce(&inbox, "one", &[e], &mut announced), None);
+        assert_eq!(
+            n.announce(&inbox, "two", &[f], &mut announced),
+            Some((1, Some(f.id))),
+            "a message nobody announced was dropped as a duplicate"
+        );
+    }
+
+    #[test]
+    fn a_rule_that_cannot_be_read_is_refused_rather_than_stored() {
+        let mut app = App::new();
+        app.add_account("one", "rich").expect("one");
+        let refused = app
+            .set_account_setting("one", settings::FOLDER_RULES, "Posteingang")
+            .expect_err("accepted");
+        assert!(refused.contains("Posteingang"), "{refused}");
+    }
+
+    /// A credential store in memory, so a unit test can open a container. The platform's
+    /// would write to the developer's login keychain and prompt for permission.
+    #[derive(Default)]
+    struct Keys(std::sync::Mutex<BTreeMap<(u128, &'static str), String>>);
+
+    impl sift_credentials::store::CredentialStore for Keys {
+        fn write(
+            &self,
+            account: AccountId,
+            item: sift_credentials::store::Item,
+            secret: &str,
+        ) -> Result<(), sift_credentials::store::StoreError> {
+            self.0
+                .lock()
+                .expect("keys")
+                .insert((account.as_u128(), item.name()), secret.to_owned());
+            Ok(())
+        }
+
+        fn read(
+            &self,
+            account: AccountId,
+            item: sift_credentials::store::Item,
+        ) -> Result<String, sift_credentials::store::StoreError> {
+            self.0
+                .lock()
+                .expect("keys")
+                .get(&(account.as_u128(), item.name()))
+                .cloned()
+                .ok_or(sift_credentials::store::StoreError::NotFound)
+        }
+
+        fn delete(
+            &self,
+            account: AccountId,
+            item: sift_credentials::store::Item,
+        ) -> Result<(), sift_credentials::store::StoreError> {
+            self.0
+                .lock()
+                .expect("keys")
+                .remove(&(account.as_u128(), item.name()));
+            Ok(())
+        }
+    }
+
+    /// A container directory the test owns, removed on drop whether or not it passed (#137).
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn an_account_reads_its_recorded_rule_or_else_the_installation_default() {
+        // Declared first so it drops last, after the container that holds its registry open.
+        let scratch = Scratch(
+            std::env::temp_dir().join(format!("sift-app-notification-rule-{}", std::process::id())),
+        );
+        let root = &scratch.0;
+        let _ = std::fs::remove_dir_all(root);
+        let mut n = Notices::new();
+        // The accounts were opened in scratch mode, because `create_account` reaches the
+        // platform credential store when a container is open. The container is attached
+        // after, and each open account takes the identity the registry issued it, which is
+        // all the setting reads under test key on.
+        let mut container = container::Container::open(root, &Keys::default()).expect("container");
+        for name in ["one", "two"] {
+            let registered = container.register("rich", name).expect("register");
+            n.app.accounts.get_mut(name).expect("open").id = registered.id;
+        }
+        let one = n.app.accounts["one"].id;
+        let two = n.app.accounts["two"].id;
+        container
+            .set_account_setting(one, settings::FOLDER_RULES, "archive")
+            .expect("one's rule");
+        // Written past `App::set_account_setting`'s grammar check, as a value recorded by a
+        // build that knew a token this one does not would be.
+        container
+            .set_account_setting(two, settings::FOLDER_RULES, "starred")
+            .expect("two's rule");
+        n.app.container = Some(container);
+
+        let archive =
+            settings::FolderRule::Only(vec![settings::FolderSelector::SpecialUse("Archive")]);
+        assert_eq!(
+            n.app.notification_rule("one"),
+            archive,
+            "the recorded rule was not read"
+        );
+        assert_eq!(
+            n.app.notification_rule("two"),
+            settings::FolderRule::installation_default(true),
+            "unreadable text did not fall back to the installation default"
+        );
+
+        // D-101's default turned off is `none`, not `all` — for an account with unreadable
+        // text and for one with none recorded — and an account's own rule still wins.
+        n.app
+            .set_setting("notify.new-mail-in-inbox", "false")
+            .expect("default off");
+        assert_eq!(
+            n.app.notification_rule("two"),
+            settings::FolderRule::None,
+            "the default turned off was not `none`"
+        );
+        n.app
+            .container
+            .as_mut()
+            .expect("container")
+            .set_account_setting(two, settings::FOLDER_RULES, "")
+            .expect("cleared");
+        assert_eq!(n.app.notification_rule("two"), settings::FolderRule::None);
+        assert_eq!(n.app.notification_rule("one"), archive);
+    }
 
     #[test]
     fn a_revocation_never_prints_the_token_it_carries() {
