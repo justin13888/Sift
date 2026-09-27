@@ -162,24 +162,11 @@ pub unsafe extern "C" fn sift_initialize(
                 app.open_container(std::path::Path::new(root))
                     .map_err(|_| ())?;
             } else {
-                // A counter as well as the clock. `as_nanos` reports at whatever resolution
-                // the platform has, and two initializations in one process can and do read
-                // the same value — which gives two sessions one directory, two accounts one
-                // set of files, and a failure about one run in ten. The same mistake was
-                // made and fixed in the test scratch path; the clock is here for readable
-                // names and the counter is what makes them unique.
-                use std::sync::atomic::{AtomicU64, Ordering};
-                static NEXT: AtomicU64 = AtomicU64::new(0);
-                let unique = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos());
-                let n = NEXT.fetch_add(1, Ordering::Relaxed);
-                let scratch = std::env::temp_dir().join(format!(
-                    "sift-ephemeral-{}-{unique}-{n}",
-                    std::process::id()
-                ));
-                std::fs::create_dir_all(&scratch).map_err(|_| ())?;
-                app.root = Some(scratch);
+                // **Owned by the `App`, and removed with it** — #137. This used to make a
+                // directory nothing ever removed, so every ephemeral session left one behind
+                // and the temporary directory grew without bound until the disk filled. The
+                // `App` now holds it and deletes it when [`sift_shutdown`] frees the layer.
+                app.open_scratch("sift-ephemeral").map_err(|_| ())?;
             }
 
             // **Shared, not boxed** — #49. The worker can be inside a provider round trip
@@ -3150,11 +3137,15 @@ mod tests {
     /// A schedule that drops the ticket on the floor, as a shell whose window closed does.
     extern "C" fn drop_it(_: *mut c_void, _: crate::layer::SiftRun, _: u64) {}
 
-    /// A scratch container, leaked so it can be a `'static` string the way a bundle's own
-    /// path is. Only a test needs this; a shell's container path outlives the process.
-    fn scratch_str() -> &'static str {
-        let d = scratch();
-        Box::leak(d.to_str().expect("utf-8").to_owned().into_boxed_str())
+    /// The container root every test hands [`sift_initialize`].
+    ///
+    /// **Never created, and never read.** Every test runs ephemeral, and an ephemeral session
+    /// ignores the root it is given and makes a scratch directory of its own, which the `App`
+    /// owns and removes. This used to create a real directory for each call — one nothing
+    /// used and nothing removed, which is half of #137. It only has to be non-empty, because
+    /// an empty root is refused.
+    fn ignored_root() -> &'static str {
+        "/nonexistent/sift-abi-ignored-container"
     }
 
     /// The tests drive the boundary without a credential store: opening a real container
@@ -3164,7 +3155,23 @@ mod tests {
         unsafe { std::env::set_var("SIFT_EPHEMERAL", "1") };
     }
 
-    fn scratch() -> std::path::PathBuf {
+    /// A temporary directory removed when dropped, on success and on panic alike — #137.
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    fn scratch() -> Scratch {
         // A clock is **not** a unique identifier. `as_nanos` reports at whatever resolution the
         // platform has, and two of these tests running in parallel on the same machine can and
         // do read the same value — which gives two layers one container, two accounts one set
@@ -3178,7 +3185,7 @@ mod tests {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let d = std::env::temp_dir().join(format!("sift-abi-{}-{unique}-{n}", std::process::id()));
         std::fs::create_dir_all(&d).expect("scratch");
-        d
+        Scratch(d)
     }
 
     fn start(schedule: crate::layer::SiftSchedule, root: &'static str) -> *mut SiftApp {
@@ -3236,7 +3243,7 @@ mod tests {
         let schemes: &'static str = Box::leak(schemes.to_owned().into_boxed_str());
         let mut app: *mut SiftApp = core::ptr::null_mut();
         let init = SiftInit {
-            container_root: SiftStr::new(scratch_str()),
+            container_root: SiftStr::new(ignored_root()),
             schedule: drop_it,
             schedule_context: core::ptr::null_mut(),
             arm_timer: never_fires,
@@ -3455,7 +3462,7 @@ mod tests {
     #[test]
     fn initialization_returns_a_status_rather_than_a_sentinel() {
         // No entry point encodes failure in its return value's domain.
-        let app = start(drop_it, scratch_str());
+        let app = start(drop_it, ignored_root());
         assert_eq!(unsafe { sift_shutdown(app) }, SiftStatus::Ok);
     }
 
@@ -3489,7 +3496,7 @@ mod tests {
     /// unfalsifiably "accepted".
     #[test]
     fn a_selection_action_with_nothing_selected_is_refused_rather_than_accepted() {
-        let app = start(drop_it, scratch_str());
+        let app = start(drop_it, ignored_root());
         assert_eq!(do_action(app, "message.archive"), SiftStatus::Failed);
         let _ = unsafe { sift_shutdown(app) };
     }
@@ -3498,7 +3505,7 @@ mod tests {
     /// enqueued and applied optimistically before any round trip.
     #[test]
     fn invoking_an_action_enqueues_a_gesture_and_hides_the_row_before_any_round_trip() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         assert_eq!(
             unsafe { sift_select(app, &raw const message, 1) },
@@ -3570,7 +3577,7 @@ mod tests {
     /// happened — so an unconfirmed invocation must fail rather than enqueue.
     #[test]
     fn permanent_deletion_is_refused_without_confirmation() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         let _ = unsafe { sift_select(app, &raw const message, 1) };
         // The replayed provider declares it cannot permanently delete at all, which is the
@@ -3587,7 +3594,7 @@ mod tests {
     /// makes closing a window and quitting different acts, so this is a fact the shell owns.
     #[test]
     fn a_window_scoped_action_waits_for_the_shell_to_say_there_is_a_window() {
-        let app = start(drop_it, scratch_str());
+        let app = start(drop_it, ignored_root());
         let id = "navigate.unified-inbox";
         let mut available = 1u8;
         let _ = unsafe { sift_action_available(app, id.as_ptr(), id.len(), &raw mut available) };
@@ -3610,7 +3617,7 @@ mod tests {
         // D-70's teardown is bounded and waits for nothing. A shell whose window closed
         // between the post and the turn of its loop leaves a ticket behind, and NFR-12
         // finds a leak of those in fourteen days.
-        let app = start(drop_it, scratch_str());
+        let app = start(drop_it, ignored_root());
         let mut observation = SiftObservation::NONE;
         let status = unsafe {
             sift_observe_messages(
@@ -3629,7 +3636,7 @@ mod tests {
 
     #[test]
     fn cancelling_an_observation_the_layer_does_not_have_is_a_failure() {
-        let app = start(drop_it, scratch_str());
+        let app = start(drop_it, ignored_root());
         assert_eq!(
             unsafe { sift_cancel_observation(app, SiftObservation(9_999)) },
             SiftStatus::Failed
@@ -3654,7 +3661,7 @@ mod tests {
         }
 
         SEEN.store(0, Ordering::SeqCst);
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let mut observation = SiftObservation::NONE;
         let _ = unsafe {
             sift_observe_messages(
@@ -3761,7 +3768,7 @@ mod tests {
 
     #[test]
     fn observation_and_cancellation_round_trip() {
-        let app = start(drop_it, scratch_str());
+        let app = start(drop_it, ignored_root());
         let mut observation = SiftObservation::NONE;
         let status = unsafe {
             sift_observe_messages(
@@ -3935,7 +3942,7 @@ mod tests {
         // exactly where the preference is honoured: dark changes the body, and the preference
         // then changes it again. Light with the preference set is light — it is a threshold,
         // not a transform of its own.
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = ordinary_message(app);
 
         let light = text(open_as(app, message, 0, 0).html);
@@ -3963,7 +3970,7 @@ mod tests {
 
     #[test]
     fn a_documents_counts_distinguish_all_withheld_from_some_withheld() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         let document = open(app, message);
 
@@ -3980,7 +3987,7 @@ mod tests {
 
     #[test]
     fn the_withheld_disclosure_names_the_shed_rather_than_a_rule_that_never_ran() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         let document = open(app, message);
         let token = text(document.token);
@@ -4008,7 +4015,7 @@ mod tests {
     /// to every sender, which is the opposite of what the button says it does.
     #[test]
     fn the_durable_allowance_is_not_offered_when_there_is_nothing_to_key_it_on() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         assert_eq!(open(app, message).may_always_allow, 0);
         let _ = unsafe { sift_shutdown(app) };
@@ -4029,7 +4036,7 @@ mod tests {
     /// neither, are asserted in `sift-broker`, at the layer that decides them.
     #[test]
     fn the_consent_call_crosses_for_a_live_document() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         let document = open(app, message);
         let token = text(document.token);
@@ -4054,7 +4061,7 @@ mod tests {
     /// that offered it regardless must not be able to make it happen.
     #[test]
     fn a_durable_allowance_is_refused_where_nothing_authenticated_the_sender() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         let document = open(app, message);
         assert_eq!(document.may_always_allow, 0, "the fixture changed");
@@ -4074,7 +4081,7 @@ mod tests {
     /// document that still blocks it.
     #[test]
     fn allowing_an_unknown_token_fails() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let bogus = "not-a-token";
         assert_eq!(
             unsafe { sift_allow_remote_content(app, bogus.as_ptr(), bogus.len(), 0) },
@@ -4096,7 +4103,7 @@ mod tests {
         let mut callbacks = callbacks();
         callbacks.destroy_every_window = count_destroy_critical;
         let init = SiftInit {
-            container_root: SiftStr::new(scratch_str()),
+            container_root: SiftStr::new(ignored_root()),
             schedule: run_inline,
             schedule_context: core::ptr::null_mut(),
             arm_timer: never_fires,
@@ -4146,7 +4153,7 @@ mod tests {
         let mut callbacks = callbacks();
         callbacks.destroy_every_window = count_destroy_unknown;
         let init = SiftInit {
-            container_root: SiftStr::new(scratch_str()),
+            container_root: SiftStr::new(ignored_root()),
             schedule: run_inline,
             schedule_context: core::ptr::null_mut(),
             arm_timer: never_fires,
@@ -4168,7 +4175,7 @@ mod tests {
 
     #[test]
     fn a_link_crosses_with_its_wrapper_and_its_real_destination() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         let document = open(app, message);
         let token = text(document.token);
@@ -4214,7 +4221,7 @@ mod tests {
     /// boundary can be made to issue the request.
     #[test]
     fn the_unsubscribe_destination_crosses_and_says_it_needs_a_mail_handler() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         let document = open(app, message);
         assert_eq!(document.has_unsubscribe, 1);
@@ -4239,7 +4246,7 @@ mod tests {
     /// reading them. A read after the close must fail rather than hand back a dangling slice.
     #[test]
     fn closing_a_document_takes_its_rows_with_it() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         let token = text(open(app, message).token);
 
@@ -4260,7 +4267,7 @@ mod tests {
     /// on is `.exe`.
     #[test]
     fn an_attachment_crosses_with_the_warning_a_type_check_would_have_missed() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
 
         let mut rows = SiftRows::empty();
@@ -4292,7 +4299,7 @@ mod tests {
     #[test]
     fn planning_a_save_writes_nothing_and_naming_the_plan_is_what_writes() {
         let directory = scratch();
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         let part = "2";
         let path = directory.to_str().expect("utf-8");
@@ -4321,7 +4328,7 @@ mod tests {
         assert!(shown.ends_with("invoicefdp.exe"), "{shown}");
         assert_eq!(plan.renamed, 1, "the name was derived, and it says so");
         assert_eq!(
-            std::fs::read_dir(&directory).expect("readable").count(),
+            std::fs::read_dir(&*directory).expect("readable").count(),
             0,
             "planning wrote a file"
         );
@@ -4350,14 +4357,13 @@ mod tests {
             SiftStatus::Failed
         );
         let _ = unsafe { sift_shutdown(app) };
-        std::fs::remove_dir_all(&directory).ok();
     }
 
     /// FR-34's queue, across the boundary — and the sentence a person opens the runtime panel
     /// to read: everything is `Pending`, so nothing has been sent.
     #[test]
     fn the_queue_shows_a_watched_accounts_triage_as_recorded_and_unsent() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         let _ = unsafe { sift_select(app, &raw const message, 1) };
         assert_eq!(do_action(app, "message.archive"), SiftStatus::Ok);
@@ -4386,7 +4392,7 @@ mod tests {
     /// tagging exists to measure.
     #[test]
     fn memory_is_reported_per_subsystem_and_the_total_is_reported_beside_it() {
-        let app = start(drop_it, scratch_str());
+        let app = start(drop_it, ignored_root());
         let mut rows = SiftRows::empty();
         assert_eq!(unsafe { sift_memory(app, &raw mut rows) }, SiftStatus::Ok);
         // SAFETY: the table is held by the layer.
@@ -4399,7 +4405,7 @@ mod tests {
     /// FR-33 item 1: which stages ran, for a message that is open.
     #[test]
     fn the_debug_view_can_read_which_stages_ran_over_an_open_document() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         let token = text(open(app, message).token);
 
@@ -4421,7 +4427,7 @@ mod tests {
     /// FR-20's operators, executed, with the two things a shell must show beside the results.
     #[test]
     fn a_search_carries_how_it_was_read_and_what_it_could_not_answer() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let _ = hostile_message(app);
 
         let query = "from:someone has:attachment";
@@ -4463,7 +4469,7 @@ mod tests {
     /// plausible mistake for `from:alice`, and the two produce very different result sets.
     #[test]
     fn an_operator_this_build_does_not_know_is_read_as_text_and_reported_as_such() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let _ = hostile_message(app);
         let query = "form:alice";
         let mut found = SiftSearch {
@@ -4492,7 +4498,7 @@ mod tests {
     /// rather than inferring it from the absence of server results.
     #[test]
     fn a_search_says_how_many_providers_its_server_half_would_ask() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let _ = hostile_message(app);
         let query = "receipt";
         let mut found = SiftSearch {
@@ -4521,7 +4527,7 @@ mod tests {
 
     #[test]
     fn the_account_list_names_what_a_shell_must_name_to_reach_it() {
-        let app = start(drop_it, scratch_str());
+        let app = start(drop_it, ignored_root());
         let name = "mail";
         let mut id = SiftId::from_u128(0);
         assert_eq!(
@@ -4556,7 +4562,7 @@ mod tests {
 
     #[test]
     fn an_account_that_was_never_added_is_not_listed() {
-        let app = start(drop_it, scratch_str());
+        let app = start(drop_it, ignored_root());
         let mut rows = SiftRows::<SiftAccount<'static>>::empty();
         assert_eq!(unsafe { sift_accounts(app, &raw mut rows) }, SiftStatus::Ok);
         assert_eq!(
@@ -4606,7 +4612,7 @@ mod tests {
     /// tests; this layer runs without one, because reaching the login keychain would prompt.
     #[test]
     fn a_removed_account_is_gone_from_every_surface_and_from_the_disk() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         let other = "other";
         let mut kept = SiftId::from_u128(0);
@@ -4713,7 +4719,7 @@ mod tests {
     /// real mailbox does — including the one step an account that is only watched skips.
     #[test]
     fn a_watched_account_issues_nothing_and_says_how_much_it_is_holding() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let name = "mail";
         let message = hostile_message(app);
 
@@ -4771,7 +4777,7 @@ mod tests {
 
     #[test]
     fn undo_reverses_the_gesture_the_register_could_only_report() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
         assert_eq!(
             unsafe { sift_select(app, &raw const message, 1) },
@@ -4830,7 +4836,7 @@ mod tests {
     /// agreed the identifiers existed. Only availability disagreed, with nobody.
     #[test]
     fn opening_a_message_is_what_makes_the_open_message_scope_true() {
-        let app = start(run_inline, scratch_str());
+        let app = start(run_inline, ignored_root());
         let message = hostile_message(app);
 
         let mut available: u8 = 1;
@@ -4908,7 +4914,7 @@ mod tests {
         let mut callbacks = callbacks();
         callbacks.account_condition_changed = note;
         let init = SiftInit {
-            container_root: SiftStr::new(scratch_str()),
+            container_root: SiftStr::new(ignored_root()),
             schedule: run_inline,
             schedule_context: core::ptr::null_mut(),
             arm_timer: never_fires,
@@ -5004,7 +5010,7 @@ mod tests {
         callbacks.new_mail = record_new_mail;
         let mut app: *mut SiftApp = core::ptr::null_mut();
         let init = SiftInit {
-            container_root: SiftStr::new(scratch_str()),
+            container_root: SiftStr::new(ignored_root()),
             schedule: run_inline,
             schedule_context: core::ptr::null_mut(),
             arm_timer: never_fires,
@@ -5122,7 +5128,7 @@ mod tests {
 
         let mut app: *mut SiftApp = core::ptr::null_mut();
         let init = SiftInit {
-            container_root: SiftStr::new(scratch_str()),
+            container_root: SiftStr::new(ignored_root()),
             schedule: drop_it,
             schedule_context: core::ptr::null_mut(),
             arm_timer: record_arm,
@@ -5204,7 +5210,7 @@ mod tests {
         ephemeral();
         let mut app: *mut SiftApp = core::ptr::null_mut();
         let init = SiftInit {
-            container_root: SiftStr::new(scratch_str()),
+            container_root: SiftStr::new(ignored_root()),
             schedule: count_post,
             schedule_context: core::ptr::from_ref(asked).cast_mut().cast(),
             arm_timer: keep_timer,

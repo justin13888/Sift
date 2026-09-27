@@ -80,9 +80,8 @@ postinstall = "hk install --mise || true"
 description = "Build the whole workspace"
 run = "cargo build --workspace"
 
-[tasks.test]
-description = "Run the tests (whole workspace; matches CI)"
-run = "cargo test --workspace"
+# `test` is a script (mise-tasks/test) rather than a line: it runs the workspace's tests under a
+# temporary directory of its own and fails if any test left a scratch directory in it (#137).
 
 [tasks.test-fault]
 description = "Test the store with fault injection on (NFR-16, NFR-17, FR-18)"

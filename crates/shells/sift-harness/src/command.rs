@@ -1396,13 +1396,29 @@ mod tests {
         session
     }
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
+    /// A temporary directory, removed when dropped — on success and on panic alike (#137).
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    fn scratch(tag: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!(
             "sift-harness-relevance-{tag}-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     /// #24: the protocol's failed search — the sought message found some other way and named by
@@ -1440,7 +1456,6 @@ mod tests {
         assert_eq!(recorded.len(), 1, "{written}");
         assert_eq!(recorded[0].query, "where is that thing");
         assert!(recorded[0].remote_id.is_some(), "{written}");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1471,7 +1486,6 @@ mod tests {
         assert!(word.contains("is not a result number"), "{word}");
 
         assert!(!file.exists(), "a refused judgement was written");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `account authorize`'s optional kind: an invented one is refused, naming the kinds there

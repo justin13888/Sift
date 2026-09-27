@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#MISE description="Run the tests (whole workspace; matches CI), and fail if any left a sift-* scratch directory behind"
+#
+# #137. Every test that needs a directory makes one under the system's temporary directory, and
+# for a long time none of them removed it: each run added directories and none took them away,
+# until the disk filled and every build after it failed with ENOSPC. The helpers now own their
+# directories and remove them when dropped. This is what keeps it that way — a helper that
+# forgets fails the suite here, instead of being discovered by the disk filling again.
+#
+# The tests run with TMPDIR pointed at a directory of this run's own, which `std::env::temp_dir`
+# honours. That is what makes the check exact: what is left in it was left by this run and by
+# nothing else, so a concurrent build or a second checkout cannot fail it, and it cannot miss a
+# leak by looking in the wrong place. The directory is removed on the way out whatever happened,
+# so the gate itself leaves nothing behind either.
+#
+# Arguments are passed through to `cargo test`.
+set -euo pipefail
+
+cd "${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
+
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/sift-test-run.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+
+TMPDIR="$scratch" cargo test --workspace "$@"
+
+leaked=$(find "$scratch" -mindepth 1 -maxdepth 1 -name 'sift-*' | sort)
+if [[ -n "$leaked" ]]; then
+    echo "test: the run passed, but left $(wc -l <<<"$leaked" | tr -d ' ') scratch path(s) behind (#137):" >&2
+    sed "s|^$scratch/|  |" <<<"$leaked" >&2
+    echo "test: give the helper that made each an owner that removes it on drop" >&2
+    exit 1
+fi
+echo "test: no scratch directory survived the run"
