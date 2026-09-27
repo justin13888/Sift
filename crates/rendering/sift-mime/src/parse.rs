@@ -94,7 +94,7 @@ impl Message {
 ///
 /// Every error degrades to the raw source view under FR-9. Nothing here truncates.
 pub fn parse(raw: &[u8]) -> Result<Message, ParseError> {
-    let (headers, body_start) = parse_header_block(raw, 0)?;
+    let (headers, body_start) = parse_header_block(raw, 0, raw.len())?;
     let mut budget = Budget { parts: 0 };
     let root = parse_part(raw, &headers, body_start, raw.len(), 0, &mut budget)?;
     Ok(Message { headers, root })
@@ -104,10 +104,21 @@ struct Budget {
     parts: u64,
 }
 
-/// Where the header block ends: the first blank line. A message with no blank line is all
-/// headers, which is legal and empty.
-fn parse_header_block(raw: &[u8], from: usize) -> Result<(Vec<Header>, usize), ParseError> {
-    let end = find_blank_line(raw, from).unwrap_or(raw.len());
+/// Where the header block ends: the first blank line **within the part**, `from..to`. A part
+/// with no blank line is all headers, which is legal and empty.
+///
+/// Bounded by the part's own end rather than the message's. Searching past it let a part with
+/// no blank line of its own take the *following* parts' headers as its own, and a nested
+/// message's body then started beyond the end of the part that contained it — a range stage 2
+/// cannot slice (found by NFR-40's fuzzing).
+fn parse_header_block(
+    raw: &[u8],
+    from: usize,
+    to: usize,
+) -> Result<(Vec<Header>, usize), ParseError> {
+    let from = from.min(raw.len());
+    let to = to.min(raw.len()).max(from);
+    let end = find_blank_line(raw, from, to).unwrap_or(to);
     if end.saturating_sub(from) as u64 > L4_HEADER_BLOCK_BYTES {
         return Err(ParseError::HeaderBlockTooLarge);
     }
@@ -145,7 +156,7 @@ fn parse_header_block(raw: &[u8], from: usize) -> Result<(Vec<Header>, usize), P
         .collect();
 
     // Step past the blank line itself.
-    let body = skip_blank_line(raw, end);
+    let body = skip_blank_line(raw, end, to);
     Ok((headers, body))
 }
 
@@ -202,7 +213,7 @@ fn parse_part(
     } else if part.media_type == "message" && part.media_subtype == "rfc822" {
         // A nested message. This is the construction L-3 exists for: each level is ordinary
         // and thirty-two of them are not.
-        let (inner_headers, inner_body) = parse_header_block(raw, body_start)?;
+        let (inner_headers, inner_body) = parse_header_block(raw, body_start, body_end)?;
         part.children.push(parse_part(
             raw,
             &inner_headers,
@@ -256,8 +267,8 @@ fn split_multipart(
             if let Some(start) = open.take() {
                 // The part ends before the CRLF that precedes this delimiter.
                 let end = trim_trailing_newline(raw, start, cursor);
-                let (headers, body) = parse_header_block(raw, start)?;
-                children.push((body.min(end), end, headers));
+                let (headers, body) = parse_header_block(raw, start, end)?;
+                children.push((body, end, headers));
             }
             if trimmed == close {
                 return Ok(children);
@@ -274,23 +285,24 @@ fn split_multipart(
     // the end, because discarding a part the user can see in the raw view would be a lie of
     // omission rather than safety.
     if let Some(start) = open {
-        let (headers, body) = parse_header_block(raw, start)?;
-        children.push((body.min(to), to, headers));
+        let (headers, body) = parse_header_block(raw, start, to)?;
+        children.push((body, to, headers));
     }
     Ok(children)
 }
 
 // --- byte helpers, all bounds-checked so hostile input cannot walk off the end ---
 
-fn find_blank_line(raw: &[u8], from: usize) -> Option<usize> {
+fn find_blank_line(raw: &[u8], from: usize, to: usize) -> Option<usize> {
+    let to = to.min(raw.len());
     let mut i = from;
-    while i < raw.len() {
+    while i < to {
         if raw[i] == b'\n' {
             let next = i + 1;
-            if next < raw.len() && raw[next] == b'\n' {
+            if next < to && raw[next] == b'\n' {
                 return Some(i);
             }
-            if next + 1 < raw.len() && raw[next] == b'\r' && raw[next + 1] == b'\n' {
+            if next + 1 < to && raw[next] == b'\r' && raw[next + 1] == b'\n' {
                 return Some(i);
             }
         }
@@ -299,10 +311,11 @@ fn find_blank_line(raw: &[u8], from: usize) -> Option<usize> {
     None
 }
 
-fn skip_blank_line(raw: &[u8], end: usize) -> usize {
+fn skip_blank_line(raw: &[u8], end: usize, to: usize) -> usize {
+    let to = to.min(raw.len());
     let mut i = end;
     let mut newlines = 0;
-    while i < raw.len() && newlines < 2 {
+    while i < to && newlines < 2 {
         if raw[i] == b'\n' {
             newlines += 1;
         }
@@ -383,6 +396,32 @@ mod tests {
         let m = parse(raw).expect("parses");
         assert_eq!(m.header("subject"), Some("a very long subject"));
         assert_eq!(m.header("from"), Some("x@y.test"));
+    }
+
+    #[test]
+    fn a_part_without_a_blank_line_does_not_take_the_next_parts_headers() {
+        // Found by NFR-40's fuzzing, minimized. The first part has no blank line of its own,
+        // so its header search used to run on past its delimiter and claim the second part's
+        // `message/rfc822` as its type; the nested message's body then began beyond the end
+        // of the part holding it, which is not a range anything downstream can slice.
+        let raw = b"Content-Type: multipart/; boundary=\"mix\"\r\n\r\n\
+                    --mix\r\n\nrw\n--mix\r\nContent-Type: message/rfc822";
+        let m = parse(raw).expect("parses");
+        for part in m.root.walk() {
+            assert!(
+                part.body.start <= part.body.end && part.body.end <= raw.len(),
+                "{} body {:?} is not a range within the message",
+                part.content_type(),
+                part.body,
+            );
+        }
+        assert_eq!(m.root.children.len(), 2);
+        assert_eq!(
+            m.root.children[0].content_type(),
+            "text/plain",
+            "the first part took a type that is not in it"
+        );
+        assert_eq!(m.root.children[1].content_type(), "message/rfc822");
     }
 
     #[test]
