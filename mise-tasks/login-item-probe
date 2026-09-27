@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#MISE description="P0 spike (D-33, D-45) — the registration half of sandboxed login-item residency, on the bundle that ships."
+#
+# Builds the macOS shell, then runs the bundle's own `--probe-login-item` mode: register the
+# application itself as a per-user login item, read back the status the platform recorded, and
+# restore the state it found. Exits non-zero if the process is not sandboxed or the platform
+# refuses the registration. `LoginItem.probe` in `ApplicationShell.swift` says what it can and
+# cannot observe — a login starting the process needs a login session, which no probe running
+# inside one can end.
+#
+# Not part of `mise run ci`: registering a login item changes the machine's background-item
+# list (restored before exit) and the platform tells the user it happened, which is not what a
+# gate run on every change should do.
+set -euo pipefail
+
+cd "${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
+
+[[ "$(uname -s)" == "Darwin" ]] || {
+    echo "login-item-probe: this is the macOS half. The Linux mechanism is the portal's autostart request, which the GTK shell does not make yet." >&2
+    exit 1
+}
+
+mise run macos --release
+
+# The exported Developer ID bundle, as `accessibility-probe` explains: the sandboxed, hardened
+# binary that ships, and never an ad-hoc bundle, which cannot launch.
+binary="shells/macos/.build/export/Sift.app/Contents/MacOS/Sift"
+[[ -x "$binary" ]] || {
+    echo "login-item-probe: no exported bundle at $binary." >&2
+    echo "       An ad-hoc build (--ad-hoc, or CI=true) exports nothing and cannot launch;" >&2
+    echo "       the probe needs a team-signed Release build." >&2
+    exit 1
+}
+exec "$binary" \
+    --probe-login-item
