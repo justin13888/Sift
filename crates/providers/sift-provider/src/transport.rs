@@ -196,8 +196,9 @@ pub struct Replay {
     ///
     /// Kept apart from the record, because which fixture answers — the *n*th page, the *n*th
     /// fault — depends on it whether or not anything is recorded. One entry per distinct
-    /// exchange, and an exchange the fixtures do not know fails loudly, so it is bounded by
-    /// the corpus rather than by how long the replay runs.
+    /// exchange that has a response or a fault; an exchange the fixtures do not know fails
+    /// loudly and gets no entry, so it is bounded by the corpus rather than by how long the
+    /// replay runs or what it is asked for.
     seen: BTreeMap<Exchange, usize>,
     /// Whether `performed`, `headers` and `bodies` are kept.
     ///
@@ -255,7 +256,8 @@ impl Replay {
         self
     }
 
-    /// How many times an exchange has been performed.
+    /// How many times an exchange the fixtures know has been performed. An exchange with
+    /// no response and no fault is never counted — it failed with `NoFixture` — so it is 0.
     #[must_use]
     pub fn count_of(&self, verb: &str, target: &str) -> usize {
         self.seen
@@ -283,15 +285,26 @@ impl Transport for Replay {
         // Counted by lookup rather than by scanning the record: a scan made every request
         // cost time linear in the requests before it, which is why the soak's round rate
         // fell the longer it ran.
+        //
+        // Only an exchange the fixtures know — a response or a fault — gets an entry, so the
+        // map is bounded by the fixtures however many unknown exchanges are asked for. An
+        // unknown one fails below with `NoFixture` and is never counted.
+        let known = self.responses.contains_key(exchange)
+            || self
+                .faults
+                .range((exchange.clone(), 0)..=(exchange.clone(), usize::MAX))
+                .next()
+                .is_some();
         let seen = match self.seen.get_mut(exchange) {
             Some(n) => {
                 *n += 1;
                 *n - 1
             }
-            None => {
+            None if known => {
                 self.seen.insert(exchange.clone(), 1);
                 0
             }
+            None => 0,
         };
         if !self.unrecorded {
             self.performed.push(exchange.clone());
@@ -407,6 +420,36 @@ mod tests {
         assert!(r.headers.is_empty());
         assert!(r.bodies.is_empty());
         assert_eq!(r.seen.len(), 1, "one entry per distinct exchange");
+    }
+
+    #[test]
+    fn an_exchange_the_fixtures_do_not_know_is_never_counted() {
+        // #89: `seen` is bounded by the fixtures only if an unknown exchange adds nothing.
+        let mut r = Replay::new().unrecorded();
+        r.on("GET", "/known", b"ok")
+            .fail_nth("GET", "/fault-only", 0, TransportError::Transient);
+        for i in 0..100 {
+            assert!(matches!(
+                r.exchange(&Request::new("GET", &format!("/unknown/{i}"))),
+                Err(TransportError::NoFixture(_))
+            ));
+        }
+        assert!(matches!(
+            r.exchange(&Request::new("GET", "/fault-only")),
+            Err(TransportError::Transient)
+        ));
+        assert!(matches!(
+            r.exchange(&Request::new("GET", "/fault-only")),
+            Err(TransportError::NoFixture(_))
+        ));
+        assert!(r.exchange(&Request::new("GET", "/known")).is_ok());
+        assert_eq!(r.count_of("GET", "/unknown/0"), 0);
+        assert_eq!(r.count_of("GET", "/fault-only"), 2);
+        assert_eq!(
+            r.seen.len(),
+            2,
+            "only the exchanges with a response or a fault"
+        );
     }
 
     #[test]
