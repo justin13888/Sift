@@ -6,8 +6,8 @@
 //!   L-7, L-8), and the message falls back to FR-9's raw view.
 //! - **It is accepted, and the output is clean.** [`audit`] of the output finds nothing an
 //!   invariant forbids in the tree **as the engine will build it**, and the output is
-//!   parse-stable (I8): [`check_parse_stability`] holds, unless a bound refused the input on
-//!   either pass.
+//!   parse-stable (I8): what `check_parse_stability` asserts holds — sanitizing the output
+//!   again changes nothing — unless a bound refuses the output.
 //!
 //! A panic anywhere is a finding in its own right (NFR-19): libFuzzer reports it as a crash.
 //! Every finding is minimized and admitted to `fixtures/mxss/vectors.txt` as a permanent
@@ -21,7 +21,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use sift_sanitize::audit::audit;
-use sift_sanitize::sanitize::{check_parse_stability, sanitize};
+use sift_sanitize::sanitize::sanitize;
 
 fuzz_target!(|data: &[u8]| {
     let html = String::from_utf8_lossy(data);
@@ -39,12 +39,16 @@ fuzz_target!(|data: &[u8]| {
         once.html,
     );
 
-    // I8. A bound refusing the second pass is the same raw-view outcome as refusing the first.
-    if let Ok(stable) = check_parse_stability(&html) {
+    // I8, as `check_parse_stability` states it — without sanitizing the input a second time,
+    // which would halve the executions a bounded run reaches. A bound refusing the output is
+    // the same raw-view outcome as refusing the input.
+    if let Ok(twice) = sanitize(&once.html) {
         assert!(
-            stable,
-            "I8: the sanitized output reparses into a different document\noutput: {:?}",
+            twice.html == once.html,
+            "I8: the sanitized output reparses into a different document\n\
+             output: {:?}\nagain:  {:?}",
             once.html,
+            twice.html,
         );
     }
 });
