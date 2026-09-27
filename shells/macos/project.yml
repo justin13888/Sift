@@ -75,22 +75,44 @@ settings:
 
     # `cargo` builds one architecture, so the project builds the one it has. D-46's universal
     # artefact is not addressed here and is not addressed anywhere else yet either.
-    ONLY_ACTIVE_ARCH: YES
-
-    # **Ad-hoc, and deliberately.** `docs/product/platform-baseline.md` records the team
-    # identifier as *outstanding* — it is issued rather than chosen, and it does not exist yet.
-    # Baking in whatever certificate happens to be on a contributor's machine would settle that
-    # open question by side effect and would break every build that does not have it, CI first.
-    # Ad-hoc signing needs no identity and works on any machine.
     #
-    # No entitlements are declared for the same reason: the sandbox, the network, the
-    # user-selected file access, the Keychain access group and the address book all need a real
-    # team prefix, and the hardened runtime and notarization belong to the Cask path rather
-    # than to a development build.
-    CODE_SIGN_STYLE: Manual
-    CODE_SIGN_IDENTITY: "-"
-    DEVELOPMENT_TEAM: ""
-    ENABLE_HARDENED_RUNTIME: NO
+    # `ARCHS` as well as `ONLY_ACTIVE_ARCH`, because an archive ignores the second: it builds
+    # for a generic destination, asks for every architecture, and fails to link the one
+    # `cargo` did not build.
+    ONLY_ACTIVE_ARCH: YES
+    ARCHS: $(NATIVE_ARCH_ACTUAL)
+
+    # **D-45 — signed under the team, sandboxed, hardened, in both configurations.**
+    #
+    # The team identifier is issued and recorded in the register in
+    # `docs/product/platform-baseline.md`, so the bundle is signed under it. One entitlement set
+    # (`Sift.entitlements`) serves every configuration: a Debug build that ran unsandboxed, or
+    # without the Keychain access group, would exercise a different product from the one that
+    # ships — a different container, a different keychain — and hide exactly the failures this
+    # posture exists to surface.
+    #
+    # The split is in the *identity*, not in the entitlements:
+    #
+    #   - **Debug** is built and signed with the development identity. Signing is automatic
+    #     because the access group is a restricted entitlement: the platform kills a process
+    #     that claims it without a provisioning profile authorising it, and the automatic style
+    #     is what fetches that profile. The toolchain adds `get-task-allow` here, so a debugger
+    #     can attach — to this configuration only.
+    #   - **Release** is archived, then exported for Developer ID distribution
+    #     (`ExportOptions.plist`), which re-signs with the Developer ID Application identity,
+    #     embeds the Developer ID profile, and timestamps. `get-task-allow` is never added.
+    #
+    # The hardened runtime is on in both, and no entitlement relaxes it: the threat model puts
+    # an in-address-space attacker out of scope *because the platform prevents it*, and
+    # notarization refuses a binary without it.
+    #
+    # A machine with no identity at all — CI first — builds with `mise run macos --ad-hoc`,
+    # which overrides the identity and nothing else, and says so. See `mise-tasks/macos`.
+    CODE_SIGN_ENTITLEMENTS: Sift.entitlements
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: Apple Development
+    DEVELOPMENT_TEAM: 854G577S2Y
+    ENABLE_HARDENED_RUNTIME: YES
 
   configs:
     # Each configuration links the archive its own `cargo` profile produced. Pointing both `-L`
@@ -101,6 +123,7 @@ settings:
       LIBRARY_SEARCH_PATHS: [$(inherited), $(SRCROOT)/../../target/debug]
     Release:
       LIBRARY_SEARCH_PATHS: [$(inherited), $(SRCROOT)/../../target/release]
+      CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 
 targets:
   Sift:

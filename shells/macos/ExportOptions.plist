@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	D-45 / D-61 — how a Release archive becomes the Developer ID bundle the Cask channel ships.
+	`mise run macos` archives with the development identity and exports with these options,
+	which re-sign with the Developer ID Application identity, embed the Developer ID
+	provisioning profile that authorises the Keychain access group, and timestamp.
+
+	`destination` is `export`: this writes a signed bundle and uploads nothing. Notarization is
+	the Cask channel's step, not a build's.
+-->
+<plist version="1.0">
+<dict>
+	<key>method</key>
+	<string>developer-id</string>
+	<key>teamID</key>
+	<string>854G577S2Y</string>
+	<key>signingStyle</key>
+	<string>automatic</string>
+	<key>destination</key>
+	<string>export</string>
+</dict>
+</plist>
