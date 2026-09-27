@@ -1532,6 +1532,82 @@ mod moves {
         assert_eq!(count(&account, "SELECT count(*) FROM message"), 0);
     }
 
+    /// A message's tag names, without the isolation marks NFR-54's normalizer stores them in.
+    fn tags_of(account: &Account, message: &[u8]) -> Vec<String> {
+        let mut stmt = account
+            .store
+            .prepare(
+                "SELECT t.name FROM message_tag mt JOIN tag t ON t.id = mt.tag_id
+                 WHERE mt.message_id = ?1 ORDER BY t.name",
+            )
+            .unwrap();
+        stmt.query_map([message], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|name| {
+                name.unwrap()
+                    .trim_matches(|c| c == '\u{2068}' || c == '\u{2069}')
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_folder_walked_alone_settles_its_own_window_and_the_rejoin_takes_the_arrivals_tags() {
+        // `sync_folder` is a round of its own: it holds what leaves the folder and settles it
+        // before it returns. A reissue within one folder is a departure and an arrival in the
+        // same walk. The rejoined message is described by what the provider says now, tags
+        // included, and keeps nothing of what it said before.
+        let s = Scratch::new("move-one-folder");
+        let mut before_move = unread("m1");
+        before_move.tags = vec!["Blue".into()];
+        let mut after_move = unread("m1-reissued");
+        after_move.tags = vec!["Red".into(), "Urgent".into()];
+        let mut adapter = Scripted::new(vec![folder("AAMk-inbox", SpecialUse::Inbox)]).answering(
+            vec![
+                page(vec![present("m1", Provenance::Discovered)], "c1", false),
+                page(
+                    vec![
+                        Change::Removed {
+                            id: RemoteMessageId("m1".into()),
+                        },
+                        present("m1-reissued", Provenance::Delivered),
+                    ],
+                    "c2",
+                    false,
+                ),
+            ],
+            vec![before_move, after_move],
+        );
+        adapter.capabilities = sift_graph::capabilities();
+        let mut account = s.open();
+        run::discover_folders(&adapter, &account).unwrap();
+        let remote = RemoteFolderId("AAMk-inbox".into());
+        let inbox = ingest::folder_local_id(&account.store, &remote).unwrap();
+        let ids = ids();
+
+        run::sync_folder(&adapter, &mut account, inbox, &remote, &ids, 1).unwrap();
+        let before = local_of(&account, "m1");
+        assert_eq!(tags_of(&account, &before), vec!["Blue"]);
+
+        let report = run::sync_folder(&adapter, &mut account, inbox, &remote, &ids, 1).unwrap();
+        assert_eq!(report.rejoined, 1, "the folder's own window never settled");
+        assert_eq!(
+            count(
+                &account,
+                "SELECT count(*) FROM message WHERE remote_id IS NULL"
+            ),
+            0,
+            "a departure outlived the walk that held it"
+        );
+        assert_eq!(count(&account, "SELECT count(*) FROM message"), 1);
+        assert_eq!(local_of(&account, "m1-reissued"), before);
+        assert_eq!(
+            tags_of(&account, &before),
+            vec!["Red", "Urgent"],
+            "the rejoined message lost the tags it arrived with, or kept the ones it left with"
+        );
+    }
+
     #[test]
     fn an_account_whose_identifiers_survive_a_move_never_holds() {
         assert!(!ingest::MoveWindow::for_account(true).holds());
