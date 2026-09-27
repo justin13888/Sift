@@ -15,7 +15,29 @@ use sift_crypto::page::{Header, PageCipher};
 use sift_store::vfs;
 use std::path::{Path, PathBuf};
 
-fn scratch(label: &str) -> PathBuf {
+/// A temporary directory, removed when dropped — on success and on panic alike (#137).
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+fn scratch(label: &str) -> Scratch {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let d = std::env::temp_dir().join(format!(
@@ -24,7 +46,7 @@ fn scratch(label: &str) -> PathBuf {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&d).expect("scratch");
-    d
+    Scratch(d)
 }
 
 fn owner(seed: u8) -> [u8; 32] {
@@ -100,7 +122,6 @@ fn a_database_round_trips_through_the_seal() {
     assert_eq!(subject, "subject number 499");
     drop(conn);
     vfs::withdraw_key(&path);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The test that would still pass if the VFS wrote everything in the clear, unless it looks at
@@ -145,7 +166,6 @@ fn nothing_a_sender_wrote_is_on_disk_in_the_clear() {
         );
     }
     assert!(inspected > 0, "the engine produced no files to inspect");
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// D-73: a file that fails to authenticate is discarded, never repaired. So the wrong key is a
@@ -183,7 +203,6 @@ fn the_wrong_key_is_refused_rather_than_producing_an_empty_database() {
         "a database under the wrong key opened and answered, which is worse than failing"
     );
     vfs::withdraw_key(&path);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// D-106, at the level that matters: the two files of one account are sealed under keys derived
@@ -324,7 +343,6 @@ fn a_database_and_its_write_ahead_log_are_sealed_under_different_keys() {
     );
     drop(conn);
     vfs::withdraw_key(&path);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The issue's second test. A clean close deletes the write-ahead log, and the next open creates
@@ -364,7 +382,6 @@ fn a_write_ahead_log_created_again_at_the_same_path_reissues_no_nonce() {
     for nonce in nonces(&db, Part::Database) {
         assert!(issued.insert(nonce), "the database reissued {nonce:?}");
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The same property for the database itself: D-73's discard-and-refill deletes a store and
@@ -399,7 +416,6 @@ fn a_database_created_again_at_the_same_path_is_a_new_key() {
             "the discarded store's page {page} opened under the refilled store's key"
         );
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The write-ahead log's header is 32 bytes. A layer that reported lengths rounded up to its
@@ -431,7 +447,6 @@ fn a_short_file_reports_its_real_length() {
     assert_eq!(integrity, "ok");
     drop(conn);
     vfs::withdraw_key(&path);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A checkpoint moves every page of the log into the database, which is the largest single
@@ -470,7 +485,6 @@ fn a_checkpoint_moves_the_log_into_the_database_intact() {
     }
     drop(conn);
     vfs::withdraw_key(&path);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The property the reservation exists for: a counter is never issued twice under one key.
@@ -504,7 +518,6 @@ fn a_counter_is_never_issued_twice_across_reopening() {
         "the mark did not move forward every run: {marks:?}"
     );
     assert!(marks[0] > 0, "the first run reserved nothing");
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The pragma assertions are the point, so they are asserted to actually fail.
@@ -533,7 +546,6 @@ fn the_load_bearing_pragmas_are_checked_rather_than_assumed() {
 
     drop(conn);
     vfs::withdraw_key(&path);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -569,7 +581,6 @@ fn the_file_on_disk_has_the_layout_this_module_documents() {
         "the file is not a whole number of sealed blocks: {} bytes after {data_start}",
         payload
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The account, opened the way the application opens it: two files, two derived keys, sealed.
@@ -614,7 +625,6 @@ fn an_account_opens_sealed_and_both_of_its_files_are() {
         .expect("read back");
     assert_eq!(name, "Inbox");
     drop(account);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A different account's key does not open this one. FR-4's erasure rests on exactly this:
@@ -635,7 +645,6 @@ fn an_accounts_files_do_not_open_under_another_accounts_key() {
         refused,
         "another account's key opened these files, so erasure by credential destruction proves nothing"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 // ---------------------------------------------------------------------------------------
@@ -761,7 +770,6 @@ fn a_store_half_re_sealed_across_a_restart_reads_under_both_generations() {
         under_old,
         "reading re-sealed pages, or lost the count across the restart"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The retirement rule: the old key goes only when no page carries it, and after it goes the
@@ -820,7 +828,6 @@ fn the_old_generation_is_retired_only_once_no_page_carries_it() {
         header.retiring.map(|r| r.key_id),
         Some(file_key_id(&new, Role::Store))
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// Two generations is what the header has room for. A file whose previous rotation still has
@@ -866,7 +873,6 @@ fn a_third_generation_is_refused_while_the_second_still_carries_pages() {
         "a third generation was started over live pages of the first"
     );
     vfs::withdraw_key(&path);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The issue's second test: a page under a destroyed old key is recognised rather than reported
@@ -923,5 +929,4 @@ fn an_account_under_a_destroyed_old_key_is_recognised_rather_than_corrupt() {
         .expect("count");
     assert!(n >= 201, "rows were lost: {n}");
     drop(a);
-    std::fs::remove_dir_all(&dir).ok();
 }

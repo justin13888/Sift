@@ -232,17 +232,6 @@ impl Load {
     }
 }
 
-impl Drop for Load {
-    /// The scratch root the application made. A soak runs for days and the benchmark starts
-    /// dozens of processes; neither should leave its mailboxes behind in the temporary
-    /// directory.
-    fn drop(&mut self) {
-        if let Some(root) = self.session.app().root.clone() {
-            let _ = std::fs::remove_dir_all(root);
-        }
-    }
-}
-
 /// The sum of every declared cache's live bytes.
 ///
 /// **Zero today, and that is a gap rather than a measurement.** memory-pressure.md requires
