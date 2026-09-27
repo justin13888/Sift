@@ -2,12 +2,18 @@
 //!
 //! Per input, one of two outcomes is acceptable and nothing else is:
 //!
-//! - **A bound refuses it.** [`sanitize`] returns an error from the limits register (L-6,
-//!   L-7, L-8), and the message falls back to FR-9's raw view.
+//! - **A size bound refuses it.** [`sanitize`] returns L-6, L-7 or L-8's error, and the
+//!   message falls back to FR-9's raw view.
 //! - **It is accepted, and the output is clean.** [`audit`] of the output finds nothing an
-//!   invariant forbids in the tree **as the engine will build it**, and the output is
-//!   parse-stable (I8): what `check_parse_stability` asserts holds — sanitizing the output
-//!   again changes nothing — unless a bound refuses the output.
+//!   invariant forbids in the tree **as the engine will build it**.
+//!
+//! I8 needs no assertion of its own here: under D-121, [`sanitize`] returns only a fixed
+//! point of its policy pass, so an accepted output is parse-stable by the function's own
+//! return condition, and sanitizing it again could only repeat that comparison. What I8
+//! failure looks like now is [`SanitizeError::Unstable`] — an input whose output did not
+//! settle within L-35's passes. The pipeline sends that message to the raw view, which is
+//! safe, but here it is a **finding**: the pass count is a hypothesis D-121 says one re-pass
+//! has so far justified, and an input that exhausts the margin is the evidence against it.
 //!
 //! A panic anywhere is a finding in its own right (NFR-19): libFuzzer reports it as a crash.
 //! Every finding is minimized and admitted to `fixtures/mxss/vectors.txt` as a permanent
@@ -21,14 +27,23 @@
 
 use libfuzzer_sys::fuzz_target;
 use sift_sanitize::audit::audit;
-use sift_sanitize::sanitize::sanitize;
+use sift_sanitize::sanitize::{SanitizeError, sanitize};
 
 fuzz_target!(|data: &[u8]| {
     let html = String::from_utf8_lossy(data);
 
-    let Ok(once) = sanitize(&html) else {
-        // Refused by a bound: the raw view, which is a correct outcome rather than a finding.
-        return;
+    let once = match sanitize(&html) {
+        Ok(once) => once,
+        Err(SanitizeError::Unstable) => {
+            panic!("I8: the output did not settle within L-35's passes (D-121)\ninput: {html:?}")
+        }
+        // Refused by a size bound: the raw view, which is a correct outcome rather than a
+        // finding.
+        Err(
+            SanitizeError::TooDeep | SanitizeError::TooManyNodes | SanitizeError::TooManyAttributes,
+        ) => {
+            return;
+        }
     };
 
     let violations = audit(&once.html);
@@ -38,17 +53,4 @@ fuzz_target!(|data: &[u8]| {
          output: {:?}",
         once.html,
     );
-
-    // I8, as `check_parse_stability` states it — without sanitizing the input a second time,
-    // which would halve the executions a bounded run reaches. A bound refusing the output is
-    // the same raw-view outcome as refusing the input.
-    if let Ok(twice) = sanitize(&once.html) {
-        assert!(
-            twice.html == once.html,
-            "I8: the sanitized output reparses into a different document\n\
-             output: {:?}\nagain:  {:?}",
-            once.html,
-            twice.html,
-        );
-    }
 });

@@ -164,7 +164,7 @@ exploitable.** Prioritize it accordingly.
 
 **Chosen:** the sanitizer's output is a fixed point of its own policy pass. After the first pass it passes
 the output again, and returns once a pass changes nothing; a document that has not settled within a small
-fixed number of passes is refused to the raw view like any document a bound refuses. A later pass reads
+fixed number of passes ([L-35](../limits.md)) is refused to the raw view like any document a bound refuses. A later pass reads
 the earlier pass's internal addresses rather than the sender's, so the fetching positions it reports are
 mapped back to what the sender wrote, and the removals of every pass are kept.
 **Rejected:** enumerating each shape that fails the round trip and patching the policy for it; refusing
@@ -218,8 +218,10 @@ I1 through I10 MUST hold for every input, verified in CI by five complementary m
    divergence is a candidate I8 failure. Run continuously over the whole
    [fidelity corpus](../product/reference-environment.md).
 4. **Fuzzing** of the MIME parser and the sanitizer, seeded with the real-world corpus. Per input, the
-   sanitizer either refuses under a bound or produces output whose reparsed tree holds nothing an
-   invariant forbids and which is parse-stable; the parser either rejects to the raw view or returns a
+   sanitizer either refuses under a size bound or produces output whose reparsed tree holds nothing an
+   invariant forbids. Parse stability is the sanitizer's own return condition under D-121, so the fuzzer
+   asserts it by treating a refusal under [L-35](../limits.md) — an output that would not settle — as a
+   finding rather than a raw-view outcome; the parser either rejects to the raw view or returns a
    structure within its bounds and inside the bytes it was given; neither panics. It runs as a bounded,
    reproducible leg on every change and unbounded in the continuous tier
    ([D-120](../build/verification.md#d-120--fuzzing-runs-reproducibly-per-change-and-unbounded-in-the-continuous-tier)).
