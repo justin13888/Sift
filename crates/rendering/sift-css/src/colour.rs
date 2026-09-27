@@ -348,32 +348,163 @@ mod tests {
         assert!(rgb(250, 250, 250).to_oklab().chroma() < NEAR_NEUTRAL_CHROMA);
     }
 
+    /// Every document the fidelity corpus's manifest admits, by file name.
+    fn corpus_documents() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../sift-sanitize/fixtures/messages");
+        let manifest = std::fs::read_to_string(dir.join("manifest.txt"))
+            .unwrap_or_else(|e| panic!("cannot read the corpus manifest: {e}"));
+        manifest
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|line| {
+                let file = line.split('|').next().unwrap_or_default().trim().to_owned();
+                let body = std::fs::read_to_string(dir.join(&file))
+                    .unwrap_or_else(|e| panic!("manifest names {file}, which cannot be read: {e}"));
+                (file, body)
+            })
+            .collect()
+    }
+
+    /// The parts of a document a CSS colour can be written in — `<style>` blocks and the
+    /// values of `style`, `bgcolor` and `color` attributes — as declaration text. An
+    /// attribute that holds a bare colour becomes a declaration of its own.
+    fn style_text(doc: &str) -> String {
+        // ASCII lowercasing keeps every byte offset, so offsets found in `lower` index `doc`.
+        let lower = doc.to_ascii_lowercase();
+        let mut out = String::new();
+        let mut from = 0;
+        while let Some(open) = lower[from..].find("<style") {
+            let tag = from + open;
+            let Some(gt) = lower[tag..].find('>') else {
+                break;
+            };
+            let body = tag + gt + 1;
+            let end = lower[body..]
+                .find("</style")
+                .map_or(lower.len(), |e| body + e);
+            out.push_str(&doc[body..end]);
+            out.push(';');
+            from = end;
+        }
+        for (name, bare) in [("style", false), ("bgcolor", true), ("color", true)] {
+            for quote in ['"', '\''] {
+                let needle = format!("{name}={quote}");
+                let mut from = 0;
+                while let Some(found) = lower[from..].find(&needle) {
+                    let at = from + found;
+                    let start = at + needle.len();
+                    let Some(len) = lower[start..].find(quote) else {
+                        break;
+                    };
+                    // `color=` inside `bgcolor=` or `data-color=` is not this attribute.
+                    if at == 0 || lower.as_bytes()[at - 1].is_ascii_whitespace() {
+                        if bare {
+                            out.push_str("colour:");
+                        }
+                        out.push_str(&doc[start..start + len]);
+                        out.push(';');
+                    }
+                    from = start + len + 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Every value token in declaration text that [`parse`] reads as a colour, as written.
+    fn colours_in(style: &str) -> Vec<(String, Rgb)> {
+        let mut found = Vec::new();
+        for declaration in style.split(['{', '}', ';']) {
+            let Some((_, value)) = declaration.split_once(':') else {
+                continue;
+            };
+            let mut depth = 0_usize;
+            let mut token = String::new();
+            for ch in value.chars().chain(std::iter::once(' ')) {
+                match ch {
+                    '(' => {
+                        depth += 1;
+                        token.push(ch);
+                    }
+                    ')' => {
+                        depth = depth.saturating_sub(1);
+                        token.push(ch);
+                    }
+                    c if depth == 0 && (c.is_whitespace() || c == ',' || c == '!') => {
+                        if let Some(colour) = parse(&token) {
+                            found.push((token.clone(), colour));
+                        }
+                        token.clear();
+                    }
+                    c => token.push(c),
+                }
+            }
+        }
+        found
+    }
+
+    /// A colour's identity at the precision a corpus can write it in.
+    fn hex(c: Rgb) -> String {
+        let byte = |v: f64| (v * 255.0).round() as u8;
+        format!("#{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b))
+    }
+
     #[test]
     fn the_near_neutral_threshold_separates_the_fidelity_corpus_neutrals_from_its_brand_colours() {
-        // NFR-47's falsifier for the chroma threshold, over the colours the fidelity corpus
-        // (`sift-sanitize/fixtures/messages`) draws. The corpus bounds the value; the
-        // just-noticeable difference picks it inside the bound. A corpus colour on the wrong
-        // side reopens the derivation in docs/rendering/dark-mode.md rather than moving the
-        // constant.
-        let neutral = [
-            "#d0d7de", // transactional-receipt: the item-row border, a cool grey
-            "#1f2328", // transactional-receipt: body text, a blue-black
-            "#cccccc", // mailing-list-reply: the quote rule
-            "#f4f4f4", // marketing-newsletter: the page ground
-            "#eeeeee", // marketing-newsletter: the footer ground
-            "#666666", // marketing-newsletter: footer text
-            "#555555", // cjk-japanese: the note
-        ];
-        let brand = [
+        // NFR-47's falsifier for the chroma threshold, over every colour the fidelity corpus
+        // (`sift-sanitize/fixtures/messages`, as its manifest admits it) writes. The corpus
+        // bounds the value; the just-noticeable difference picks it inside the bound. Every
+        // colour is a neutral unless it is named below as a brand colour, so a newly admitted
+        // colour on the wrong side of the threshold fails here — and reopens the derivation in
+        // docs/rendering/dark-mode.md rather than moving the constant.
+        const BRAND: [&str; 1] = [
             "#1a5d3a", // marketing-newsletter: the call-to-action ground
         ];
-        for c in neutral {
-            let chroma = parse(c).expect("corpus colour").to_oklab().chroma();
-            assert!(chroma < NEAR_NEUTRAL_CHROMA, "{c} has chroma {chroma}");
+        let mut seen = std::collections::BTreeMap::new();
+        for (file, doc) in corpus_documents() {
+            for (written, colour) in colours_in(&style_text(&doc)) {
+                seen.entry(hex(colour))
+                    .or_insert_with(|| (file.clone(), written, colour));
+            }
         }
-        for c in brand {
-            let chroma = parse(c).expect("corpus colour").to_oklab().chroma();
-            assert!(chroma > NEAR_NEUTRAL_CHROMA, "{c} has chroma {chroma}");
+
+        // The scan's floor: the colours it must find, one from each place colours are written,
+        // so a scanner that stopped reading a context cannot pass by measuring nothing.
+        for expected in [
+            "#d0d7de", // transactional-receipt: a style attribute, the item-row border
+            "#cccccc", // mailing-list-reply: `rgb(204,204,204)` and `#ccc`, the quote rules
+            "#f4f4f4", // marketing-newsletter: a <style> block and a `bgcolor` attribute
+            "#121212", // marketing-newsletter: the sender's own dark-mode rules
+            "#555555", // cjk-japanese
+        ] {
+            assert!(
+                seen.contains_key(expected),
+                "the corpus scan missed {expected}"
+            );
+        }
+        for brand in BRAND {
+            assert!(
+                seen.contains_key(brand),
+                "{brand} is declared a brand colour, and the corpus no longer draws it"
+            );
+        }
+
+        for (key, (file, written, colour)) in &seen {
+            let chroma = colour.to_oklab().chroma();
+            if BRAND.contains(&key.as_str()) {
+                assert!(
+                    chroma > NEAR_NEUTRAL_CHROMA,
+                    "brand colour {written} in {file} has chroma {chroma}, not above the threshold"
+                );
+            } else {
+                assert!(
+                    chroma < NEAR_NEUTRAL_CHROMA,
+                    "{written} in {file} has chroma {chroma}, not below the threshold: a neutral \
+                     there reopens the derivation, and a brand colour belongs in BRAND"
+                );
+            }
         }
     }
 
