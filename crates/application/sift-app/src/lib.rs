@@ -2667,6 +2667,123 @@ mod tests {
         assert!(refused.contains("Posteingang"), "{refused}");
     }
 
+    /// A credential store in memory, so a unit test can open a container. The platform's
+    /// would write to the developer's login keychain and prompt for permission.
+    #[derive(Default)]
+    struct Keys(std::sync::Mutex<BTreeMap<(u128, &'static str), String>>);
+
+    impl sift_credentials::store::CredentialStore for Keys {
+        fn write(
+            &self,
+            account: AccountId,
+            item: sift_credentials::store::Item,
+            secret: &str,
+        ) -> Result<(), sift_credentials::store::StoreError> {
+            self.0
+                .lock()
+                .expect("keys")
+                .insert((account.as_u128(), item.name()), secret.to_owned());
+            Ok(())
+        }
+
+        fn read(
+            &self,
+            account: AccountId,
+            item: sift_credentials::store::Item,
+        ) -> Result<String, sift_credentials::store::StoreError> {
+            self.0
+                .lock()
+                .expect("keys")
+                .get(&(account.as_u128(), item.name()))
+                .cloned()
+                .ok_or(sift_credentials::store::StoreError::NotFound)
+        }
+
+        fn delete(
+            &self,
+            account: AccountId,
+            item: sift_credentials::store::Item,
+        ) -> Result<(), sift_credentials::store::StoreError> {
+            self.0
+                .lock()
+                .expect("keys")
+                .remove(&(account.as_u128(), item.name()));
+            Ok(())
+        }
+    }
+
+    /// A container directory the test owns, removed on drop whether or not it passed (#137).
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn an_account_reads_its_recorded_rule_or_else_the_installation_default() {
+        // Declared first so it drops last, after the container that holds its registry open.
+        let scratch = Scratch(
+            std::env::temp_dir().join(format!("sift-app-notification-rule-{}", std::process::id())),
+        );
+        let root = &scratch.0;
+        let _ = std::fs::remove_dir_all(root);
+        let mut n = Notices::new();
+        // The accounts were opened in scratch mode, because `create_account` reaches the
+        // platform credential store when a container is open. The container is attached
+        // after, and each open account takes the identity the registry issued it, which is
+        // all the setting reads under test key on.
+        let mut container = container::Container::open(root, &Keys::default()).expect("container");
+        for name in ["one", "two"] {
+            let registered = container.register("rich", name).expect("register");
+            n.app.accounts.get_mut(name).expect("open").id = registered.id;
+        }
+        let one = n.app.accounts["one"].id;
+        let two = n.app.accounts["two"].id;
+        container
+            .set_account_setting(one, settings::FOLDER_RULES, "archive")
+            .expect("one's rule");
+        // Written past `App::set_account_setting`'s grammar check, as a value recorded by a
+        // build that knew a token this one does not would be.
+        container
+            .set_account_setting(two, settings::FOLDER_RULES, "starred")
+            .expect("two's rule");
+        n.app.container = Some(container);
+
+        let archive =
+            settings::FolderRule::Only(vec![settings::FolderSelector::SpecialUse("Archive")]);
+        assert_eq!(
+            n.app.notification_rule("one"),
+            archive,
+            "the recorded rule was not read"
+        );
+        assert_eq!(
+            n.app.notification_rule("two"),
+            settings::FolderRule::installation_default(true),
+            "unreadable text did not fall back to the installation default"
+        );
+
+        // D-101's default turned off is `none`, not `all` — for an account with unreadable
+        // text and for one with none recorded — and an account's own rule still wins.
+        n.app
+            .set_setting("notify.new-mail-in-inbox", "false")
+            .expect("default off");
+        assert_eq!(
+            n.app.notification_rule("two"),
+            settings::FolderRule::None,
+            "the default turned off was not `none`"
+        );
+        n.app
+            .container
+            .as_mut()
+            .expect("container")
+            .set_account_setting(two, settings::FOLDER_RULES, "")
+            .expect("cleared");
+        assert_eq!(n.app.notification_rule("two"), settings::FolderRule::None);
+        assert_eq!(n.app.notification_rule("one"), archive);
+    }
+
     #[test]
     fn a_revocation_never_prints_the_token_it_carries() {
         // NFR-23: never in a log. A `{:?}` is how a credential gets into one.
