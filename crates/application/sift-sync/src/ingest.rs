@@ -138,7 +138,10 @@ pub fn reconcile_folders(
     Ok(report)
 }
 
-const fn special_use_name(use_: SpecialUse) -> &'static str {
+/// The text the store's `folder.special_use` column holds for a special use — written here,
+/// and read by anything that matches against that column rather than spelling it again.
+#[must_use]
+pub const fn special_use_name(use_: SpecialUse) -> &'static str {
     match use_ {
         SpecialUse::Inbox => "Inbox",
         SpecialUse::Archive => "Archive",

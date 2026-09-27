@@ -201,9 +201,14 @@ pub enum FolderSelector {
     Folder(i64),
 }
 
-/// The special uses a rule may name, as the store records them. The same six D-83's folder
-/// reconciliation writes; a seventh there that is not added here is a folder no rule can name.
-const SPECIAL_USES: [&str; 6] = ["Inbox", "Archive", "Sent", "Trash", "Spam", "Drafts"];
+/// The special uses a rule may name, as the store records them — derived from the adapter
+/// layer's one list and the text D-83's folder reconciliation writes for each, so a special use
+/// added there is one a rule can name without an edit here.
+fn special_use_names() -> impl Iterator<Item = &'static str> {
+    sift_provider::adapter::SpecialUse::ALL
+        .into_iter()
+        .map(sift_sync::ingest::special_use_name)
+}
 
 impl FolderRule {
     /// Read a stored rule. `Ok(None)` is empty text: no rule, so the installation default.
@@ -232,9 +237,8 @@ impl FolderRule {
                         .parse()
                         .map_err(|_| format!("`{token}` does not name a folder by its identity"))?,
                 )
-            } else if let Some(name) = SPECIAL_USES
-                .iter()
-                .find(|name| name.eq_ignore_ascii_case(token))
+            } else if let Some(name) =
+                special_use_names().find(|name| name.eq_ignore_ascii_case(token))
             {
                 FolderSelector::SpecialUse(name)
             } else if lower == "none" || lower == "all" {
@@ -413,6 +417,24 @@ mod tests {
                 FolderRule::parse(refused).is_err(),
                 "`{refused}` was accepted"
             );
+        }
+    }
+
+    /// Every special use folder reconciliation writes is one a rule can name, and the rule
+    /// admits exactly the folder the store labelled with it.
+    #[test]
+    fn every_special_use_the_store_writes_is_one_a_rule_can_name() {
+        for use_ in sift_provider::adapter::SpecialUse::ALL {
+            let stored = sift_sync::ingest::special_use_name(use_);
+            let rule = FolderRule::parse(&stored.to_ascii_lowercase())
+                .unwrap_or_else(|e| panic!("`{stored}` is not nameable: {e}"))
+                .expect("a rule");
+            assert_eq!(
+                rule,
+                FolderRule::Only(vec![FolderSelector::SpecialUse(stored)])
+            );
+            assert!(rule.admits(1, Some(stored)), "`{stored}` is not admitted");
+            assert_eq!(FolderRule::parse(&rule.as_text()), Ok(Some(rule)));
         }
     }
 
