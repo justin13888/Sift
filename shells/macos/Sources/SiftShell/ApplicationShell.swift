@@ -1,5 +1,6 @@
 import AppKit
 import CSift
+import ServiceManagement
 
 /// The shell that is resident for the life of the process.
 ///
@@ -16,7 +17,7 @@ import CSift
 /// L3 destroys every window shell and **not** this one. Removing the always-on surface would
 /// leave the application unreachable, and a resident process the user can only kill is worse
 /// than one that used more memory.
-final class ApplicationShell: NSObject, NSApplicationDelegate {
+final class ApplicationShell: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var app: OpaquePointer?
 
     /// The container path's bytes. The layer copies during `sift_initialize`; this simply
@@ -165,6 +166,12 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
             openNotifiedMessage(account: pending.account, message: pending.message)
         } else if launchedByNotification && hasAnyAccount() {
             // The activation itself follows on the delegate, and opens the reader.
+        } else if LoginItem.launchedAtLogin() && hasAnyAccount() {
+            // **Residency, which is what the login item is for.** Nobody asked for a window:
+            // the platform started Sift because the user said to keep it running. It syncs,
+            // applies the queue and notifies from here, holding no window's resources, and
+            // the tray is how the user reaches it. With no account there is nothing to be
+            // resident *for*, so that launch falls through to the add-account flow below.
         } else if hasAnyAccount() {
             openMainWindow()
         } else {
@@ -281,12 +288,71 @@ final class ApplicationShell: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Open Sift", action: #selector(openMainWindow), keyEquivalent: "")
         menu.addItem(withTitle: "Pause syncing", action: #selector(pauseSync), keyEquivalent: "")
         menu.addItem(.separator())
+        // Background residency, through the platform's own per-user mechanism
+        // (`docs/architecture/process-model.md`, Lifecycle). Here rather than in Settings
+        // because it is a fact about the process, not about an account, and because this is
+        // the surface that exists when no window does.
+        menu.addItem(withTitle: "Open at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
+        menu.addItem(.separator())
         // Deliberately worded as the distinct thing it is. Neither action may be the silent
         // consequence of the other.
         menu.addItem(withTitle: "Quit Sift entirely", action: #selector(quit), keyEquivalent: "q")
         for item in menu.items { item.target = self }
+        // Asked each time the menu opens, because the user can remove the item in System
+        // Settings while Sift runs and nothing tells the process it happened.
+        menu.delegate = self
         item.menu = menu
         statusItem = item
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === statusItem?.menu,
+              let item = menu.items.first(where: { $0.action == #selector(toggleLoginItem) })
+        else { return }
+        switch LoginItem.status {
+        case .enabled:
+            item.state = .on
+            item.title = "Open at Login"
+        case .requiresApproval:
+            // Registered, and held until the user allows it. Saying "on" would be the menu
+            // lying about the state it offers to change.
+            item.state = .mixed
+            item.title = "Open at Login (allow in System Settings…)"
+        default:
+            item.state = .off
+            item.title = "Open at Login"
+        }
+    }
+
+    /// Register or unregister the application itself as a login item.
+    ///
+    /// **Opt-in, never registered on the user's behalf.** Starting at login is a standing
+    /// claim on the user's machine, and the platform notifies the user when an application
+    /// adds one; doing it silently at first launch is the kind of residency a user did not
+    /// choose and would read as the distrust FR-25 exists to prevent.
+    @objc private func toggleLoginItem() {
+        switch LoginItem.status {
+        case .enabled:
+            LoginItem.unregister()
+        case .requiresApproval:
+            // Already registered; the one step left is the user's, in System Settings.
+            SMAppService.openSystemSettingsLoginItems()
+        default:
+            switch LoginItem.register() {
+            case .success(.requiresApproval):
+                SMAppService.openSystemSettingsLoginItems()
+            case .success:
+                break
+            case .failure(let error):
+                // Said, not swallowed: a menu item that stays unticked after a click, with no
+                // reason given, is indistinguishable from one that did nothing.
+                let alert = NSAlert()
+                alert.messageText = "Sift could not be set to open at login."
+                alert.informativeText = error.localizedDescription
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
+        }
     }
 
     /// The application menu. Deliberately the same three verbs as the tray, plus the window
@@ -1365,6 +1431,100 @@ extension ApplicationShell {
     func refreshAnnunciator() {
         for window in windows { window.refreshChrome() }
         refreshStatusItem()
+    }
+}
+
+// MARK: - Background residency
+
+/// The login item: **the application itself**, registered through the platform's per-user
+/// mechanism.
+///
+/// `SMAppService.mainApp` is the reason D-46's floor is macOS 13. The mechanism before it
+/// registers a separate helper executable inside the bundle, which is a second process — D-2
+/// false on the channel that needs the sandbox. This one registers the main application, is
+/// legal under the sandbox (D-45 puts both channels there), is per user, and needs no
+/// privilege: the three things `docs/architecture/process-model.md` requires of it.
+enum LoginItem {
+    static var status: SMAppService.Status { SMAppService.mainApp.status }
+
+    /// Register, and report the status the platform settled on — which may be
+    /// `.requiresApproval` rather than `.enabled`, where the user has to allow it.
+    static func register() -> Result<SMAppService.Status, Error> {
+        do {
+            try SMAppService.mainApp.register()
+            return .success(status)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    @discardableResult
+    static func unregister() -> Bool {
+        do {
+            try SMAppService.mainApp.unregister()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Whether this launch was the platform starting the login item, rather than the user.
+    ///
+    /// The open-application event carries it, and that event is the current one while the
+    /// delegate's `applicationDidFinishLaunching` runs — so this is only meaningful there.
+    static func launchedAtLogin() -> Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              event.eventClass == kCoreEventClass, event.eventID == kAEOpenApplication
+        else { return false }
+        return event.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue
+            == keyAELaunchedAsLogInItem
+    }
+
+    static func describe(_ status: SMAppService.Status) -> String {
+        switch status {
+        case .notRegistered: return "not-registered"
+        case .enabled: return "enabled"
+        case .requiresApproval: return "requires-approval"
+        case .notFound: return "not-found"
+        @unknown default: return "unknown(\(status.rawValue))"
+        }
+    }
+
+    /// The P0 residency spike's registration half, observed on the bundle that ships
+    /// (`mise run macos`): register the application as a login item, read back what the
+    /// platform recorded, and restore the state found. It exits 0 when a sandboxed, hardened,
+    /// team-signed build can register itself — `.enabled`, or `.requiresApproval` where the
+    /// platform wants the user's consent first.
+    ///
+    /// What it cannot observe is the other half — a login actually starting the process — and
+    /// it says so rather than implying it: that takes a login session, which no probe running
+    /// inside one can end.
+    static func probe() -> Int32 {
+        let sandboxed = ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
+        let before = status
+        print("login-item: sandboxed \(sandboxed)")
+        print("login-item: before     \(describe(before))")
+        var registered = before
+        var madeHere = false
+        if before != .enabled && before != .requiresApproval {
+            switch register() {
+            case .success(let after):
+                registered = after
+                madeHere = true
+            case .failure(let error):
+                print("login-item: register failed — \(error.localizedDescription)")
+                return 1
+            }
+        }
+        print("login-item: registered \(describe(registered))")
+        if madeHere {
+            let restored = unregister()
+            print("login-item: restored   \(describe(status))\(restored ? "" : " (unregister failed)")")
+        }
+        print("login-item: not observed — a login starting the process; that needs a login session")
+        let pass = sandboxed && (registered == .enabled || registered == .requiresApproval)
+        print("login-item: \(pass ? "PASS" : "FAIL") (registration half)")
+        return pass ? 0 : 1
     }
 }
 
