@@ -1632,6 +1632,47 @@ mod tests {
     }
 
     #[test]
+    fn an_account_whose_adapter_is_lent_is_not_reconnected_around_and_says_so() {
+        // D-122: a job has the adapter out. The server half is skipped as busy rather than
+        // opening a second conversation by reconnecting, and the report names why.
+        let mut app = synced();
+        let account = app.account("mail").unwrap();
+        let adapter = account
+            .adapter
+            .take()
+            .expect("a synced account has its adapter");
+        account.lent = true;
+        let before = held(&mut app);
+
+        let report = app.search_with_server("quokka", None, 20).unwrap();
+        assert!(report.hits.is_empty());
+        assert_eq!(held(&mut app), before, "a lent account was asked");
+        assert!(
+            report
+                .caveats
+                .iter()
+                .any(|c| c.contains("already talking to its provider")),
+            "{:?}",
+            report.caveats
+        );
+        let account = app.account("mail").unwrap();
+        assert!(
+            account.adapter.is_none() && account.lent,
+            "a lent adapter was reconnected around"
+        );
+
+        // And once it is back, the same search reaches the server.
+        account.adapter = Some(adapter);
+        account.lent = false;
+        let report = app.search_with_server("quokka", None, 20).unwrap();
+        assert!(
+            report.hits.iter().any(|h| h.source == Source::Server),
+            "{:?}",
+            report.caveats
+        );
+    }
+
+    #[test]
     fn attachment_presence_is_asked_of_the_server_and_its_hits_are_the_servers() {
         // Sync does not record attachment presence, so locally `has:attachment` matches nothing
         // and says so. A server that evaluates it answers for the whole mailbox: its hits are
