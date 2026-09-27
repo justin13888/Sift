@@ -292,13 +292,18 @@ final class ReaderViewController: NSViewController {
     /// The layer the document on screen was opened against, so a change of display options
     /// can open it again without the caller that showed it. Cleared with the document.
     private var openApp: OpaquePointer?
+    /// The increased-contrast preference the document on screen was opened with. The
+    /// notification fires for every display option (reduce motion, reduce transparency,
+    /// invert colours), and only a change to this one alters what the transform renders.
+    private var openContrast: Bool?
 
     /// Re-open the message on screen when the display options change, where the preference
     /// has anything to act on: it only moves the transform's threshold, so with the transform
-    /// off the document would render byte for byte the same and re-opening would only mint a
-    /// token and redraw.
+    /// off, or with the preference unchanged since the open, the document would render byte
+    /// for byte the same and re-opening would only mint a token and redraw.
     @objc private func displayOptionsChanged(_: Notification) {
-        guard dark, let app = openApp, let row = showing else { return }
+        guard dark, let app = openApp, let row = showing,
+              openContrast != ReaderViewController.increasedContrast else { return }
         show(row, app: app)
     }
 
@@ -337,6 +342,7 @@ final class ReaderViewController: NSViewController {
             dark = false
             openToken = nil
             openApp = nil
+            openContrast = nil
             showNothing()
             return
         }
@@ -368,15 +374,17 @@ final class ReaderViewController: NSViewController {
             body.clear()
             openToken = nil
             openApp = nil
+            openContrast = nil
             return
         }
         var document = SiftDocument()
+        let contrast = ReaderViewController.increasedContrast
         let status = sift_open_document(
-            UnsafeMutablePointer(app), row.id, dark ? 1 : 0,
-            ReaderViewController.increasedContrast ? 1 : 0, &document)
+            UnsafeMutablePointer(app), row.id, dark ? 1 : 0, contrast ? 1 : 0, &document)
         // Kept whether or not this open succeeded: a failed render is still the message on
-        // screen, and a change of display options is as good a reason to try it again as any.
+        // screen, and a change of the preference is as good a reason to try it again as any.
         openApp = app
+        openContrast = contrast
         guard status == Ok else {
             // FR-9: a body that cannot be rendered degrades to a stated absence rather than
             // to a blank pane, because a blank pane is indistinguishable from a bug.
