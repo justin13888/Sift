@@ -29,6 +29,7 @@
 //! issues nothing.
 
 pub mod broker;
+pub mod stream;
 pub mod token;
 
 pub use broker::{Answer, Broker, Request};

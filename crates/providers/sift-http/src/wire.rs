@@ -123,10 +123,28 @@ pub fn serialize(
     headers: &[(String, String)],
     body: &[u8],
 ) -> Vec<u8> {
+    serialize_accepting(verb, target, host, headers, body, "gzip")
+}
+
+/// Serialize a request that accepts one named content coding.
+///
+/// A streamed answer cannot be decompressed under the bound [`serialize`]'s callers rely on
+/// without buffering it, so a streaming caller asks for `identity` and refuses anything else
+/// that comes back. Stated here for the same reason as in [`serialize`]: the coding a caller
+/// must be ready for is the one this line asked for.
+#[must_use]
+pub fn serialize_accepting(
+    verb: &str,
+    target: &str,
+    host: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    coding: &str,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(256 + body.len());
     out.extend_from_slice(format!("{verb} {target} HTTP/1.1\r\n").as_bytes());
     out.extend_from_slice(format!("host: {host}\r\n").as_bytes());
-    out.extend_from_slice(b"accept-encoding: gzip\r\n");
+    out.extend_from_slice(format!("accept-encoding: {coding}\r\n").as_bytes());
     out.extend_from_slice(b"connection: keep-alive\r\n");
     for (name, value) in headers {
         // A header a caller could not have written by hand is one the transport invented.
@@ -306,6 +324,158 @@ impl<R: Read + core::fmt::Debug> Incoming<R> {
                 ));
             }
         }
+    }
+}
+
+impl<R: Read + core::fmt::Debug> Incoming<R> {
+    /// Hand the rest of the answer out as it arrives rather than assembling it.
+    ///
+    /// For a caller that must not hold a whole body at once — the resource broker, where
+    /// L-10 permits a 32 MB image and D-91 rejects buffering one before answering it.
+    #[must_use]
+    pub fn into_body(self, framing: Framing) -> Body<R> {
+        let state = match framing {
+            Framing::Length(0) => BodyState::Done,
+            Framing::Length(n) => BodyState::Length(n),
+            Framing::Chunked => BodyState::ChunkHeader,
+            Framing::UntilClose => BodyState::UntilClose,
+        };
+        Body {
+            incoming: self,
+            state,
+        }
+    }
+
+    /// Copy at most `limit` buffered bytes into `buf`, pulling from the socket only when the
+    /// buffer is empty. `Ok(0)` at end of stream.
+    ///
+    /// **The buffer is emptied rather than grown** once everything in it has been handed out,
+    /// which is what keeps a streamed body at one socket read of memory however long it runs.
+    fn take(&mut self, buf: &mut [u8], limit: u64) -> Result<usize, WireError> {
+        if self.at == self.buffer.len() {
+            self.buffer.clear();
+            self.at = 0;
+            if !self.fill()? {
+                return Ok(0);
+            }
+        }
+        let have = self.buffer.len() - self.at;
+        let n = have
+            .min(buf.len())
+            .min(usize::try_from(limit).unwrap_or(usize::MAX));
+        buf[..n].copy_from_slice(&self.buffer[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+/// Where a streamed body is in its framing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyState {
+    /// This many bytes of a length-framed body are still to come.
+    Length(u64),
+    /// A chunk-size line is next.
+    ChunkHeader,
+    /// This many bytes of the current chunk are still to come.
+    Chunk(u64),
+    /// The blank line that ends a chunk is next.
+    ChunkEnd,
+    /// The body ends when the connection does.
+    UntilClose,
+    Done,
+}
+
+/// A response body, read as it arrives.
+///
+/// Framing is enforced exactly as [`Incoming::body`] enforces it — a body that ends early is
+/// an error, never a short success — but nothing is assembled: every `read` hands out what
+/// one socket read produced. **No cap is applied here**; a streaming caller counts what it
+/// was handed and refuses past its own bound, because only it knows which bound applies.
+#[derive(Debug)]
+pub struct Body<R: Read + core::fmt::Debug> {
+    incoming: Incoming<R>,
+    state: BodyState,
+}
+
+impl<R: Read + core::fmt::Debug> Body<R> {
+    /// Bytes read from the socket so far, the head included — FR-36's figure.
+    #[must_use]
+    pub const fn received(&self) -> u64 {
+        self.incoming.received
+    }
+
+    fn next(&mut self, buf: &mut [u8]) -> Result<usize, WireError> {
+        loop {
+            match self.state {
+                BodyState::Done => return Ok(0),
+                BodyState::Length(remaining) => {
+                    let n = self.incoming.take(buf, remaining)?;
+                    if n == 0 && !buf.is_empty() {
+                        return Err(WireError::Malformed("the answer ended inside its body"));
+                    }
+                    let remaining = remaining - n as u64;
+                    self.state = if remaining == 0 {
+                        BodyState::Done
+                    } else {
+                        BodyState::Length(remaining)
+                    };
+                    return Ok(n);
+                }
+                BodyState::UntilClose => {
+                    let n = self.incoming.take(buf, u64::MAX)?;
+                    if n == 0 {
+                        self.state = BodyState::Done;
+                    }
+                    return Ok(n);
+                }
+                BodyState::ChunkHeader => {
+                    let header = self.incoming.line()?;
+                    let size = header.split(';').next().unwrap_or("").trim();
+                    let size = u64::from_str_radix(size, 16)
+                        .map_err(|_| WireError::Malformed("a chunk size was not hexadecimal"))?;
+                    if size == 0 {
+                        while !self.incoming.line()?.is_empty() {}
+                        self.state = BodyState::Done;
+                    } else {
+                        self.state = BodyState::Chunk(size);
+                    }
+                }
+                BodyState::Chunk(remaining) => {
+                    let n = self.incoming.take(buf, remaining)?;
+                    if n == 0 && !buf.is_empty() {
+                        return Err(WireError::Malformed("the answer ended inside a chunk"));
+                    }
+                    let remaining = remaining - n as u64;
+                    self.state = if remaining == 0 {
+                        BodyState::ChunkEnd
+                    } else {
+                        BodyState::Chunk(remaining)
+                    };
+                    return Ok(n);
+                }
+                BodyState::ChunkEnd => {
+                    if !self.incoming.line()?.is_empty() {
+                        return Err(WireError::Malformed(
+                            "a chunk was not followed by a blank line",
+                        ));
+                    }
+                    self.state = BodyState::ChunkHeader;
+                }
+            }
+        }
+    }
+}
+
+impl<R: Read + core::fmt::Debug> Read for Body<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.next(buf).map_err(|e| match e {
+            WireError::Io(message) => std::io::Error::other(message),
+            WireError::Malformed(why) => std::io::Error::new(std::io::ErrorKind::InvalidData, why),
+            WireError::TooLarge { .. } => std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "a chunk header was too long",
+            ),
+        })
     }
 }
 
@@ -516,6 +686,102 @@ mod tests {
     fn a_no_content_answer_carries_no_body_whatever_it_says() {
         let head = parse_head(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap();
         assert_eq!(head.framing(), Framing::Length(0));
+    }
+
+    /// A reader that hands out one byte per call, so every framing boundary falls between
+    /// two socket reads at least once.
+    #[derive(Debug)]
+    struct Trickle(&'static [u8]);
+
+    impl Read for Trickle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.0.is_empty() || buf.is_empty() {
+                return Ok(0);
+            }
+            buf[0] = self.0[0];
+            self.0 = &self.0[1..];
+            Ok(1)
+        }
+    }
+
+    fn drain(mut body: impl Read) -> std::io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 3];
+        loop {
+            let n = body.read(&mut buf)?;
+            if n == 0 {
+                return Ok(out);
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+    }
+
+    #[test]
+    fn a_streamed_body_matches_the_assembled_one_under_every_framing() {
+        for raw in [
+            &b"HTTP/1.1 200 OK\r\ncontent-length: 11\r\n\r\nhello world"[..],
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n6;x=y\r\n world\r\n0\r\nx-trailer: 1\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\n\r\nhello world",
+        ] {
+            let mut i = Incoming::new(Trickle(raw));
+            let head = i.head().unwrap();
+            let body = i.into_body(head.framing());
+            assert_eq!(drain(body).unwrap(), b"hello world", "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_streamed_body_that_ends_early_is_an_error_rather_than_a_short_success() {
+        // A truncated image handed over as though it were whole is a lie the reader draws.
+        for raw in [
+            &b"HTTP/1.1 200 OK\r\ncontent-length: 20\r\n\r\nhello"[..],
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n9\r\nhello",
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nzz\r\nhello",
+        ] {
+            let mut i = Incoming::new(raw);
+            let head = i.head().unwrap();
+            assert!(drain(i.into_body(head.framing())).is_err(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_streamed_body_holds_one_read_rather_than_the_whole_answer() {
+        // The point of streaming: the buffer is emptied as it is handed out, not grown.
+        let mut raw = b"HTTP/1.1 200 OK\r\ncontent-length: 200000\r\n\r\n".to_vec();
+        raw.extend(std::iter::repeat_n(b'x', 200_000));
+        let mut i = Incoming::new(raw.as_slice());
+        let head = i.head().unwrap();
+        let mut body = i.into_body(head.framing());
+        let mut buf = [0u8; 4096];
+        let mut total = 0;
+        loop {
+            let n = body.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+            assert!(
+                body.incoming.buffer.capacity() <= 64 * 1024,
+                "the body was assembled"
+            );
+        }
+        assert_eq!(total, 200_000);
+        assert_eq!(body.received(), raw.len() as u64);
+    }
+
+    #[test]
+    fn a_streaming_request_asks_for_the_coding_it_can_handle() {
+        let text = String::from_utf8(serialize_accepting(
+            "GET",
+            "/i.png",
+            "h",
+            &[],
+            b"",
+            "identity",
+        ))
+        .unwrap();
+        assert!(text.contains("accept-encoding: identity\r\n"));
+        assert!(!text.contains("gzip"));
     }
 
     #[test]

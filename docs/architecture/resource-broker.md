@@ -145,6 +145,50 @@ loading on legitimate mail while set too high it fails to protect the pool it ex
 distinguish a hostile message from an ornate one, so the protection is against resource exhaustion
 generally rather than against an adversary specifically.
 
+## What an allowed fetch is held to
+
+The broker decides a fetch and the application layer performs it: the rendering layer may not reach the
+network, so the broker defines the fetch it needs and the layer above supplies the transport. The
+decision, the slot, the validation and the bounds stay in the broker; only the socket is elsewhere.
+
+**Decided under the lock, performed outside it.** Answering a request grants the fetch — the remote
+address and a claim on one of the document's L-29 slots — and nothing more. The connection, the wait
+for a slot and the header validation all happen after the grant has left, on a thread that is neither
+the engine's nor the one holding the application's state, so a slow image host stalls neither the
+document's layout nor the store, the queue or search.
+
+**The tier decides it the way it decides every on-demand fetch.** An allowed image in the message a
+person is reading is a fetch that person asked for, so it follows the same rows as
+[server-side search](../runtime/network-conditions.md): permitted in Unrestricted, Conservative and
+Minimal, and refused while paused, behind a captive portal, and with no path. Paused means what it means
+for search: the tier, or the message's own account paused by the user under D-95, which the tier does not
+carry. Prefetch is a separate
+question with a separate answer — only Unrestricted, under NFR-32 — and the broker holds the two apart
+rather than letting a tier that permits the one imply the other. A refusal by the tier is a deterministic
+blocked answer, and the reader's withheld count says so.
+
+**Only the address, over TLS, to a sender's host.** A fetch carries no cookie, no referrer, and nothing
+naming Sift or its version, because each would let an image host tell one reader from another beyond
+what fetching the image already discloses. A cleartext address is fetched over TLS at the same host and
+path rather than in the clear, and fails rather than falling back. An address naming credentials, an
+address literal, a local name, or a port other than the scheme's own is refused: each reaches something
+on the reader's own network rather than a sender's image host, and a message is not permitted to aim the
+reader's machine at their printer.
+
+**Only the resource itself.** A redirect names an address none of the checks above has seen, so it is
+answered *unavailable* rather than followed — following it would be a fetch the broker never decided.
+The same holds for any answer that is not the resource: an error status, or a content coding that was
+not asked for.
+
+**What the engine is told the bytes are comes from the bytes.** The broker's
+[D-29](../rendering/content-blocking.md) validation identifies the format, and that identification — not
+the server's stated type — is what the engine receives, so the engine is never left to sniff past what
+the broker validated.
+
+**A load that ends without all its bytes fails rather than finishes.** Bytes already handed over are
+discarded by the engine with the failure; a truncated image drawn as though it were whole is a lie told
+to the reader.
+
 ## Three rules that are easy to get wrong
 
 **Prefetching is the tracking event.** If the broker fetches a remote image ahead of display, that fetch

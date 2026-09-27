@@ -13,7 +13,7 @@
 //! messages and falsify the property D-28 rests on — that two messages share no address
 //! space.
 
-use sift_broker::broker::{Answer, Reason};
+use sift_broker::broker::{Answer, Grant, Reason, Unavailable};
 use sift_foundation::identity::LocalId;
 
 use crate::App;
@@ -225,6 +225,9 @@ impl App {
         // A token that names no live document cannot happen here — it was minted a moment
         // ago — but were it to, every position is reported withheld rather than none.
         let infrastructure = sift_block::origin::Infrastructure::default();
+        self.document_owners
+            .insert(rendered.token.as_str().to_owned(), owner);
+        self.resources_under_tier();
         let refusals = self
             .resources
             .withheld(rendered.token.as_str(), &self.filter, &infrastructure)
@@ -272,6 +275,7 @@ impl App {
     /// than no blocker, because the product would claim a protection it was not providing.
     pub fn resolve_resource(&mut self, url: &str, transferred: Option<u64>) -> Answer {
         self.reconcile_filter_engine();
+        self.resources_under_tier();
         let request = sift_broker::broker::Request {
             url: url.to_owned(),
             transferred_length: transferred,
@@ -283,6 +287,51 @@ impl App {
         )
     }
 
+    /// Answer one resource load and, where the answer is the bytes, grant the fetch.
+    ///
+    /// **The same decision as [`App::resolve_resource`]**, taken under the same authority
+    /// and tier. The grant is all that leaves: the fetch it permits is [`fetch_resource`]'s,
+    /// and runs with nothing of the application's held — D-91 keeps blocking work off the
+    /// thread the engine asked on, and #114 keeps the session off a network round trip.
+    ///
+    /// # Errors
+    /// The blocked or unavailable answer the request gets instead.
+    pub fn grant_resource(&mut self, url: &str) -> Result<Grant, Answer> {
+        self.reconcile_filter_engine();
+        self.resources_under_tier();
+        self.resources.grant(
+            &sift_broker::broker::Request {
+                url: url.to_owned(),
+                transferred_length: None,
+            },
+            &self.filter,
+            &sift_block::origin::Infrastructure::default(),
+        )
+    }
+
+    /// Put the broker under the tier last recorded, so a fetch and the count a reader is shown
+    /// are both decided by the network the reader is actually on — and under each document's
+    /// account pause, which server search also checks and the tier does not carry (D-95).
+    pub(crate) fn resources_under_tier(&mut self) {
+        self.resources.tier_permits_fetch = fetches_on_demand(self.network);
+        self.resources.tier_permits_prefetch = self.network.prefetch();
+        let paused: std::collections::BTreeSet<String> = self
+            .document_owners
+            .values()
+            .filter(|owner| self.is_paused(owner))
+            .cloned()
+            .collect();
+        self.hold_paused_documents(|owner| paused.contains(owner));
+    }
+
+    /// Hold every live document whose account `paused` names, release the rest, and forget
+    /// the tokens the broker no longer holds.
+    pub(crate) fn hold_paused_documents(&mut self, paused: impl Fn(&str) -> bool) {
+        let resources = &mut self.resources;
+        self.document_owners
+            .retain(|token, owner| resources.hold(token, paused(owner)));
+    }
+
     /// Revoke a document's token.
     ///
     /// Called when the body view navigates away, **before** the next document exists — which
@@ -290,8 +339,160 @@ impl App {
     pub fn close_document(&mut self, token: &str) -> bool {
         // By text rather than by value: a shell holds the token as a string, and nothing
         // should be given a way to *construct* one — that is the part that stays unforgeable.
+        self.document_owners.remove(token);
         self.resources.revoke_named(token)
     }
+}
+
+/// Whether a tier permits a fetch a person asked for — an allowed image in the message they
+/// are reading.
+///
+/// **The on-demand rule `network-conditions.md` states for server-side search**, and for the
+/// same reason: one bounded request a person asked for, which NFR-31 excludes from Minimal's
+/// steady-state figure as it excludes opening a message. Not while paused, which stops
+/// fetching; not behind a captive portal, whose one reattempt is the account's; not with no
+/// path, where NFR-38 allows zero attempts. Prefetch is a different question and NFR-32
+/// answers it separately.
+pub(crate) const fn fetches_on_demand(tier: sift_net::tier::Tier) -> bool {
+    tier.permits_server_search()
+}
+
+/// A fetch the broker granted, validated and on its way to the body view.
+pub type ResourceStream = sift_broker::stream::Stream<Remote>;
+
+/// Fetch what a grant allows, and validate it before a byte is handed over.
+///
+/// **Blocking**, and called with nothing held: the slot wait, the connection, and the header
+/// all happen here, so the caller runs it off the engine's thread and outside the session.
+/// The deadline starts now, which is the moment the grant is carried away from the broker.
+///
+/// # Errors
+/// The blocked or unavailable answer the request gets instead of the bytes.
+pub fn fetch_resource(grant: Grant) -> Result<ResourceStream, Answer> {
+    sift_broker::stream::open(
+        grant,
+        &mut Web,
+        std::time::Instant::now() + sift_broker::stream::LOAD_DEADLINE,
+    )
+}
+
+/// The broker's outward edge, over the one transport Sift has — D-59's trait, implemented at
+/// the layer that may reach the network.
+///
+/// **What leaves is the address and nothing that identifies the reader**: no cookie, no
+/// referrer, no header naming Sift or its version. The user agent is the generic token some
+/// image hosts refuse to answer without, and the same for every installation.
+#[derive(Debug, Clone, Copy)]
+struct Web;
+
+impl sift_broker::stream::Fetch for Web {
+    type Source = Remote;
+
+    fn open(&mut self, url: &str) -> Result<Remote, Unavailable> {
+        let (host, target) = remote_target(url).ok_or(Unavailable::NotFetchable)?;
+        let mut https = sift_http::Https::to(&host).map_err(|_| Unavailable::NotFetchable)?;
+        let streamed = https
+            .get_streaming(
+                &target,
+                &[
+                    (
+                        "accept".to_owned(),
+                        "image/png,image/gif,image/jpeg,image/webp".to_owned(),
+                    ),
+                    ("user-agent".to_owned(), "Mozilla/5.0".to_owned()),
+                ],
+            )
+            .map_err(|_| Unavailable::NotFetchable)?;
+        // Only the resource itself. A redirect names an address no check above has seen, and
+        // following it would be a fetch the broker never decided.
+        if streamed.head().status != 200 {
+            return Err(Unavailable::NotFetchable);
+        }
+        let declared = streamed
+            .head()
+            .get("content-length")
+            .and_then(|v| v.trim().parse().ok());
+        Ok(Remote { streamed, declared })
+    }
+}
+
+/// One remote resource's body, as the transport reads it.
+#[derive(Debug)]
+pub struct Remote {
+    streamed: sift_http::Streamed,
+    declared: Option<u64>,
+}
+
+impl sift_broker::stream::Source for Remote {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Unavailable> {
+        std::io::Read::read(&mut self.streamed, buf).map_err(|_| Unavailable::NotFetchable)
+    }
+
+    fn declared_length(&self) -> Option<u64> {
+        self.declared
+    }
+}
+
+/// The host and request target a position's address is fetched from, or `None` where it is
+/// not one Sift will fetch.
+///
+/// **HTTPS only, on its own port.** A plain `http:` address is fetched over TLS at the same
+/// host and path — the upgrade a browser's HTTPS-only mode makes — because a cleartext fetch
+/// would disclose the reader to every network between them and the sender, and fails rather
+/// than falling back. An explicit port other than the scheme's own, credentials in the
+/// address, an address literal, and a local name are refused: each reaches something on the
+/// reader's own network rather than a sender's image host.
+///
+/// The target is written into a request line, so every byte of it is either printable ASCII
+/// or percent-encoded, and a control character refuses the whole address rather than being
+/// encoded into one the server will decode.
+fn remote_target(url: &str) -> Option<(String, String)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let default_port = match scheme.to_ascii_lowercase().as_str() {
+        "https" => "443",
+        "http" => "80",
+        _ => return None,
+    };
+    let rest = rest.split('#').next().unwrap_or("");
+    let split = rest.find(['/', '?']).unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(split);
+    if authority.contains('@') || authority.starts_with('[') {
+        return None;
+    }
+    let host = match authority.split_once(':') {
+        Some((host, port)) if port == default_port || port.is_empty() => host,
+        Some(_) => return None,
+        None => authority,
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let local = host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal");
+    let literal = host.bytes().all(|b| b.is_ascii_digit() || b == b'.');
+    let well_formed = !host.is_empty()
+        && host.contains('.')
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    if local || literal || !well_formed {
+        return None;
+    }
+
+    let mut target = String::with_capacity(path.len() + 1);
+    if !path.starts_with('/') {
+        target.push('/');
+    }
+    for b in path.bytes() {
+        match b {
+            0x00..=0x1f | 0x7f => return None,
+            b' ' | 0x80..=0xff | b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}' => {
+                target.push_str(&format!("%{b:02X}"))
+            }
+            _ => target.push(char::from(b)),
+        }
+    }
+    Some((host, target))
 }
 
 /// Write a message's body text and attachment filenames into its index entry — D-81's
@@ -366,10 +567,12 @@ fn describe(reason: &Reason, authority_loaded: bool) -> String {
             }
         }
         Reason::NetworkPolicy => "the current network policy allows no fetches".to_owned(),
-        Reason::Bounds(bound) if bound.starts_with("L-11") => {
+        Reason::Paused => "syncing is paused for this account, so nothing is fetched".to_owned(),
+        Reason::Bounds(bound) if bound.starts_with("L-11") || bound.starts_with("L-12") => {
             "the image's dimensions are larger than Sift will decode".to_owned()
         }
         Reason::Bounds(_) => "the image is larger than Sift will load".to_owned(),
+        Reason::Validation(_) => "it is not an image format Sift will display".to_owned(),
     }
 }
 
@@ -409,6 +612,177 @@ mod tests {
         for leak in ["authority", "backstop", "L-1", "{", "(", "Finding", "Block"] {
             assert!(!text.contains(leak), "{leak:?} leaked into {text:?}");
         }
+    }
+
+    /// C1's defect: the tier said "fetch" and nothing asked whether the account was paused.
+    /// `is_paused` reads the container, which a test cannot open without the platform's
+    /// credential store, so the pause is handed to the hold directly — the mapping from token
+    /// to account, the refusal, and the pruning are what this proves.
+    #[test]
+    fn a_paused_accounts_document_fetches_nothing_and_says_why() {
+        use sift_broker::broker::Request;
+        let mut app = App::new();
+        app.set_window_present(true);
+        app.add_replayed_account("mail").expect("added");
+        app.sync("mail", 5).expect("sync");
+        let listed = crate::list_messages(app.account("mail").expect("open")).expect("list");
+        let id = listed
+            .iter()
+            .map(|(m, _)| *m)
+            .find(|m| {
+                app.open_document(*m, false, false)
+                    .is_ok_and(|d| d.fetching_positions > 0)
+            })
+            .expect("the corpus has a message with remote content");
+        app.allow_remote_content_once(id);
+        let document = app.open_document(id, false, false).expect("opened");
+        let infrastructure = sift_block::origin::Infrastructure::default();
+        let request = |i: usize| Request {
+            url: format!(
+                "{}://{}/{i}",
+                sift_foundation::identifiers::INTERNAL_SCHEME,
+                document.token
+            ),
+            transferred_length: None,
+        };
+        let allowed = (0..document.fetching_positions)
+            .find(|&i| {
+                app.resources
+                    .grant(&request(i), &app.filter, &infrastructure)
+                    .is_ok()
+            })
+            .expect("consent was given and something is allowed");
+        assert_eq!(
+            app.document_owners.len(),
+            app.resources.live_documents(),
+            "one owner per live document, and no more"
+        );
+
+        app.hold_paused_documents(|owner| owner == "mail");
+        assert_eq!(
+            app.resources
+                .grant(&request(allowed), &app.filter, &infrastructure)
+                .unwrap_err(),
+            Answer::Blocked(Reason::Paused)
+        );
+        assert!(
+            app.resources
+                .withheld(&document.token, &app.filter, &infrastructure)
+                .expect("live")
+                .iter()
+                .all(Option::is_some),
+            "the reader's count must say every position is withheld while paused"
+        );
+
+        app.hold_paused_documents(|_| false);
+        assert!(
+            app.resources
+                .grant(&request(allowed), &app.filter, &infrastructure)
+                .is_ok()
+        );
+
+        assert!(app.close_document(&document.token));
+        assert!(!app.document_owners.contains_key(&document.token));
+        app.resources.shed();
+        app.resources_under_tier();
+        assert!(app.document_owners.is_empty(), "a shed's tokens were kept");
+    }
+
+    #[test]
+    fn a_pause_refusal_says_so() {
+        let text = describe(&Reason::Paused, true);
+        assert_eq!(
+            text,
+            "syncing is paused for this account, so nothing is fetched"
+        );
+        in_the_readers_terms(&text);
+    }
+
+    #[test]
+    fn a_validation_refusal_and_a_raster_bound_are_in_the_readers_terms() {
+        for reason in [
+            Reason::Validation("not a raster format the broker passes through"),
+            Reason::Bounds("L-12 rasterized pixels"),
+        ] {
+            in_the_readers_terms(&describe(&reason, true));
+        }
+        assert_eq!(
+            describe(&Reason::Bounds("L-12 rasterized pixels"), true),
+            describe(&Reason::Bounds("L-11 decoded pixels"), true),
+            "the two pixel bounds are one sentence to a reader"
+        );
+    }
+
+    #[test]
+    fn a_remote_address_is_fetched_over_tls_at_its_own_host_and_path() {
+        assert_eq!(
+            remote_target("https://cdn.example.test/a/b.png?x=1#frag"),
+            Some(("cdn.example.test".to_owned(), "/a/b.png?x=1".to_owned()))
+        );
+        // Upgraded, never fetched in the clear.
+        assert_eq!(
+            remote_target("http://CDN.example.test:80?q"),
+            Some(("cdn.example.test".to_owned(), "/?q".to_owned()))
+        );
+        assert_eq!(
+            remote_target("https://cdn.example.test/a b/é"),
+            Some(("cdn.example.test".to_owned(), "/a%20b/%C3%A9".to_owned()))
+        );
+    }
+
+    #[test]
+    fn an_address_that_reaches_the_readers_own_network_is_not_fetched() {
+        for url in [
+            "https://localhost/x.png",
+            "https://printer.local/x.png",
+            "https://192.168.1.1/x.png",
+            "https://[::1]/x.png",
+            "https://user:pass@cdn.example.test/x.png",
+            "https://cdn.example.test:8443/x.png",
+            "http://cdn.example.test:443/x.png",
+            "ftp://cdn.example.test/x.png",
+            "file:///etc/passwd",
+            "https:///x.png",
+            "https://intranet/x.png",
+        ] {
+            assert_eq!(remote_target(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_control_character_refuses_the_address_rather_than_reaching_the_request_line() {
+        // The target is written into `GET <target> HTTP/1.1`, so a line break in it would be
+        // a second header the sender wrote.
+        assert_eq!(
+            remote_target("https://cdn.example.test/x.png\r\nx-injected: 1"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_allowed_image_is_fetched_on_demand_in_every_tier_that_permits_a_fetch() {
+        use sift_net::tier::Tier;
+        for tier in [Tier::Unrestricted, Tier::Conservative, Tier::Minimal] {
+            assert!(fetches_on_demand(tier), "{tier:?}");
+        }
+        for tier in [Tier::OfflinePortal, Tier::OfflineNoPath, Tier::Paused] {
+            assert!(!fetches_on_demand(tier), "{tier:?}");
+        }
+    }
+
+    #[test]
+    fn the_broker_follows_the_recorded_tier_and_never_prefetches_outside_unrestricted() {
+        use sift_net::tier::Tier;
+        let mut app = App::new();
+        assert!(
+            !app.resources.may_prefetch(),
+            "the unknown state prefetched"
+        );
+        assert!(app.resources.tier_permits_fetch);
+        app.set_network_tier(Tier::Paused);
+        assert!(!app.resources.tier_permits_fetch, "a pause still fetched");
+        app.set_network_tier(Tier::Unrestricted);
+        assert!(app.resources.may_prefetch());
     }
 
     #[test]

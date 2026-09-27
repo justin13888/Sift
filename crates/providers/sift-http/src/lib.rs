@@ -222,6 +222,90 @@ impl Https {
     }
 }
 
+/// A response whose body is read as it arrives, over a connection nothing else shares.
+pub struct Streamed {
+    head: wire::Head,
+    body: wire::Body<Tls>,
+}
+
+impl Streamed {
+    /// The answer's status line and headers.
+    #[must_use]
+    pub const fn head(&self) -> &wire::Head {
+        &self.head
+    }
+
+    /// Bytes read from the socket for this answer so far, the head included.
+    ///
+    /// Above the TLS layer, so it undercounts FR-36's figure by the record framing; the
+    /// transport's [`Meter`] is the one that counts the interface.
+    #[must_use]
+    pub const fn received(&self) -> u64 {
+        self.body.received()
+    }
+}
+
+impl Read for Streamed {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.body.read(buf)
+    }
+}
+
+impl core::fmt::Debug for Streamed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Streamed")
+            .field("status", &self.head.status)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Https {
+    /// Issue one `GET` and hand back the head with the body still on the wire.
+    ///
+    /// **Always on a fresh connection, which the answer then owns.** A pooled one would be
+    /// held for as long as the reader takes, and a body abandoned mid-stream leaves the
+    /// connection in a state no later request may reuse — so neither direction of sharing
+    /// is safe, and this one simply does not.
+    ///
+    /// The request asks for `identity`: a streamed body cannot be decompressed under a bound
+    /// without buffering it, which is what streaming exists to avoid. An answer in any other
+    /// coding is refused rather than passed on. No status is interpreted here; a streaming
+    /// caller decides what a non-success status means for it.
+    ///
+    /// # Errors
+    /// [`TransportError::Transient`] where no connection could be made, and
+    /// [`TransportError::Refused`] or [`TransportError::Unknown`] where the far end's answer
+    /// could not be read or used.
+    pub fn get_streaming(
+        &mut self,
+        target: &str,
+        headers: &[(String, String)],
+    ) -> Result<Streamed, TransportError> {
+        let bytes = wire::serialize_accepting("GET", target, &self.host, headers, b"", "identity");
+        let mut tls = self.connect()?;
+        tls.write_all(&bytes)
+            .and_then(|()| tls.flush())
+            .map_err(|_| TransportError::Unknown)?;
+        let mut incoming = wire::Incoming::new(tls);
+        let head = incoming.head().map_err(from_wire)?;
+        let coding = head
+            .get("content-encoding")
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if !coding.is_empty() && coding != "identity" {
+            return Err(TransportError::Refused(format!(
+                "the answer used a content coding that was not asked for: `{coding}`"
+            )));
+        }
+        let framing = head.framing();
+        Ok(Streamed {
+            head,
+            body: incoming.into_body(framing),
+        })
+    }
+}
+
 /// Translate a status into either an answer or one of D-87's and D-85's states.
 ///
 /// The split matters: a 404 is an **answer** the adapter reads, and a 429 is a schedule.

@@ -37,5 +37,10 @@ sift-subsystem.workspace = true
 # D-19's blocking pool, where a sync and a wheel fire's work run instead of on the shell's loop.
 sift-runtime.workspace = true
 
+[dev-dependencies]
+# The origin and the authority a test grant is decided under — a stream's revocation is
+# tested at the boundary without a network or a rendered message behind it.
+sift-block.workspace = true
+
 [lib]
 crate-type = ["staticlib", "rlib"]

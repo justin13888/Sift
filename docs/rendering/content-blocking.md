@@ -214,6 +214,22 @@ not practical.
 attempted, because a decode bomb reaching Sift is a denial of service on the user's mail under
 NFR-19.
 
+**What "bounded structural validation" is.** The leading bytes of what arrives must identify one of the
+common raster formats — PNG, GIF, JPEG, WebP — and the dimensions that format's own header states are
+held to L-12 before a single byte is handed to the engine, which is the component that will decode it.
+The search for the header is itself bounded: a JPEG's frame header follows whatever metadata the sender
+put first, and a sender who could make the broker read without limit to find it would have found the
+buffering [D-91](../architecture/resource-broker.md) rejects. Anything else is refused as a deterministic
+blocked answer — a format the broker cannot bound is one whose decode it cannot bound.
+
+**Vector images are refused today.** Rasterizing in the broker needs a vector renderer inside the core,
+facing hostile input, and none is in it; D-29 names refusal as the honest fallback for exactly this
+case. A vector image the reader allowed is therefore reported blocked, with its reason, rather than
+handed to the engine's own parser.
+
+Every byte that arrives is counted against L-10 and L-13 as it arrives, whatever length was declared,
+and a resource that crosses either is refused rather than truncated.
+
 **What it costs:** two paths through the broker instead of one, and metadata in original bytes is passed
 to the engine rather than stripped. The latter is acceptable because the body view has no network and no
 script, so metadata is inert there.

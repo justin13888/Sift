@@ -382,6 +382,20 @@ private final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler {
     /// here, and FR-33 item 5 will read the same stream. `nil` in the application today.
     private let observe: ((URLRequest) -> Void)?
 
+    /// Where a granted load's fetch runs: **never the thread the engine asked on** (D-91), and
+    /// at most L-29 at once, so a message with several hundred allowed images queues here
+    /// rather than parking a thread per image inside the broker's own slot wait.
+    private let loads: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "sift.body-view.resources"
+        queue.maxConcurrentOperationCount = max(1, Int(sift_resource_concurrency()))
+        queue.qualityOfService = .userInitiated
+        return queue
+    }()
+
+    /// Every load in flight, by task. Main thread only.
+    private var inFlight: [ObjectIdentifier: Load] = [:]
+
     init(app: @escaping (URL) -> OpaquePointer?, observe: ((URLRequest) -> Void)?) {
         self.app = app
         self.observe = observe
@@ -396,8 +410,9 @@ private final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler {
         let bytes = Array(url.absoluteString.utf8)
         // Start at unavailable: a resolve that never ran must not read as one that succeeded.
         var answer = SiftResourceAnswer(SiftResourceAnswer_UNAVAILABLE)
+        var stream: UnsafeMutablePointer<SiftResourceStream>?
         let status = bytes.withUnsafeBufferPointer { p in
-            sift_resolve_resource(UnsafeMutablePointer(app), p.baseAddress, p.count, &answer)
+            sift_resource_open(UnsafeMutablePointer(app), p.baseAddress, p.count, &answer, &stream)
         }
 
         // Blocked and unavailable are both "no bytes", and they are deliberately not the same
@@ -405,20 +420,133 @@ private final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler {
         // count the reader draws comes from the layer rather than from what happened here.
         // Either way the body view is told nothing about which — a document that could tell
         // them apart could probe.
-        guard status == Ok, answer == SiftResourceAnswer(SiftResourceAnswer_BYTES) else {
+        guard status == Ok, answer == SiftResourceAnswer(SiftResourceAnswer_BYTES),
+            let stream
+        else {
+            if let stream { sift_resource_close(stream) }
             task.didFailWithError(URLError(.resourceUnavailable))
             return
         }
 
-        // Streaming the bytes themselves is the next piece of this: the broker answers with a
-        // length today, and a body with several hundred positions is exactly why they must not
-        // all be buffered whole. Until the stream is wired, an allowed resource is reported as
-        // unavailable rather than fabricated — an empty image drawn as though it had loaded
-        // would be a lie told to the person reading.
-        task.didFailWithError(URLError(.resourceUnavailable))
+        // Granted. The fetch, its validation and every byte happen off this thread; each
+        // answer to the engine is made back on it, and only while the engine still wants one.
+        let load = Load(task: task, url: url, stream: stream)
+        let key = ObjectIdentifier(task)
+        inFlight[key] = load
+        loads.addOperation {
+            load.run { [weak self] in self?.inFlight[key] = nil }
+        }
     }
 
-    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
+    /// The engine no longer wants this load — the document navigated, or the view went.
+    ///
+    /// Nothing more is said to the task after this: a task told anything once stopped raises
+    /// an exception in the engine. The fetch notices at its next read and releases its stream,
+    /// and with it the document's slot.
+    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {
+        inFlight.removeValue(forKey: ObjectIdentifier(task))?.stop()
+    }
+}
+
+/// One granted load: a stream read on the handler's queue, answered to the engine on the main
+/// thread.
+///
+/// **Every call on the task is made on the main thread, and only while it is live.** The
+/// handler is called there, `stop` arrives there, and a task answered after it was stopped is
+/// an exception in WebKit rather than a no-op — so "live" is a main-thread fact, checked where
+/// it cannot change underneath the answer.
+private final class Load {
+    private let task: WKURLSchemeTask
+    private let url: URL
+    /// Owned by the queue's operation from `run` on. Closed exactly once, by it.
+    private let stream: UnsafeMutablePointer<SiftResourceStream>
+    /// Set on the main thread by `stop`; read by the operation between reads. A lock rather
+    /// than main-thread confinement, because the operation must not wait on the main thread
+    /// just to learn it has nothing left to do.
+    private let lock = NSLock()
+    private var cancelled = false
+    /// Main thread only. Whether the engine still wants answers for this task.
+    private var live = true
+
+    /// How much one read hands over. The stream never holds more than one read's worth, so
+    /// neither does this.
+    private static let chunk = 64 * 1024
+
+    init(task: WKURLSchemeTask, url: URL, stream: UnsafeMutablePointer<SiftResourceStream>) {
+        self.task = task
+        self.url = url
+        self.stream = stream
+    }
+
+    /// Main thread.
+    func stop() {
+        live = false
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    private var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    /// On the handler's queue. Blocks on the network; never called on the main thread.
+    func run(finished: @escaping () -> Void) {
+        defer { sift_resource_close(stream) }
+
+        var mime = SiftStr()
+        guard !isCancelled, sift_resource_begin(stream, &mime) == Ok, let type = mime.ptr else {
+            answer(finished) { $0.didFailWithError(URLError(.resourceUnavailable)) }
+            return
+        }
+        // The type the bytes established, never the one the server claimed: the engine is not
+        // left to sniff past what the broker validated.
+        let mimeType = String(
+            decoding: UnsafeBufferPointer(start: type, count: mime.len), as: UTF8.self)
+        let response = URLResponse(
+            url: url, mimeType: mimeType, expectedContentLength: -1, textEncodingName: nil)
+        answer(nil) { $0.didReceive(response) }
+
+        var buffer = [UInt8](repeating: 0, count: Load.chunk)
+        while !isCancelled {
+            var count = 0
+            let status = buffer.withUnsafeMutableBufferPointer { p in
+                sift_resource_read(stream, p.baseAddress, p.count, &count)
+            }
+            guard status == Ok else {
+                // Ended without its bytes — revoked, past its deadline, over a bound, or cut
+                // short. Failed rather than finished, so what was already handed over is not
+                // drawn as though it were the whole image.
+                answer(finished) { $0.didFailWithError(URLError(.resourceUnavailable)) }
+                return
+            }
+            if count == 0 {
+                answer(finished) { $0.didFinish() }
+                return
+            }
+            let data = Data(buffer[0..<count])
+            answer(nil) { $0.didReceive(data) }
+        }
+        answer(finished) { _ in }
+    }
+
+    /// Tell the task something on the main thread, if it is still live; then, where given,
+    /// report the load finished.
+    ///
+    /// Synchronous, which is the backpressure: the queue reads no further ahead of the engine
+    /// than one chunk, so a slow main thread cannot make a load hold its whole body in the
+    /// main queue. The main thread never waits on this queue, so it cannot deadlock.
+    private func answer(_ finished: (() -> Void)?, _ call: (WKURLSchemeTask) -> Void) {
+        DispatchQueue.main.sync {
+            if live {
+                call(task)
+                if finished != nil { live = false }
+            }
+            finished?()
+        }
+    }
 }
 
 /// N-1's policy layer for the schemes WebKit supports natively.
