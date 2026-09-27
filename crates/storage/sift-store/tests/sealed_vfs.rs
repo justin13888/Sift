@@ -432,3 +432,291 @@ fn an_accounts_files_do_not_open_under_another_accounts_key() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ---------------------------------------------------------------------------------------
+// D-22's lazy rotation.
+// ---------------------------------------------------------------------------------------
+
+/// Open a sealed connection with both generations of a rotating key.
+fn open_rotating(path: &Path, current: &[u8; 32], retiring: &[u8; 32]) -> Connection {
+    vfs::register().expect("the VFS registers");
+    vfs::present_rotating_key(
+        path,
+        file_key(current, Role::Store),
+        file_key_id(current, Role::Store),
+        file_key(retiring, Role::Store),
+        file_key_id(retiring, Role::Store),
+    );
+    let conn = Connection::open_with_flags_and_vfs(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+        vfs::VFS_NAME,
+    )
+    .expect("open through the sealed VFS");
+    apply_pragmas(&conn);
+    conn
+}
+
+/// Rows large enough that the table spans many pages, so a rotation that rewrites a few of them
+/// leaves the rest under the old key.
+fn fill(conn: &Connection) {
+    conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v BLOB NOT NULL);")
+        .expect("schema");
+    for i in 0..200i64 {
+        conn.execute(
+            "INSERT INTO t (id, v) VALUES (?1, ?2)",
+            rusqlite::params![i, vec![u8::try_from(i % 251).unwrap_or(0); 1500]],
+        )
+        .expect("insert");
+    }
+}
+
+/// Every row reads back as `fill` wrote it, or as `touch` rewrote it.
+fn assert_intact(conn: &Connection) {
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .expect("integrity_check runs");
+    assert_eq!(integrity, "ok");
+    let mut stmt = conn
+        .prepare("SELECT id, v FROM t ORDER BY id")
+        .expect("prepare");
+    let rows: Vec<(i64, Vec<u8>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("every row reads");
+    assert_eq!(rows.len(), 200);
+    for (id, v) in rows {
+        let expected = if id < 10 {
+            0xEE
+        } else {
+            u8::try_from(id % 251).unwrap_or(0)
+        };
+        assert!(v.iter().all(|b| *b == expected), "row {id} changed");
+    }
+}
+
+/// Rewrite the first few rows, which re-seals the pages that hold them and no others.
+fn touch(conn: &Connection) {
+    conn.execute("UPDATE t SET v = ?1 WHERE id < 10", [vec![0xEEu8; 1500]])
+        .expect("update");
+}
+
+/// The issue's first test: a store half re-sealed, across a restart.
+///
+/// Written under the old key, then opened with both and partly rewritten, then closed — which is
+/// the restart — and opened again. Both generations must be on disk at once, and both must read.
+#[test]
+fn a_store_half_re_sealed_across_a_restart_reads_under_both_generations() {
+    let dir = scratch("rotate-half");
+    let path = dir.join("account.store");
+    let (old, new) = (owner(20), owner(21));
+    let (old_id, new_id) = (
+        file_key_id(&old, Role::Store),
+        file_key_id(&new, Role::Store),
+    );
+
+    {
+        let conn = open_sealed(&path, &old);
+        fill(&conn);
+    }
+    vfs::withdraw_key(&path);
+    let before = vfs::generations(&path).expect("count");
+    assert_eq!(before.keys().copied().collect::<Vec<_>>(), vec![old_id]);
+
+    {
+        let conn = open_rotating(&path, &new, &old);
+        touch(&conn);
+    }
+    vfs::withdraw_key(&path);
+
+    let half = vfs::generations(&path).expect("count");
+    let (under_old, under_new) = (half[&old_id], half[&new_id]);
+    assert!(under_new > 0, "nothing was re-sealed under the new key");
+    assert!(
+        under_old > 0,
+        "every page was rewritten, so this is not the half-re-sealed store under test"
+    );
+    assert!(
+        under_old < before[&old_id],
+        "the rewritten pages still count as the old key's"
+    );
+    let header = vfs::headers(&path).expect("headers")[0];
+    assert_eq!(header.key_id, new_id, "the header still names the old key");
+    assert_eq!(header.retiring.map(|r| r.key_id), Some(old_id));
+
+    // The restart: nothing carried over but the files and both keys.
+    {
+        let conn = open_rotating(&path, &new, &old);
+        assert_intact(&conn);
+    }
+    vfs::withdraw_key(&path);
+    assert_eq!(
+        vfs::generations(&path).expect("count")[&old_id],
+        under_old,
+        "reading re-sealed pages, or lost the count across the restart"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The retirement rule: the old key goes only when no page carries it, and after it goes the
+/// store opens under the new key alone.
+#[test]
+fn the_old_generation_is_retired_only_once_no_page_carries_it() {
+    let dir = scratch("rotate-retire");
+    let path = dir.join("account.store");
+    let (old, new) = (owner(22), owner(23));
+    let old_id = file_key_id(&old, Role::Store);
+
+    {
+        let conn = open_sealed(&path, &old);
+        fill(&conn);
+    }
+    vfs::withdraw_key(&path);
+    {
+        let conn = open_rotating(&path, &new, &old);
+        touch(&conn);
+    }
+    vfs::withdraw_key(&path);
+
+    let refused = vfs::forget_retired(&path, old_id).expect_err("pages still carry the old key");
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(vfs::headers(&path).expect("headers")[0].retiring.is_some());
+
+    // Rewriting every page is what finishes a lazy rotation; VACUUM is the engine doing so.
+    {
+        let conn = open_rotating(&path, &new, &old);
+        conn.execute_batch("VACUUM;").expect("vacuum");
+    }
+    vfs::withdraw_key(&path);
+    assert_eq!(vfs::generations(&path).expect("count").get(&old_id), None);
+
+    vfs::forget_retired(&path, old_id).expect("nothing carries it now");
+    assert_eq!(vfs::headers(&path).expect("headers")[0].retiring, None);
+
+    {
+        let conn = open_sealed(&path, &new);
+        assert_intact(&conn);
+    }
+    vfs::withdraw_key(&path);
+
+    // With the old generation struck, the next rotation starts from one generation rather than
+    // being refused as a third.
+    let newer = owner(29);
+    {
+        let conn = open_rotating(&path, &newer, &new);
+        touch(&conn);
+        assert_intact(&conn);
+    }
+    vfs::withdraw_key(&path);
+    let header = vfs::headers(&path).expect("headers")[0];
+    assert_eq!(header.key_id, file_key_id(&newer, Role::Store));
+    assert_eq!(
+        header.retiring.map(|r| r.key_id),
+        Some(file_key_id(&new, Role::Store))
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Two generations is what the header has room for. A file whose previous rotation still has
+/// pages is refused a third rather than left with pages nothing can open.
+#[test]
+fn a_third_generation_is_refused_while_the_second_still_carries_pages() {
+    let dir = scratch("rotate-third");
+    let path = dir.join("account.store");
+    let (first, second, third) = (owner(24), owner(25), owner(26));
+
+    {
+        let conn = open_sealed(&path, &first);
+        fill(&conn);
+    }
+    vfs::withdraw_key(&path);
+    {
+        let conn = open_rotating(&path, &second, &first);
+        touch(&conn);
+    }
+    vfs::withdraw_key(&path);
+
+    vfs::register().expect("registers");
+    vfs::present_rotating_key(
+        &path,
+        file_key(&third, Role::Store),
+        file_key_id(&third, Role::Store),
+        file_key(&second, Role::Store),
+        file_key_id(&second, Role::Store),
+    );
+    let opened = Connection::open_with_flags_and_vfs(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        vfs::VFS_NAME,
+    );
+    let refused = match opened {
+        Err(_) => true,
+        Ok(conn) => conn
+            .query_row("SELECT count(*) FROM t", [], |r| r.get::<_, i64>(0))
+            .is_err(),
+    };
+    assert!(
+        refused,
+        "a third generation was started over live pages of the first"
+    );
+    vfs::withdraw_key(&path);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The issue's second test: a page under a destroyed old key is recognised rather than reported
+/// as corrupt. The account refuses to open and says which key its pages need, and how many.
+#[test]
+fn an_account_under_a_destroyed_old_key_is_recognised_rather_than_corrupt() {
+    use sift_foundation::identity::AccountId;
+    use sift_store::account::{Account, AccountPaths, OpenError};
+
+    let dir = scratch("rotate-destroyed");
+    let id = AccountId::from_u128(0x107);
+    let paths = AccountPaths::under(&dir, id);
+    let (old, new) = (owner(27), owner(28));
+
+    {
+        let a = Account::open_sealed(&paths, id, &old).expect("create under the old key");
+        for i in 0..200 {
+            a.store
+                .execute(
+                    "INSERT INTO tag (name) VALUES (?1)",
+                    [format!("{i}-{}", "x".repeat(400))],
+                )
+                .expect("a row");
+        }
+    }
+    {
+        let a = Account::open_sealed_rotating(&paths, id, &new, Some(&old)).expect("rotate");
+        a.store
+            .execute("INSERT INTO tag (name) VALUES ('after the rotation')", [])
+            .expect("a write re-seals what it touches");
+    }
+    let left = Account::retiring_pages(&paths, &old).expect("count");
+    assert!(left > 0, "every page was rewritten; nothing is under test");
+
+    // The old key is destroyed too early. The open names the key and the pages, rather than
+    // opening and failing at whichever page the first query happens to reach.
+    match Account::open_sealed(&paths, id, &new) {
+        Err(OpenError::KeyNotHeld { key_id, pages }) => {
+            assert!(
+                key_id == file_key_id(&old, Role::Store)
+                    || key_id == file_key_id(&old, Role::Journal),
+                "named a key that is not the retired one"
+            );
+            assert!(pages > 0);
+        }
+        other => panic!("expected the retired key to be recognised, got {other:?}"),
+    }
+
+    // Held again, both generations read.
+    let a = Account::open_sealed_rotating(&paths, id, &new, Some(&old)).expect("reopen");
+    let n: i64 = a
+        .store
+        .query_row("SELECT count(*) FROM tag", [], |r| r.get(0))
+        .expect("count");
+    assert!(n >= 201, "rows were lost: {n}");
+    drop(a);
+    std::fs::remove_dir_all(&dir).ok();
+}

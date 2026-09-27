@@ -13,6 +13,17 @@ pub enum OpenError {
     /// The sealing layer refused. Distinct from a SQL error because the answer is different:
     /// a file that does not authenticate is discarded and resynced, never repaired.
     Sealing(String),
+    /// Pages of a file are sealed under a key this open was not given.
+    ///
+    /// **Recognised, not corrupt** — D-76's key identifier exists for this. The files name
+    /// the key they need and it is not held: destroyed with the account, or retired before the
+    /// last page under it was re-sealed. Distinct from [`Sealing`](Self::Sealing) because it
+    /// is a statement about a key, not about the integrity of the bytes.
+    KeyNotHeld {
+        key_id: sift_crypto::page::KeyId,
+        /// How many sealed units carry it.
+        pages: u64,
+    },
 }
 
 impl From<rusqlite::Error> for OpenError {
@@ -32,6 +43,10 @@ impl core::fmt::Display for OpenError {
             Self::Schema(e) => write!(f, "{e}"),
             Self::Sql(e) => write!(f, "{e}"),
             Self::Sealing(e) => write!(f, "{e}"),
+            Self::KeyNotHeld { pages, .. } => write!(
+                f,
+                "{pages} sealed pages are under a key this installation no longer holds"
+            ),
         }
     }
 }
@@ -133,21 +148,123 @@ impl Account {
         id: AccountId,
         owner_key: &[u8; 32],
     ) -> Result<Self, OpenError> {
+        Self::open_sealed_rotating(paths, id, owner_key, None)
+    }
+
+    /// Open an account part-way through D-22's lazy key rotation: `owner_key` is the current
+    /// account key and `retiring` the one being retired, if any.
+    ///
+    /// Files still under the retiring key begin their rotation at their first write, and from
+    /// then on every page is re-sealed under the current key as the engine writes it. Pages not
+    /// yet rewritten stay readable under the retiring key. [`retiring_pages`](Self::retiring_pages)
+    /// is how the caller learns when none is left and the retiring key may be destroyed.
+    ///
+    /// Before anything is opened, each file's header is checked for a key it names that this
+    /// open was not given. Where one names a key that still carries pages, the open is refused
+    /// with [`OpenError::KeyNotHeld`] — recognised, rather than surfacing later as a page that
+    /// fails to read.
+    ///
+    /// # Errors
+    /// As [`open_sealed`](Self::open_sealed), and [`OpenError::KeyNotHeld`] as above.
+    pub fn open_sealed_rotating(
+        paths: &AccountPaths,
+        id: AccountId,
+        owner_key: &[u8; 32],
+        retiring: Option<&[u8; 32]>,
+    ) -> Result<Self, OpenError> {
         crate::vfs::register().map_err(OpenError::Sealing)?;
-        crate::vfs::present_key(
-            &paths.store,
-            derive::file_key(owner_key, derive::Role::Store),
-            derive::file_key_id(owner_key, derive::Role::Store),
-        );
-        crate::vfs::present_key(
-            &paths.journal,
-            derive::file_key(owner_key, derive::Role::Journal),
-            derive::file_key_id(owner_key, derive::Role::Journal),
-        );
+        for (path, role) in Self::sealed_files(paths) {
+            let held = [
+                Some(derive::file_key_id(owner_key, role)),
+                retiring.map(|k| derive::file_key_id(k, role)),
+            ];
+            Self::refuse_unheld(path, &held)?;
+        }
+        for (path, role) in Self::sealed_files(paths) {
+            let key = derive::file_key(owner_key, role);
+            let key_id = derive::file_key_id(owner_key, role);
+            match retiring {
+                Some(old) => crate::vfs::present_rotating_key(
+                    path,
+                    key,
+                    key_id,
+                    derive::file_key(old, role),
+                    derive::file_key_id(old, role),
+                ),
+                None => crate::vfs::present_key(path, key, key_id),
+            }
+        }
         let opened = Self::open_through(paths, id, Some(crate::vfs::VFS_NAME));
         crate::vfs::withdraw_key(&paths.store);
         crate::vfs::withdraw_key(&paths.journal);
         opened
+    }
+
+    /// How many sealed pages of an account's files are still under `retiring`, the account key
+    /// being retired.
+    ///
+    /// D-22: the old key is destroyed only when this is zero. It reads every page's counter and
+    /// decrypts nothing. The account MUST be closed, so the count is of what is durable rather
+    /// than of what the engine is part-way through writing.
+    ///
+    /// # Errors
+    /// A file could not be read.
+    pub fn retiring_pages(paths: &AccountPaths, retiring: &[u8; 32]) -> std::io::Result<u64> {
+        let mut total = 0;
+        for (path, role) in Self::sealed_files(paths) {
+            let id = derive::file_key_id(retiring, role);
+            total += crate::vfs::generations(path)?
+                .get(&id)
+                .copied()
+                .unwrap_or(0);
+        }
+        Ok(total)
+    }
+
+    /// Strike the retired account key from both files' headers, once no page carries it — the
+    /// step before the key itself is destroyed. The account MUST be closed.
+    ///
+    /// # Errors
+    /// A page still carries it, or a file could not be read or written.
+    pub fn forget_retired(paths: &AccountPaths, retired: &[u8; 32]) -> std::io::Result<()> {
+        for (path, role) in Self::sealed_files(paths) {
+            crate::vfs::forget_retired(path, derive::file_key_id(retired, role))?;
+        }
+        Ok(())
+    }
+
+    const fn sealed_files(paths: &AccountPaths) -> [(&PathBuf, derive::Role); 2] {
+        [
+            (&paths.store, derive::Role::Store),
+            (&paths.journal, derive::Role::Journal),
+        ]
+    }
+
+    /// Refuse a file whose header names a key not in `held` while pages still carry it.
+    ///
+    /// The header read is one per file and needs no key; the page count behind it is paid only
+    /// when a header names something unheld.
+    fn refuse_unheld(
+        path: &Path,
+        held: &[Option<sift_crypto::page::KeyId>],
+    ) -> Result<(), OpenError> {
+        let io = |e: std::io::Error| OpenError::Sealing(format!("{}: {e}", path.display()));
+        let named = crate::vfs::headers(path)
+            .map_err(io)?
+            .into_iter()
+            .flat_map(|h| std::iter::once(h.key_id).chain(h.retiring.map(|r| r.key_id)));
+        let unheld: Vec<_> = named.filter(|id| !held.contains(&Some(*id))).collect();
+        if unheld.is_empty() {
+            return Ok(());
+        }
+        let counts = crate::vfs::generations(path).map_err(io)?;
+        for key_id in unheld {
+            let pages = counts.get(&key_id).copied().unwrap_or(0);
+            if pages > 0 {
+                return Err(OpenError::KeyNotHeld { key_id, pages });
+            }
+        }
+        Ok(())
     }
 
     fn open_through(
