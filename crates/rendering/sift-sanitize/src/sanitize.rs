@@ -5,7 +5,9 @@ use html5ever::driver::ParseOpts;
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::{parse_document, serialize};
 use markup5ever_rcdom::{Handle, NodeData, RcDom, SerializableHandle};
-use sift_foundation::limits::{L6_DOM_DEPTH, L7_DOM_NODES, L8_ATTRS_PER_ELEMENT};
+use sift_foundation::limits::{
+    L6_DOM_DEPTH, L7_DOM_NODES, L8_ATTRS_PER_ELEMENT, L35_SANITIZE_PASSES,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -22,19 +24,19 @@ pub enum SanitizeError {
     TooManyNodes,
     /// L-8.
     TooManyAttributes,
-    /// I8 could not be established: after [`STABILITY_PASSES`] passes the output still
+    /// L-35. I8 could not be established: after [`STABILITY_PASSES`] passes the output still
     /// reparsed into a different document. Refused rather than rendered, because the tree the
     /// engine would build is then one the policy never inspected.
     Unstable,
 }
 
 /// How many policy passes [`sanitize`] may make before it refuses a document whose output
-/// will not settle — the first, and the ones over its own reparsed output.
+/// will not settle — L-35, from the limits register like every other bound this pass
+/// enforces.
 ///
-/// One re-pass settles every instability the fuzzing has found so far; the margin is for
-/// constructions it has not. Each pass is a full parse, walk and serialization, so a document
-/// that settles costs two passes and one that never does costs this many and is refused.
-pub const STABILITY_PASSES: usize = 4;
+/// A document that settles costs two passes; one that never does costs this many and is
+/// refused.
+pub const STABILITY_PASSES: usize = L35_SANITIZE_PASSES as usize;
 
 /// One rewritten fetching position.
 ///
