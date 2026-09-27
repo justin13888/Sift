@@ -693,6 +693,40 @@ mod tests {
     }
 
     #[test]
+    fn a_shed_cancels_a_fetch_mid_body_and_wakes_a_fetch_waiting_for_a_slot() {
+        // D-93: L3 revokes every live document at once, and each grant under one learns it
+        // exactly as it would from navigation — the stream at its next read, the waiter at once.
+        let bound = usize::try_from(L29_DOC_CONCURRENCY).unwrap();
+        let (mut broker, token, first) = granted(bound + 1);
+        let mut body = png(10, 10);
+        body.extend(std::iter::repeat_n(0, 4096));
+        let mut fetch = canned(body);
+        let mut stream = open(first, &mut fetch, later()).expect("validated");
+        let mut buf = [0u8; 8];
+        stream.read(&mut buf).expect("live");
+
+        let mut held = Vec::new();
+        for i in 1..bound {
+            let mut grant = grant_for(&broker, &token, i).expect("allowed");
+            grant.acquire(later()).expect("a free slot");
+            held.push(grant);
+        }
+        assert_eq!(broker.in_flight(token.as_str()), Some(bound));
+        let mut waiting = grant_for(&broker, &token, bound).expect("allowed");
+        let waiter = std::thread::spawn(move || waiting.acquire(Instant::now() + LOAD_DEADLINE));
+
+        broker.shed();
+
+        assert_eq!(waiter.join().unwrap(), Err(Unavailable::Revoked));
+        assert_eq!(
+            stream.read(&mut buf),
+            Err(Answer::Unavailable(Unavailable::Revoked))
+        );
+        assert!(held.iter().all(Grant::is_revoked));
+        assert_eq!(broker.live_documents(), 0);
+    }
+
+    #[test]
     fn a_refused_position_is_granted_nothing() {
         // The grant is the same decision as the answer: an unallowed sender fetches nothing.
         let mut broker = Broker::new();
