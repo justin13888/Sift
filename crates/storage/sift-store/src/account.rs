@@ -578,19 +578,16 @@ mod tests {
     fn the_held_departures_a_sync_round_settles_are_found_without_a_scan() {
         // D-44: every sync round of an account whose identifiers do not survive a move looks
         // for its held departures, which are marked by an absent provider identifier. The
-        // statement is sift-sync's settle, verbatim.
+        // statement is the one sift-sync's settle prepares, shared through the schema module,
+        // so a change to it is planned here.
         let s = Scratch::new("held");
         let a = Account::open(&s.paths(), AccountId::from_u128(1)).expect("open");
         let mut stmt = a
             .store
-            .prepare(
-                "EXPLAIN QUERY PLAN
-                 SELECT m.id, m.thread_id, t.remote_thread_id, m.internet_message_id,
-                        m.fallback_digest, m.digest_rule_version
-                 FROM message m LEFT JOIN thread t ON t.id = m.thread_id
-                 WHERE m.remote_id IS NULL
-                   AND NOT EXISTS (SELECT 1 FROM message_location l WHERE l.message_id = m.id)",
-            )
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                crate::schema::HELD_DEPARTURES
+            ))
             .expect("explain");
         let chosen = stmt
             .query_map([], |r| r.get::<_, String>(3))

@@ -26,6 +26,7 @@ use sift_provider::adapter::{
     Change, Delta, Envelope, Provenance, RemoteFolder, RemoteFolderId, RemoteMessageId, SpecialUse,
 };
 use sift_store::flags;
+use sift_store::schema::{HELD_DEPARTURES, HELD_SELECT};
 
 /// What went wrong writing.
 #[derive(Debug)]
@@ -519,10 +520,7 @@ pub fn settle_moves(
     // the store's `message_held` index, which holds only these rows, so a round that held
     // nothing reads nothing here.
     let departed: Vec<Held> = {
-        let mut stmt = tx.prepare(&format!(
-            "{HELD} WHERE m.remote_id IS NULL
-               AND NOT EXISTS (SELECT 1 FROM message_location l WHERE l.message_id = m.id)"
-        ))?;
+        let mut stmt = tx.prepare(HELD_DEPARTURES)?;
         let rows = stmt.query_map([], Held::read)?;
         rows.collect::<Result<_, _>>()?
     };
@@ -533,7 +531,7 @@ pub fn settle_moves(
         // Still present: an arrival a later page removed again is itself a held departure,
         // and must not be offered to itself.
         let mut stmt = tx.prepare(&format!(
-            "{HELD} WHERE m.id = ?1 AND m.remote_id IS NOT NULL"
+            "{HELD_SELECT} WHERE m.id = ?1 AND m.remote_id IS NOT NULL"
         ))?;
         for a in arrived {
             if let Some(held) = stmt
@@ -619,12 +617,8 @@ struct Held {
     rule_version: u32,
 }
 
-/// The scope is the thread's **remote** conversation identifier: a thread with none is a
-/// message's own fallback thread, and proposes nothing.
-const HELD: &str = "SELECT m.id, m.thread_id, t.remote_thread_id, m.internet_message_id,
-                           m.fallback_digest, m.digest_rule_version
-                    FROM message m LEFT JOIN thread t ON t.id = m.thread_id";
-
+/// Read from [`HELD_SELECT`]'s columns. The scope is the thread's **remote** conversation
+/// identifier: a thread with none is a message's own fallback thread, and proposes nothing.
 impl Held {
     fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {

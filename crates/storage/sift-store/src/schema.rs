@@ -449,6 +449,29 @@ pub const STORE_MIGRATION_V4: &str = r"
 CREATE INDEX message_held ON message(remote_id) WHERE remote_id IS NULL;
 ";
 
+/// The columns D-44's settle reads for a held row, in this order: id, thread id, the thread's
+/// remote conversation identifier, `Message-ID`, fallback digest, digest rule version.
+macro_rules! held_select {
+    () => {
+        "SELECT m.id, m.thread_id, t.remote_thread_id, m.internet_message_id,
+                m.fallback_digest, m.digest_rule_version
+         FROM message m LEFT JOIN thread t ON t.id = m.thread_id"
+    };
+}
+
+/// [`HELD_DEPARTURES`]'s columns with no filter, for a caller that narrows to one row.
+pub const HELD_SELECT: &str = held_select!();
+
+/// Every held departure: a message whose provider identifier was cleared and that is in no
+/// folder. This is the statement sync's settle runs, once per round of an account whose
+/// identifiers do not survive a move, and it is planned through [`STORE_MIGRATION_V4`]'s
+/// `message_held` index — a test in this crate pins that it never scans the message table.
+pub const HELD_DEPARTURES: &str = concat!(
+    held_select!(),
+    " WHERE m.remote_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM message_location l WHERE l.message_id = m.id)"
+);
+
 /// Apply a schema to a fresh connection.
 pub fn create(conn: &Connection, sql: &str, version: u32) -> SqlResult<()> {
     conn.execute_batch(sql)?;
