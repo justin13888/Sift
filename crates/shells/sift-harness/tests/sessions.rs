@@ -5,7 +5,44 @@
 //! action identifiers a shell would use — no test-only entry points, and nothing reaching
 //! past the register into the crates beneath it.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// A temporary directory, removed when dropped — on success and on panic alike (#137).
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// A fresh directory named for `prefix`, this process, and the moment it was made.
+fn scratch(prefix: &str) -> Scratch {
+    let d = std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&d).expect("scratch");
+    Scratch(d)
+}
 
 /// Run a session and return its transcript.
 fn session(commands: &[&str]) -> String {
@@ -1158,15 +1195,7 @@ fn a_sender_supplied_name_never_becomes_the_path_it_is_written_under() {
 /// planning verb is asserted to write nothing.
 #[test]
 fn the_final_path_is_shown_before_anything_is_written() {
-    let directory = std::env::temp_dir().join(format!(
-        "sift-save-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default()
-    ));
-    std::fs::create_dir_all(&directory).expect("a directory to save into");
+    let directory = scratch("sift-save");
     let plan = format!("save #3 2 {}", directory.display());
 
     let mut cmds = hostile();
@@ -1180,7 +1209,6 @@ fn the_final_path_is_shown_before_anything_is_written() {
         0,
         "planning wrote a file: {out}"
     );
-    std::fs::remove_dir_all(&directory).ok();
 }
 
 /// "An existing file MUST NOT be overwritten." Held by `create_new` rather than by a check,
@@ -1188,15 +1216,7 @@ fn the_final_path_is_shown_before_anything_is_written() {
 /// one somebody cared about.
 #[test]
 fn saving_twice_writes_twice_and_overwrites_nothing() {
-    let directory = std::env::temp_dir().join(format!(
-        "sift-save-twice-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default()
-    ));
-    std::fs::create_dir_all(&directory).expect("a directory to save into");
+    let directory = scratch("sift-save-twice");
     let write = format!("save #3 2 {} write", directory.display());
 
     let mut cmds = hostile();
@@ -1214,22 +1234,13 @@ fn saving_twice_writes_twice_and_overwrites_nothing() {
         written.iter().any(|n| n == "invoicefdp (2).exe"),
         "the suffix goes before the extension, or the file opens with the wrong application: {written:?}"
     );
-    std::fs::remove_dir_all(&directory).ok();
 }
 
 /// The bytes are a PE header under a `.pdf` type. All three of FR-10's sources now disagree,
 /// and the fourth — the content — is the one that settles it.
 #[test]
 fn the_content_is_the_last_source_and_it_only_exists_once_the_bytes_are_here() {
-    let directory = std::env::temp_dir().join(format!(
-        "sift-save-sniff-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default()
-    ));
-    std::fs::create_dir_all(&directory).expect("a directory to save into");
+    let directory = scratch("sift-save-sniff");
     let write = format!("save #3 2 {} write", directory.display());
 
     let mut cmds = hostile();
@@ -1243,7 +1254,6 @@ fn the_content_is_the_last_source_and_it_only_exists_once_the_bytes_are_here() {
         Some(b"MZ".as_slice()),
         "the bytes are what the sniff saw"
     );
-    std::fs::remove_dir_all(&directory).ok();
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1453,10 +1463,8 @@ fn a_folder_is_matched_semantically_rather_than_by_a_localised_name() {
 /// keyed on the provider's identifier — never on the local identity a resync would replace.
 #[test]
 fn a_relevance_judgement_is_recorded_against_the_hit_the_search_numbered() {
-    let dir = std::env::temp_dir().join(format!("sift-harness-relevance-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let dir = scratch("sift-harness-relevance");
     let file = dir.join("corpus.tsv");
-    let _ = std::fs::remove_file(&file);
     let record = format!("relevance record {} #1 receipt", file.display());
 
     let mut cmds = hostile();
@@ -1476,20 +1484,18 @@ fn a_relevance_judgement_is_recorded_against_the_hit_the_search_numbered() {
         "no provider identifier was recorded: {written}"
     );
     assert_eq!(fields[3], "receipt");
-    std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 
 /// #24: the recording recipe quotes each command whole, so no shell expands its `~`; the
 /// harness reads it as the home directory itself.
 #[test]
 fn a_relevance_corpus_under_tilde_is_written_to_the_home_directory() {
-    let home = std::env::temp_dir().join(format!("sift-harness-home-{}", std::process::id()));
-    std::fs::create_dir_all(&home).expect("scratch");
+    let home = scratch("sift-harness-home");
     let mut cmds = hostile();
     cmds.push("relevance record ~/corpus.tsv #1 receipt");
     let out = Command::new(env!("CARGO_BIN_EXE_sift-harness"))
         .args(&cmds)
-        .env("HOME", &home)
+        .env("HOME", &*home)
         .output()
         .expect("harness runs");
     let transcript = String::from_utf8_lossy(&out.stdout);
@@ -1502,7 +1508,6 @@ fn a_relevance_corpus_under_tilde_is_written_to_the_home_directory() {
         written.starts_with("# sift relevance corpus v1\n"),
         "{written}"
     );
-    std::fs::remove_dir_all(&home).expect("cleanup");
 }
 
 /// FR-21's label. `search` is the local half, and the transcript says so — and how many

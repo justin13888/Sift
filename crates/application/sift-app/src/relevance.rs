@@ -390,10 +390,8 @@ mod tests {
 
     #[test]
     fn appending_creates_the_file_with_its_marker_once() {
-        let dir = std::env::temp_dir().join(format!("sift-relevance-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("corpus.tsv");
-        let _ = std::fs::remove_file(&path);
+        let dir = crate::Scratch::create("sift-relevance").unwrap();
+        let path = dir.0.join("corpus.tsv");
         judgement("one").append_to(&path).unwrap();
         judgement("two").append_to(&path).unwrap();
         let read = parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -408,19 +406,16 @@ mod tests {
                 "the corpus is readable by others: {mode:o}"
             );
         }
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn appending_to_an_empty_file_writes_the_marker_first() {
-        let dir = std::env::temp_dir().join(format!("sift-relevance-empty-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("corpus.tsv");
+        let dir = crate::Scratch::create("sift-relevance-empty").unwrap();
+        let path = dir.0.join("corpus.tsv");
         std::fs::write(&path, "").unwrap();
         judgement("one").append_to(&path).unwrap();
         let read = parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(read, vec![judgement("one")]);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn insert(app: &mut App, remote: &str, subject: &str, sender: &str, received: u64) -> LocalId {
