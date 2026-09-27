@@ -25,10 +25,11 @@ import MachO
 /// running — the sandboxed Developer ID build included.
 ///
 /// **What cannot be disabled.** The platform's own crash reporter runs outside the process and
-/// no application can turn it off; Q-20's other half. It records backtraces, register values and
-/// the loaded libraries, not the process's memory, and it shares anything only under the
-/// user's own analytics settings. The runtime panel says so rather than implying D-35's
-/// guarantee covers it.
+/// no application can turn it off; Q-20's other half. Besides backtraces and the loaded
+/// libraries it keeps each thread's register state and application-specific text copied out
+/// of the process, so nothing establishes that it is free of heap-derived data; it shares
+/// anything only under the user's own analytics settings. The runtime panel states it as a
+/// limitation rather than implying D-35's guarantee covers it.
 enum Diagnostics {
     /// `sift_observe::log::DIRECTORY`, `CRASH_REPORT` and `BUDGET_BYTES` (L-33). The Rust log
     /// and this shell name the same files; the spellings change together.
@@ -100,8 +101,9 @@ enum Diagnostics {
     /// Q-20's limitation, stated in the interface as that question requires.
     static let platformReporterSentence =
         "macOS's own crash reporter also records a crash, and no app can turn it off. It keeps "
-        + "backtraces, register values and the list of loaded libraries — not Sift's memory — "
-        + "and shares them only as your Analytics & Improvements settings allow."
+        + "backtraces, the list of loaded libraries, register values and some text taken from "
+        + "Sift at the moment of the crash, so Sift cannot promise it holds none of your data. "
+        + "It shares them only as your Analytics & Improvements settings allow."
 
     // MARK: - The report
 
@@ -332,6 +334,7 @@ private var crashHeaderLength = 0
 private var crashFrames: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
 private var crashDigits: UnsafeMutablePointer<UInt8>?
 private var crashing: sig_atomic_t = 0
+private var crashingThread: pthread_t?
 
 private func writeStatic(_ fd: Int32, _ text: StaticString) {
     text.withUTF8Buffer { buffer in _ = write(fd, buffer.baseAddress, buffer.count) }
@@ -354,12 +357,26 @@ private func writeNumber(_ fd: Int32, _ value: UInt, radix: UInt) {
 private let crashHandler:
     @convention(c) (Int32, UnsafeMutablePointer<__siginfo>?, UnsafeMutableRawPointer?) -> Void = {
         signal, info, _ in
-        // A second fatal signal while the first is being written — another thread crashing at
-        // the same moment — returns. `SA_RESETHAND` has put that signal back to its default, so
-        // it terminates the process when it recurs, and the first report is the one kept.
-        if crashing != 0 { return }
-        crashing = 1
-        if let path = crashPath {
+        // A second fatal signal while the first is being written. Returning would not keep the
+        // first report: `SA_RESETHAND` has put this signal back to its default on entry, so the
+        // returning thread re-faults straight into the default action and ends the process
+        // mid-write, truncating the report. So another thread waits here, bounded, for the
+        // crashing thread to finish and end the process itself; only if that never comes does
+        // it fall through and end it. (A second thread faulting on the *same* signal never
+        // reaches this handler — `SA_RESETHAND` already reset it — and ends the process
+        // wherever the first report has got to.) The crashing thread faulting again inside its
+        // own handler cannot wait on itself, so it ends at once and its report is as far as it
+        // got. `pthread_self` reads the thread's own register and takes no lock. The claim is a plain store, not an atomic exchange — the shell targets
+        // a macOS without Swift's atomics — so two threads faulting in the same instant can
+        // both claim it, and then the file can hold the two reports interleaved.
+        if crashing != 0 {
+            if pthread_self() != crashingThread {
+                var tick = timespec(tv_sec: 0, tv_nsec: 100_000_000)
+                for _ in 0..<50 { nanosleep(&tick, nil) }
+            }
+        } else if let path = crashPath {
+            crashing = 1
+            crashingThread = pthread_self()
             let fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o600)
             if fd >= 0 {
                 if let header = crashHeader { _ = write(fd, header, crashHeaderLength) }
