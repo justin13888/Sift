@@ -68,8 +68,15 @@ final class MenuBar: NSObject, NSMenuDelegate {
             fill(submenu, from: menu)
             if menu.title == "Window" { NSApp.windowsMenu = submenu }
         }
-        // Empty on purpose: registering it is what makes the system add its menu search.
+        // Registering it is what makes the system add its menu search. Its one item of Sift's
+        // own reveals NFR-55's log and any D-114 report, so a QA pass can collect both without a
+        // terminal; it is a platform item beside the register, like About, not a gesture.
         let help = NSMenu(title: "Help")
+        let diagnostics = NSMenuItem(
+            title: "Show Diagnostics in Finder", action: #selector(showDiagnostics(_:)),
+            keyEquivalent: "")
+        diagnostics.target = self
+        help.addItem(diagnostics)
         let helpItem = NSMenuItem()
         helpItem.submenu = help
         bar.addItem(helpItem)
@@ -191,6 +198,10 @@ final class MenuBar: NSObject, NSMenuDelegate {
                 .foregroundColor: NSColor.labelColor,
             ])
         NSApp.orderFrontStandardAboutPanel(options: options)
+    }
+
+    @objc private func showDiagnostics(_ sender: Any?) {
+        Diagnostics.reveal()
     }
 
     #if DEBUG

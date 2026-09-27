@@ -32,11 +32,14 @@ final class RuntimePanel: NSWindowController {
     private let queueTable = NSTextView()
     private let memoryTable = NSTextView()
     private let summary = NSTextField(labelWithString: "")
+    /// NFR-55's log against its budget, whether a D-114 report is waiting, and Q-20's answer
+    /// for this process — including the half of it Sift cannot change.
+    private let diagnostics = NSTextField(wrappingLabelWithString: "")
 
     init(app: OpaquePointer) {
         self.app = app
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 620),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 780),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         window.title = "Runtime"
@@ -75,6 +78,12 @@ final class RuntimePanel: NSWindowController {
         posture.orientation = .horizontal
         posture.spacing = 14
 
+        diagnostics.font = .preferredFont(forTextStyle: .callout)
+        diagnostics.preferredMaxLayoutWidth = 660
+        let reveal = NSButton(
+            title: "Show Diagnostics in Finder", target: self, action: #selector(showDiagnostics))
+        reveal.bezelStyle = .rounded
+
         let stack = NSStackView(views: [
             controls,
             summary,
@@ -83,6 +92,9 @@ final class RuntimePanel: NSWindowController {
             scrolling(queueTable),
             heading("Live bytes, by subsystem"),
             scrolling(memoryTable),
+            heading("Diagnostics"),
+            diagnostics,
+            reveal,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -143,8 +155,34 @@ final class RuntimePanel: NSWindowController {
         return accounts[index]
     }
 
+    @objc private func showDiagnostics() {
+        Diagnostics.reveal()
+    }
+
+    /// What the diagnostics directory holds, in sentences. Read from disk on refresh, like the
+    /// rest of this panel, rather than watched.
+    private func diagnosticsSentence() -> String {
+        let bytes = ByteCountFormatter.string(
+            fromByteCount: Diagnostics.logBytes(), countStyle: .file)
+        let budget = ByteCountFormatter.string(
+            fromByteCount: Diagnostics.logBudgetBytes, countStyle: .file)
+        let report =
+            Diagnostics.reportExists
+            ? "A crash report from an earlier run is waiting."
+            : "There is no crash report."
+        return [
+            "The diagnostic log holds \(bytes) of its \(budget) budget, and keeps nothing longer "
+                + "than \(Diagnostics.logRetentionDays) days. It records no mail, addresses, "
+                + "subjects or passwords.",
+            report,
+            Diagnostics.coreDumpSentence,
+            Diagnostics.platformReporterSentence,
+        ].joined(separator: "\n")
+    }
+
     @objc private func refresh() {
         memoryTable.string = memory()
+        diagnostics.stringValue = diagnosticsSentence()
         reloadAccounts()
         guard let chosen = selected() else {
             queueTable.string = "There are no accounts yet."
