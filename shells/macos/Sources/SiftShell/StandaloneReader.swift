@@ -87,7 +87,7 @@ final class MessageDebugWindow: NSWindowController {
     /// user has already moved on from — or nothing, with no way to tell which.
     func present(_ row: MessageRow) {
         var document = SiftDocument()
-        guard sift_open_document(UnsafeMutablePointer(app), row.id, 0, &document) == Ok else {
+        guard sift_open_document(UnsafeMutablePointer(app), row.id, 0, 0, &document) == Ok else {
             text.string = "This message could not be rendered, so there is nothing to show."
             showWindow(nil)
             return

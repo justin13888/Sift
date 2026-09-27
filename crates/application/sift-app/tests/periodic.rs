@@ -390,7 +390,7 @@ fn a_warning_tier_does_not_revoke_the_open_documents_token() {
     let listed = sift_app::list_messages(app.account("mail").expect("open")).expect("list");
     let id = listed.first().expect("a message").0;
 
-    let document = app.open_document(id, false).expect("opened");
+    let document = app.open_document(id, false, false).expect("opened");
     app.memory_pressure(sift_governor::Pressure::Warning);
     assert_eq!(app.tier(), sift_governor::Tier::L2);
     assert!(

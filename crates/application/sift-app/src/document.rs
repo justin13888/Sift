@@ -107,11 +107,20 @@ impl App {
     /// megabyte attachment beside it costs nothing until somebody asks for it, which is a
     /// claim about requests rather than about intentions.
     ///
+    /// `dark` asks for the dark transform; `increased_contrast` is the system's
+    /// increased-contrast preference as the shell read it, which raises the threshold the
+    /// transform's contrast repair targets. It changes nothing where `dark` is false.
+    ///
     /// # Errors
     /// No account holds the message, it has not been synced, it carries no renderable part,
     /// or a stage refused it. A refusal is a degradation to FR-9's raw view rather than a
     /// panic — the pipeline catches at every stage boundary.
-    pub fn open_document(&mut self, id: LocalId, dark: bool) -> Result<Document, String> {
+    pub fn open_document(
+        &mut self,
+        id: LocalId,
+        dark: bool,
+        increased_contrast: bool,
+    ) -> Result<Document, String> {
         // "The engine MUST be loaded before the first body renders." Where a window is open
         // at L0 this loads it if nothing has yet; anywhere else it stays absent and denies.
         self.reconcile_filter_engine();
@@ -161,10 +170,9 @@ impl App {
             origin: context_origin.clone(),
             blocker: Some(&self.filter),
             dark,
-            // The ordinary threshold until the shell reports the system's increased-contrast
-            // preference across the boundary; nothing carries it here yet. The pipeline and
-            // the transform honour it once it arrives.
-            increased_contrast: false,
+            // The UI shell: the system's increased-contrast preference raises the bar inside
+            // the message too, not only around it.
+            increased_contrast,
             broker: &mut self.resources,
         };
         let rendered = sift_pipeline::render(&selected, &mut context).map_err(|e| e.to_string())?;

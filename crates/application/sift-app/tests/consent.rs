@@ -27,7 +27,7 @@ fn the_allowance_survives_the_re_render_that_accepting_causes() {
     let mut app = App::new();
     let id = a_message(&mut app);
 
-    let first = app.open_document(id, false).expect("opened");
+    let first = app.open_document(id, false, false).expect("opened");
     assert!(
         !app.resources.is_allowed_once(&first.token),
         "content was allowed before anybody said so"
@@ -37,7 +37,7 @@ fn the_allowance_survives_the_re_render_that_accepting_causes() {
 
     // Exactly what the shell does next: open the message again. The token changes, and the
     // decision has to survive that or it means nothing.
-    let second = app.open_document(id, false).expect("re-opened");
+    let second = app.open_document(id, false, false).expect("re-opened");
     assert_ne!(second.token, first.token, "the re-render reused the token");
     assert!(
         app.resources.is_allowed_once(&second.token),
@@ -54,7 +54,7 @@ fn a_message_with_remote_content(app: &mut App) -> sift_foundation::identity::Lo
         .iter()
         .map(|(m, _)| *m)
         .find(|m| {
-            app.open_document(*m, false)
+            app.open_document(*m, false, false)
                 .is_ok_and(|d| d.fetching_positions > 0)
         })
         .expect("the corpus has a message with remote content")
@@ -79,7 +79,7 @@ fn with_a_window_open_loading_once_actually_fetches() {
     assert!(app.filter_engine_loaded(), "a window is open at L0");
     let id = a_message_with_remote_content(&mut app);
 
-    let before = app.open_document(id, false).expect("opened");
+    let before = app.open_document(id, false, false).expect("opened");
     assert_eq!(
         before.blocked, before.fetching_positions,
         "remote content is blocked by default"
@@ -98,7 +98,7 @@ fn with_a_window_open_loading_once_actually_fetches() {
     );
 
     app.allow_remote_content_once(id);
-    let after = app.open_document(id, false).expect("re-opened");
+    let after = app.open_document(id, false, false).expect("re-opened");
     assert!(
         after.blocked < before.blocked,
         "the count did not move after consent: {} withheld of {}",
@@ -129,7 +129,7 @@ fn with_no_window_every_fetch_is_refused_and_the_reason_names_the_shed() {
     assert!(!app.filter_engine_loaded());
 
     app.allow_remote_content_once(id);
-    let document = app.open_document(id, false).expect("opened");
+    let document = app.open_document(id, false, false).expect("opened");
     assert_eq!(document.blocked, document.fetching_positions);
     assert!(
         document
@@ -188,9 +188,13 @@ fn opening_a_different_message_ends_the_allowance() {
         .expect("the corpus has a second message");
 
     app.allow_remote_content_once(id);
-    let _ = app.open_document(other, false).expect("opened the other");
+    let _ = app
+        .open_document(other, false, false)
+        .expect("opened the other");
 
-    let back = app.open_document(id, false).expect("back to the first");
+    let back = app
+        .open_document(id, false, false)
+        .expect("back to the first");
     assert!(
         !app.resources.is_allowed_once(&back.token),
         "the allowance outlived the message it was granted for"

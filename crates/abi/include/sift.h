@@ -1687,10 +1687,19 @@ SiftStatus sift_message_row(SiftApp *app, SiftId message, SiftMessageRow *out);
  * The document stays open until [`sift_close_document`] revokes its token, because the body
  * view asks for resources after the HTML has been handed over.
  *
+ * `dark` asks for the dark transform. `increased_contrast` is the system's
+ * increased-contrast preference, which raises the threshold the transform's contrast repair
+ * targets; the shell reads it and re-opens the document when it changes, as it does for
+ * `dark`. Each is nonzero for true.
+ *
  * # Safety
  * `app` and `out` must be valid.
  */
-SiftStatus sift_open_document(SiftApp *app, SiftId message, uint8_t dark, SiftDocument *out);
+SiftStatus sift_open_document(SiftApp *app,
+                              SiftId message,
+                              uint8_t dark,
+                              uint8_t increased_contrast,
+                              SiftDocument *out);
 
 /**
  * FR-29's disclosure: every refused position in an open document, and the rule behind it.

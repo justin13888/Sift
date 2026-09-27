@@ -132,6 +132,13 @@ final class ReaderViewController: NSViewController {
         // FR-30: a link is never followed to find out where it goes — following a wrapper is
         // itself the tracking event. The destination shown is the one the document declared.
         body.onLink = { [weak self] url in self?.confirmOpen(url) }
+        // The UI shell: the system's increased-contrast preference raises the threshold the
+        // transform repairs toward, and it can change while a message is open. Posted on the
+        // workspace's own centre rather than the default one. Selector-based, so the centre
+        // drops it when this controller goes.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(displayOptionsChanged),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         view = container
         // **Not `show(nil:)`.** `show` reads `view`, and reading `view` is what runs this
         // method — so a `show(nil:)` here runs *after* the `show(row:)` that triggered the
@@ -276,6 +283,25 @@ final class ReaderViewController: NSViewController {
         show(showing, app: app)
     }
 
+    /// The system's increased-contrast preference, read at every open rather than cached, so
+    /// a document always reflects the setting as it was when it was rendered.
+    private static var increasedContrast: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+    }
+
+    /// The layer the document on screen was opened against, so a change of display options
+    /// can open it again without the caller that showed it. Cleared with the document.
+    private var openApp: OpaquePointer?
+
+    /// Re-open the message on screen when the display options change, where the preference
+    /// has anything to act on: it only moves the transform's threshold, so with the transform
+    /// off the document would render byte for byte the same and re-opening would only mint a
+    /// token and redraw.
+    @objc private func displayOptionsChanged(_: Notification) {
+        guard dark, let app = openApp, let row = showing else { return }
+        show(row, app: app)
+    }
+
     /// FR-8 — the user accepted the withheld content, once or for this sender.
     ///
     /// **Re-rendering is the whole of the effect**, and it is deliberate rather than lazy: the
@@ -310,6 +336,7 @@ final class ReaderViewController: NSViewController {
             showing = nil
             dark = false
             openToken = nil
+            openApp = nil
             showNothing()
             return
         }
@@ -340,11 +367,16 @@ final class ReaderViewController: NSViewController {
             attachments.isHidden = true
             body.clear()
             openToken = nil
+            openApp = nil
             return
         }
         var document = SiftDocument()
         let status = sift_open_document(
-            UnsafeMutablePointer(app), row.id, dark ? 1 : 0, &document)
+            UnsafeMutablePointer(app), row.id, dark ? 1 : 0,
+            ReaderViewController.increasedContrast ? 1 : 0, &document)
+        // Kept whether or not this open succeeded: a failed render is still the message on
+        // screen, and a change of display options is as good a reason to try it again as any.
+        openApp = app
         guard status == Ok else {
             // FR-9: a body that cannot be rendered degrades to a stated absence rather than
             // to a blank pane, because a blank pane is indistinguishable from a bug.

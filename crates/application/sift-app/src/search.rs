@@ -1322,7 +1322,7 @@ mod tests {
         let rows = crate::rows::message_rows(account, 50).unwrap();
         let mut indexed = 0;
         for row in rows {
-            if app.open_document(row.id, false).is_err() {
+            if app.open_document(row.id, false, false).is_err() {
                 continue;
             }
             let account = app.account("mail").unwrap();
@@ -1359,7 +1359,7 @@ mod tests {
         let opened = rows
             .iter()
             .map(|r| r.id)
-            .find(|id| !before.contains(id) && app.open_document(*id, false).is_ok())
+            .find(|id| !before.contains(id) && app.open_document(*id, false, false).is_ok())
             .expect("no message outside the results opened");
 
         let attachments: String = app
@@ -1546,7 +1546,7 @@ mod tests {
             .map(|h| h.row.id)
             .find(|id| remote_of(&mut app, *id) == "m5")
             .unwrap();
-        app.open_document(m5, false).unwrap();
+        app.open_document(m5, false, false).unwrap();
         let after = app.search("quokka", None, 20).unwrap();
         assert!(
             after
