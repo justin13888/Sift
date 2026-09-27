@@ -34,11 +34,9 @@ use std::io::Write as _;
 use std::path::Path;
 
 use sift_foundation::identity::LocalId;
-use sift_index::merge::{self, Features, Result_, Source};
-use sift_index::query::{Query, Term};
 
+use crate::App;
 use crate::rows::MessageRow;
-use crate::{App, search};
 
 /// The first line of every corpus file.
 pub const FORMAT: &str = "# sift relevance corpus v1";
@@ -241,34 +239,6 @@ pub fn summarize(outcomes: &[Outcome]) -> Summary {
     }
 }
 
-/// D-79's corpus-independent features of one row against one query.
-///
-/// The snippet stands in for the body: the sync path does not populate the full-text index, so
-/// a body match is a snippet match, and the report says so rather than implying more.
-#[must_use]
-pub fn features(query: &Query, row: &MessageRow) -> Features {
-    let mut f = Features {
-        received_millis: row.received_millis,
-        ..Features::default()
-    };
-    // The same term-to-field mapping `search` filters with, so a feature is credited exactly
-    // where the query matched.
-    for term in &query.terms {
-        let Some((text, fields)) = search::text_fields(term) else {
-            continue;
-        };
-        let hit = fields.each(row, text);
-        f.terms_total += 1;
-        f.matched_sender |= hit.sender;
-        f.matched_subject |= hit.subject;
-        f.matched_body |= hit.snippet;
-        let found = hit.sender || hit.subject || hit.snippet;
-        f.matched_phrase |= found && matches!(term, Term::Phrase(_));
-        f.terms_present += u32::from(found);
-    }
-    f
-}
-
 /// Every message a query returns, however many — ranking is measured over the whole set,
 /// not over whatever a result list happens to show.
 const EVERYTHING: u32 = u32::MAX;
@@ -321,25 +291,18 @@ impl App {
         for judgement in corpus {
             let target = self.resolve_judgement(judgement);
             let report = self.search(&judgement.query, None, EVERYTHING)?;
-            let query = Query::parse(&judgement.query);
 
-            // `search` returns D-55's order; D-79's is computed over the same set.
-            let listed = target.and_then(|t| report.hits.iter().position(|h| h.row.id == t));
-            let candidates = report
-                .hits
-                .iter()
-                .map(|h| Result_ {
-                    message: u128::from_be_bytes(h.row.id.to_bytes()),
-                    source: Source::Local,
-                    features: features(&query, &h.row),
-                    local_score: None,
-                })
-                .collect();
-            let merged = merge::merge(&query, candidates);
-            let ranked = target.and_then(|t| {
-                let key = u128::from_be_bytes(t.to_bytes());
-                merged.iter().position(|r| r.message == key)
+            // `search` returns D-79's order; D-55's is the same set by received time and
+            // identity, which is the order the query would fall back to with no relevance
+            // signal.
+            let ranked = target.and_then(|t| report.hits.iter().position(|h| h.row.id == t));
+            let mut by_list: Vec<&MessageRow> = report.hits.iter().map(|h| &h.row).collect();
+            by_list.sort_by(|a, b| {
+                b.received_millis
+                    .cmp(&a.received_millis)
+                    .then(b.id.as_u128().cmp(&a.id.as_u128()))
             });
+            let listed = target.and_then(|t| by_list.iter().position(|r| r.id == t));
 
             out.push(Outcome {
                 judgement: judgement.clone(),
@@ -549,32 +512,34 @@ mod tests {
             "alice@example.test",
             100,
         );
-        let row = app.search("from:alice", None, 10).unwrap().hits[0]
-            .row
-            .clone();
+        let mut features = |query: &str| {
+            app.search(query, None, 10)
+                .unwrap()
+                .hits
+                .first()
+                .map(|h| h.features)
+        };
 
-        let all = features(
-            &Query::parse("\"quarterly report\" subject:due from:alice lunch"),
-            &row,
-        );
+        let all = features("\"quarterly report\" subject:due from:alice").unwrap();
         assert!(all.matched_phrase && all.matched_subject && all.matched_sender);
         assert!(!all.matched_body);
-        assert_eq!((all.terms_present, all.terms_total), (3, 4));
+        assert_eq!((all.terms_present, all.terms_total), (3, 3));
         assert_eq!(all.received_millis, 100);
 
+        // A term the message does not hold means it is not a result at all: terms are
+        // conjunctive.
+        assert!(features("\"quarterly report\" lunch").is_none());
+
         // The words of the phrase out of order are not the phrase.
-        let scattered = features(&Query::parse("\"report quarterly\""), &row);
-        assert!(!scattered.matched_phrase);
-        assert_eq!(scattered.terms_present, 0);
+        assert!(features("\"report quarterly\"").is_none());
 
         // `from:` looks only at the sender and `subject:` only at the subject.
-        let misplaced = features(&Query::parse("from:quarterly subject:alice"), &row);
-        assert!(!misplaced.matched_sender && !misplaced.matched_subject);
-        assert_eq!((misplaced.terms_present, misplaced.terms_total), (0, 2));
+        assert!(features("from:quarterly").is_none());
+        assert!(features("subject:alice").is_none());
 
-        // A phrase found in the sender field is not credited: a phrase never searches it.
-        let sender_phrase = features(&Query::parse("\"alice@example\""), &row);
-        assert!(!sender_phrase.matched_phrase && !sender_phrase.matched_sender);
+        // A word found only in the sender is credited to the sender and nothing else.
+        let sender = features("alice").unwrap();
+        assert!(sender.matched_sender && !sender.matched_subject && !sender.matched_body);
     }
 
     #[test]

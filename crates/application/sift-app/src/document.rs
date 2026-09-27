@@ -169,6 +169,15 @@ impl App {
         };
         let rendered = sift_pipeline::render(&selected, &mut context).map_err(|e| e.to_string())?;
 
+        // D-81: body text and attachment filenames enter the index at first fetch, from the
+        // sanitized tree — and again on a later fetch, which after an eviction is what puts a
+        // body back. A write that fails does not withhold the message from the person who
+        // asked to read it; the next open writes it again.
+        let names: Vec<&str> = parts.iter().filter_map(|p| p.filename.as_deref()).collect();
+        if let Some(account) = self.accounts.get(&owner) {
+            let _ = index_body(account, id, &rendered.text, &names);
+        }
+
         // Nothing keys a durable allowance while the origin is null, so the control that
         // would set one is absent rather than present and ineffective.
         // **Asked of the origin, not re-derived here.** This used to spell the predicate out
@@ -275,6 +284,36 @@ impl App {
         // should be given a way to *construct* one — that is the part that stays unforgeable.
         self.resources.revoke_named(token)
     }
+}
+
+/// Write a message's body text and attachment filenames into its index entry — D-81's
+/// first-fetch half.
+///
+/// Into the entry the message row already has: envelope fields arrived with the row at ingest,
+/// and this adds what only a fetch can supply. Written in the index's normalization form, the
+/// same one NFR-54 applies, so the text the index holds is the text it tokenized. Nothing is
+/// written where the entry already holds exactly this, so reopening a message costs no write.
+///
+/// # Errors
+/// The store refused.
+pub(crate) fn index_body(
+    account: &crate::OpenAccount,
+    id: LocalId,
+    text: &str,
+    attachments: &[&str],
+) -> Result<usize, String> {
+    let body = sift_foundation::normalize::for_index(text);
+    let names = sift_foundation::normalize::for_index(&attachments.join("\n"));
+    account
+        .store
+        .store
+        .execute(
+            "UPDATE message_text SET body = ?2, attachments = ?3
+             WHERE rowid = (SELECT docid FROM message_text_key WHERE message_id = ?1)
+               AND (body IS NOT ?2 OR attachments IS NOT ?3)",
+            rusqlite::params![id.to_bytes().to_vec(), body, names],
+        )
+        .map_err(|e| e.to_string())
 }
 
 impl Link {

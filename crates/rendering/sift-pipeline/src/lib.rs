@@ -108,6 +108,10 @@ pub struct Rendered {
     pub stages: Vec<&'static str>,
     /// Whether the dark transform ran, and why not where it did not.
     pub transform: TransformOutcome,
+    /// The text a reader sees, read from the **sanitized** tree — what D-81 indexes at first
+    /// fetch. Never the markup: indexing that would index class names, styles and tracking
+    /// addresses a sender chose, and match queries about words nobody was shown.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -250,6 +254,7 @@ pub fn render(selected: &Selected, context: &mut Context<'_>) -> Result<Rendered
         removals: sanitized.removals,
         stages,
         transform,
+        text: document.searchable_text,
     })
 }
 

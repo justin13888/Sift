@@ -39,7 +39,8 @@ use rusqlite::{Connection, Result as SqlResult};
 /// The schema version this build writes.
 ///
 /// Version 2 is [`STORE_MIGRATION_V2`]: the two lookups ingest makes per message, indexed.
-pub const CURRENT_VERSION: u32 = 2;
+/// Version 3 is [`STORE_MIGRATION_V3`]: D-80's full-text index.
+pub const CURRENT_VERSION: u32 = 3;
 
 /// The oldest version this build can migrate forward from — D-62's migration floor.
 ///
@@ -368,6 +369,68 @@ CREATE INDEX message_remote ON message(remote_id) WHERE remote_id IS NOT NULL;
 CREATE INDEX thread_remote ON thread(remote_thread_id) WHERE remote_thread_id IS NOT NULL;
 ";
 
+/// Version 3 of the store: D-80's full-text index, one per account (D-6).
+///
+/// **Content-storing** (D-80): the table holds its own copy of the text it indexes, because
+/// after a body is evicted for space the index is the only copy of that text on the machine,
+/// and an index pointing at content that no longer exists could never be rebuilt.
+///
+/// **Kept by triggers on the message row**, so an index entry is created, rewritten and
+/// destroyed in the same transaction as the row it describes, by whichever path writes that
+/// row. That is D-5's no-drift argument made mechanical rather than a rule each writer has to
+/// remember, and NFR-52's "an envelope and its index entry evicted together as one unit": a
+/// deleted message cannot leave its text behind. Envelope fields enter at ingest (D-81); body
+/// text and attachment filenames are written at first fetch, and survive an envelope update
+/// because the update trigger rewrites the envelope columns only.
+///
+/// The index is keyed through `message_text_key` rather than on the message table's implicit
+/// row number, which a vacuum may renumber: a renumbered key would silently attach one
+/// message's text to another.
+///
+/// Existing mail is indexed by the migration itself, from the envelope columns it already
+/// holds. Bodies were never retained, so they enter as they are next opened — which is D-81's
+/// rule for every body anyway.
+pub const STORE_MIGRATION_V3: &str = r"
+CREATE VIRTUAL TABLE message_text USING fts5(
+    subject, sender, recipients, snippet, body, attachments,
+    tokenize = 'sift'
+);
+
+CREATE TABLE message_text_key (
+    docid               INTEGER PRIMARY KEY,
+    message_id          BLOB NOT NULL UNIQUE
+) STRICT;
+
+INSERT INTO message_text_key (message_id) SELECT id FROM message;
+INSERT INTO message_text (rowid, subject, sender, recipients, snippet)
+    SELECT k.docid, m.subject, m.sender, m.recipients, m.snippet
+    FROM message_text_key k JOIN message m ON m.id = k.message_id;
+
+CREATE TRIGGER message_text_insert AFTER INSERT ON message BEGIN
+    INSERT INTO message_text_key (message_id) VALUES (new.id);
+    INSERT INTO message_text (rowid, subject, sender, recipients, snippet)
+        VALUES ((SELECT docid FROM message_text_key WHERE message_id = new.id),
+                new.subject, new.sender, new.recipients, new.snippet);
+END;
+
+CREATE TRIGGER message_text_envelope
+    AFTER UPDATE OF subject, sender, recipients, snippet ON message
+    WHEN old.subject IS NOT new.subject OR old.sender IS NOT new.sender
+      OR old.recipients IS NOT new.recipients OR old.snippet IS NOT new.snippet
+BEGIN
+    UPDATE message_text
+        SET subject = new.subject, sender = new.sender,
+            recipients = new.recipients, snippet = new.snippet
+        WHERE rowid = (SELECT docid FROM message_text_key WHERE message_id = new.id);
+END;
+
+CREATE TRIGGER message_text_delete AFTER DELETE ON message BEGIN
+    DELETE FROM message_text
+        WHERE rowid = (SELECT docid FROM message_text_key WHERE message_id = old.id);
+    DELETE FROM message_text_key WHERE message_id = old.id;
+END;
+";
+
 /// Apply a schema to a fresh connection.
 pub fn create(conn: &Connection, sql: &str, version: u32) -> SqlResult<()> {
     conn.execute_batch(sql)?;
@@ -379,6 +442,7 @@ pub fn create(conn: &Connection, sql: &str, version: u32) -> SqlResult<()> {
 const fn step(version: u32) -> (&'static str, &'static str) {
     match version {
         2 => ("", STORE_MIGRATION_V2),
+        3 => ("", STORE_MIGRATION_V3),
         _ => ("", ""),
     }
 }
@@ -402,7 +466,18 @@ const fn step(version: u32) -> (&'static str, &'static str) {
 /// The engine refused a statement. The half that failed is left at the version it had, and the
 /// next open resumes from there.
 pub fn migrate(store: &Connection, journal: &Connection, from: u32) -> SqlResult<()> {
-    for version in from.saturating_add(1)..=CURRENT_VERSION {
+    migrate_to(store, journal, from, CURRENT_VERSION)
+}
+
+/// [`migrate`], stopping at `to` — which is how a test builds an account exactly as an older
+/// build left it.
+pub(crate) fn migrate_to(
+    store: &Connection,
+    journal: &Connection,
+    from: u32,
+    to: u32,
+) -> SqlResult<()> {
+    for version in from.saturating_add(1)..=to.min(CURRENT_VERSION) {
         let (journal_sql, store_sql) = step(version);
         for (conn, sql) in [(journal, journal_sql), (store, store_sql)] {
             if version_of(conn)? >= version {

@@ -54,10 +54,63 @@ pub struct Document {
     /// The text a reader would see. I9's operational definition, written against the parsed
     /// tree rather than against a regular expression over the markup.
     pub visible_text: String,
+    /// The same text with a line break wherever a block begins or ends — what D-81 indexes.
+    ///
+    /// Separate from `visible_text` because the two answer different questions. I9's text is
+    /// the text nodes exactly as the tree holds them; a search index needs to know that
+    /// `<p>one</p><p>two</p>` is two words a reader sees on two lines, not the one word
+    /// `onetwo` that concatenating the nodes produces.
+    pub searchable_text: String,
 }
 
 /// Elements whose text content is not text a reader sees.
 const NOT_VISIBLE: &[&str] = &["style", "script", "template", "head", "title"];
+
+/// Elements a reader sees as a break between the text either side of them.
+const BREAKS_TEXT: &[&str] = &[
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "br",
+    "caption",
+    "dd",
+    "details",
+    "div",
+    "dl",
+    "dt",
+    "figcaption",
+    "figure",
+    "footer",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "summary",
+    "table",
+    "td",
+    "th",
+    "tr",
+    "ul",
+];
+
+/// End the current line of searchable text, once.
+fn break_line(out: &mut Document) {
+    if !out.searchable_text.is_empty() && !out.searchable_text.ends_with('\n') {
+        out.searchable_text.push('\n');
+    }
+}
 
 /// Read a sanitized document back.
 #[must_use]
@@ -71,6 +124,7 @@ pub fn read(html: &str) -> Document {
 fn walk(handle: &Handle, parent: Option<usize>, out: &mut Document, visible: bool) {
     let mut here = parent;
     let mut children_visible = visible;
+    let mut breaks = false;
 
     if let NodeData::Element { name, attrs, .. } = &handle.data {
         let tag = name.local.to_string();
@@ -106,6 +160,10 @@ fn walk(handle: &Handle, parent: Option<usize>, out: &mut Document, visible: boo
             if NOT_VISIBLE.contains(&tag.as_str()) {
                 children_visible = false;
             }
+            breaks = visible && BREAKS_TEXT.contains(&tag.as_str());
+            if breaks {
+                break_line(out);
+            }
             if tag == "style" {
                 for child in handle.children.borrow().iter() {
                     if let NodeData::Text { contents } = &child.data {
@@ -121,10 +179,14 @@ fn walk(handle: &Handle, parent: Option<usize>, out: &mut Document, visible: boo
         && visible
     {
         out.visible_text.push_str(&contents.borrow());
+        out.searchable_text.push_str(&contents.borrow());
     }
 
     for child in handle.children.borrow().iter() {
         walk(child, here, out, children_visible);
+    }
+    if breaks {
+        break_line(out);
     }
 }
 
@@ -171,6 +233,18 @@ mod tests {
         let d = read("<style>p{content:'not text'}</style><p>the text</p>");
         assert!(d.visible_text.contains("the text"));
         assert!(!d.visible_text.contains("not text"), "{:?}", d.visible_text);
+    }
+
+    #[test]
+    fn searchable_text_keeps_blocks_apart_and_inline_runs_together() {
+        let d = read(
+            "<style>p{content:'not text'}</style><p>one</p><p>two<br>three</p>\
+             <p>fo<b>ur</b></p><table><tr><td>five</td><td>six</td></tr></table>",
+        );
+        let words: Vec<&str> = d.searchable_text.split_whitespace().collect();
+        assert_eq!(words, ["one", "two", "three", "four", "five", "six"]);
+        // I9's text is untouched by it.
+        assert!(d.visible_text.contains("onetwo"));
     }
 
     #[test]

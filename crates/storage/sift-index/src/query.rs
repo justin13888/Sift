@@ -87,6 +87,123 @@ impl Query {
     }
 }
 
+/// One column of the store's full-text table — D-81's fields, one per column.
+///
+/// A column rather than one concatenated field, because FR-20's operators address fields
+/// (`from:` searches the sender and nothing else) and D-79 ranks on which field matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Column {
+    Subject,
+    Sender,
+    Recipients,
+    /// The provider's preview of the body, which arrives with the envelope. Indexed at ingest
+    /// so that a message nobody has opened is still findable by the words its preview shows.
+    Snippet,
+    /// Extracted text, at first fetch — D-81.
+    Body,
+    /// Attachment filenames, at first fetch, which is when the structure naming them arrives.
+    Attachments,
+}
+
+impl Column {
+    /// Every column, in the table's order.
+    pub const ALL: &'static [Self] = &[
+        Self::Subject,
+        Self::Sender,
+        Self::Recipients,
+        Self::Snippet,
+        Self::Body,
+        Self::Attachments,
+    ];
+
+    /// The column's name in the table.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Subject => "subject",
+            Self::Sender => "sender",
+            Self::Recipients => "recipients",
+            Self::Snippet => "snippet",
+            Self::Body => "body",
+            Self::Attachments => "attachments",
+        }
+    }
+}
+
+/// What a text-bearing term asks the index for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextScope<'a> {
+    /// The text, exactly as the query carries it. The index's own tokenizer reads it, so the
+    /// query and the documents it is matched against are tokenized by the same code.
+    pub text: &'a str,
+    pub columns: &'static [Column],
+    /// Whether the last token may be the start of a longer one.
+    ///
+    /// True for everything but a quoted phrase: FR-19 searches **as the user types**, so the
+    /// last word of most queries is a word being typed, and a search for `quar` that found
+    /// nothing until `quarterly` was complete would be a search box that did not work.
+    pub prefix: bool,
+}
+
+impl Term {
+    /// The text this term is matched against and the columns it searches, or `None` for a
+    /// term that is a predicate on the message rather than a question for the index.
+    #[must_use]
+    pub fn text_scope(&self) -> Option<TextScope<'_>> {
+        let scope = |text, columns, prefix| {
+            Some(TextScope {
+                text,
+                columns,
+                prefix,
+            })
+        };
+        match self {
+            // An unknown operator is text, matched everywhere rather than dropped.
+            Self::Word(t) | Self::Unknown(t) => scope(t, Column::ALL, true),
+            // A quoted phrase is complete by construction: the closing quote says so.
+            Self::Phrase(t) => scope(t, Column::ALL, false),
+            Self::Sender(t) => scope(t, &[Column::Sender], true),
+            Self::Recipient(t) => scope(t, &[Column::Recipients], true),
+            Self::Subject(t) => scope(t, &[Column::Subject], true),
+            Self::HasAttachment(_)
+            | Self::Unread(_)
+            | Self::Location(_)
+            | Self::Before(_)
+            | Self::After(_) => None,
+        }
+    }
+}
+
+impl TextScope<'_> {
+    /// Whether the text holds anything the tokenizer keeps.
+    ///
+    /// A term of punctuation alone asks nothing of the index, and is satisfied rather than
+    /// unsatisfiable: `from:` followed by a stray character mid-typing should not empty the
+    /// result list.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        crate::ingest::tokenize(self.text).is_empty()
+    }
+
+    /// The match expression for this scope over `columns`, which must be a subset of the
+    /// scope's own.
+    ///
+    /// The text is quoted as one phrase, so nothing a person types can be read as the
+    /// index's own query syntax: a `-`, an `OR`, a `NEAR` or a bracket in a search is text.
+    /// The one character that means something inside the quotes is the quote itself, and it
+    /// is doubled, which is the syntax's own escape.
+    #[must_use]
+    pub fn expression(&self, columns: &[Column]) -> String {
+        let names: Vec<&str> = columns.iter().map(|c| c.name()).collect();
+        format!(
+            "{{{}}} : \"{}\"{}",
+            names.join(" "),
+            self.text.replace('"', "\"\""),
+            if self.prefix { "*" } else { "" }
+        )
+    }
+}
+
 /// Take one token, keeping a quoted phrase together.
 fn take_token(input: &str) -> (String, &str) {
     let mut chars = input.char_indices();
@@ -231,6 +348,38 @@ mod tests {
                 q.terms[0]
             );
         }
+    }
+
+    #[test]
+    fn nothing_typed_can_reach_the_index_query_syntax() {
+        // A person's `-`, `OR`, `NEAR(` or `*` is text, and a stray quote cannot close the
+        // phrase early and open a second clause.
+        let q = Query::parse("from:a\"b");
+        let scope = q.terms[0].text_scope().unwrap();
+        assert_eq!(scope.expression(scope.columns), "{sender} : \"a\"\"b\"*");
+
+        let phrase = Term::Phrase("x OR y NEAR(z)".into());
+        let scope = phrase.text_scope().unwrap();
+        assert_eq!(
+            scope.expression(&[Column::Body]),
+            "{body} : \"x OR y NEAR(z)\""
+        );
+    }
+
+    #[test]
+    fn each_operator_searches_only_its_own_field() {
+        let columns = |input: &str| Query::parse(input).terms[0].text_scope().unwrap().columns;
+        assert_eq!(columns("from:alice"), &[Column::Sender]);
+        assert_eq!(columns("to:bob"), &[Column::Recipients]);
+        assert_eq!(columns("subject:report"), &[Column::Subject]);
+        assert_eq!(columns("invoice"), Column::ALL);
+        assert!(Query::parse("is:unread").terms[0].text_scope().is_none());
+    }
+
+    #[test]
+    fn punctuation_alone_asks_nothing_of_the_index() {
+        assert!(Term::Word("--".into()).text_scope().unwrap().is_empty());
+        assert!(!Term::Word("a".into()).text_scope().unwrap().is_empty());
     }
 
     #[test]
