@@ -14,9 +14,11 @@
 //!
 //! # The whole mailbox, and then the limit
 //!
-//! Each account's own full-text index (D-5, D-80, one per account under D-6) is asked for
+//! Each account's own full-text index (D-5, D-80, one per account under D-6) is searched for
 //! every message that satisfies every term, with FR-20's structured operators applied as
-//! predicates on those same rows. The accounts' results are merged under D-79 — on features
+//! predicates on those same rows, and hands back its leading matches in D-79's order — as many
+//! as could still be shown once the overlay has had its say, and no more, so a keystroke's cost
+//! does not grow with the mailbox (NFR-5). The accounts' results are merged under D-79 — on features
 //! that mean the same thing in every account, falling back to D-55's list order where the
 //! query carries no relevance signal — and only **then** truncated to the number asked for.
 //! Truncating first would search the newest page of each mailbox and report the rest as not
@@ -41,7 +43,7 @@
 //! result is [`Source::Local`] — and the label exists now rather than later because merging two
 //! sources without saying which is which is the shape of the mistake FR-21 exists to prevent.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use sift_foundation::identity::LocalId;
 use sift_index::merge::{self, Features, Result_};
@@ -111,7 +113,8 @@ impl App {
                 .collect(),
         };
 
-        // Every account's every match, before anything is cut.
+        // Each account's leading matches in D-79's order — enough of them that the merged
+        // order's first `limit` visible rows are all among them — before anything is cut.
         let mut owner: HashMap<u128, &str> = HashMap::new();
         let mut candidates = Vec::new();
         for name in &names {
@@ -119,7 +122,7 @@ impl App {
                 .accounts
                 .get(name)
                 .ok_or_else(|| format!("no account `{name}`"))?;
-            for (id, features) in matching(account, &query)? {
+            for (id, features) in matching(account, &query, limit)? {
                 owner.insert(id.as_u128(), name);
                 candidates.push(Result_ {
                     message: id.as_u128(),
@@ -165,12 +168,40 @@ impl App {
     }
 }
 
-/// One account's messages that satisfy every term, with D-79's features of each.
+/// One account's leading messages that satisfy every term, in D-79's order, with its features
+/// of each.
 ///
 /// Terms are conjunctive, which is what a person means by typing two of them. The text terms
 /// are one query against the account's full-text index; the structured operators are
 /// predicates on the same rows, in the same statement, so nothing is cut before they apply.
-fn matching(account: &OpenAccount, query: &Query) -> Result<Vec<(LocalId, Features)>, String> {
+///
+/// # Bounded per keystroke (NFR-5)
+///
+/// The order, the field credit and the cut are all the statement's, so the rows that leave the
+/// store are at most `limit` plus the messages the overlay has an opinion about — never the
+/// whole mailbox, which is what a one-letter prefix or a bare `is:unread` would otherwise read.
+/// That count is exact rather than generous: the merged order's first `limit` visible rows
+/// from this account are its first `limit` rows here, except for rows the overlay hides or
+/// re-reads, and every one of those is a message the overlay names.
+fn matching(
+    account: &OpenAccount,
+    query: &Query,
+    limit: u32,
+) -> Result<Vec<(LocalId, Features)>, String> {
+    // The messages the overlay has an opinion about (D-51). Their identities are ours, not
+    // the user's text, so they are written into the statement as literals rather than bound
+    // one parameter each, which no parameter limit then caps.
+    let pending: BTreeSet<LocalId> = account.queue.entries().iter().map(|q| q.message).collect();
+    let pending_literals = pending
+        .iter()
+        .map(|id| {
+            let hex: String = id.to_bytes().iter().map(|b| format!("{b:02X}")).collect();
+            format!("X'{hex}'")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let cut = i64::from(limit).saturating_add(i64::try_from(pending.len()).unwrap_or(i64::MAX));
+
     let scopes: Vec<(TextScope<'_>, bool)> = query
         .terms
         .iter()
@@ -210,10 +241,17 @@ fn matching(account: &OpenAccount, query: &Query) -> Result<Vec<(LocalId, Featur
                 values.push(name.clone().into());
                 values.push(name.clone().into());
             }
-            // Read state is the overlay's as much as the server's, so it is decided on the row
-            // the user sees rather than here — see `seen_as_asked`.
-            Term::Unread(_)
-            | Term::Word(_)
+            // Read state is the overlay's as much as the server's. The server's answer is
+            // asked here, and a message the overlay names is let through whatever the server
+            // says, so the row the user sees decides it — see `seen_as_asked`.
+            Term::Unread(want) => {
+                clauses.push(format!(
+                    "(((m.flags & {read}) = 0) = ? OR m.id IN ({pending_literals}))",
+                    read = sift_store::flags::READ
+                ));
+                values.push(i64::from(*want).into());
+            }
+            Term::Word(_)
             | Term::Phrase(_)
             | Term::Sender(_)
             | Term::Recipient(_)
@@ -222,12 +260,59 @@ fn matching(account: &OpenAccount, query: &Query) -> Result<Vec<(LocalId, Featur
         }
     }
 
-    let sql = if scopes.is_empty() {
-        let mut sql = "SELECT m.id, m.received_at_millis, NULL FROM message m".to_owned();
-        if !clauses.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&clauses.join(" AND "));
+    // Which field each term matched in, for D-79 — asked of the index inside the statement,
+    // and only where the order depends on it: a query with no relevance signal is ordered by
+    // received time alone. Credit in a field is "any text term matched there", as D-79 reads
+    // it; the preview and the body are both the text of the message.
+    let relevance = query.carries_a_relevance_signal() && !scopes.is_empty();
+    let mut credit_values: Vec<rusqlite::types::Value> = Vec::new();
+    let mut credit = |wanted: &[Column]| -> String {
+        if !relevance {
+            return "0".to_owned();
         }
+        let tests: Vec<String> = scopes
+            .iter()
+            .filter_map(|(scope, _)| {
+                let columns: Vec<Column> = wanted
+                    .iter()
+                    .copied()
+                    .filter(|c| scope.columns.contains(c))
+                    .collect();
+                if columns.is_empty() {
+                    return None;
+                }
+                credit_values.push(scope.expression(&columns).into());
+                Some(
+                    "t.rowid IN (SELECT rowid FROM message_text WHERE message_text MATCH ?)"
+                        .to_owned(),
+                )
+            })
+            .collect();
+        if tests.is_empty() {
+            "0".to_owned()
+        } else {
+            format!("({})", tests.join(" OR "))
+        }
+    };
+    let subject = credit(&[Column::Subject]);
+    let sender = credit(&[Column::Sender]);
+    let body = credit(&[Column::Snippet, Column::Body]);
+    // A phrase every returned message matched is a phrase match for each of them.
+    let phrase = relevance && scopes.iter().any(|(_, phrase)| *phrase);
+
+    let filter = |sql: &mut String, first: &str| {
+        for (n, clause) in clauses.iter().enumerate() {
+            sql.push_str(if n == 0 { first } else { " AND " });
+            sql.push_str(clause);
+        }
+    };
+    // D-79's order within this account, and D-55's where the query carries no relevance
+    // signal. The weights are `Features::score`'s field weights, doubled to stay integers;
+    // everything else in that score is the same for every row this statement returns.
+    let sql = if scopes.is_empty() {
+        let mut sql = "SELECT m.id, m.received_at_millis, 0, 0, 0 FROM message m".to_owned();
+        filter(&mut sql, " WHERE ");
+        sql.push_str(" ORDER BY m.received_at_millis DESC, m.id DESC LIMIT ?");
         sql
     } else {
         let expression = scopes
@@ -236,116 +321,57 @@ fn matching(account: &OpenAccount, query: &Query) -> Result<Vec<(LocalId, Featur
             .collect::<Vec<_>>()
             .join(" AND ");
         values.insert(0, expression.into());
-        let mut sql = "SELECT m.id, m.received_at_millis, t.rowid
+        let mut sql = format!(
+            "SELECT m.id, m.received_at_millis, {subject} AS s, {sender} AS f, {body} AS b
              FROM message_text t
              JOIN message_text_key k ON k.docid = t.rowid
              JOIN message m ON m.id = k.message_id
              WHERE message_text MATCH ?"
-            .to_owned();
-        for clause in &clauses {
-            sql.push_str(" AND ");
-            sql.push_str(clause);
-        }
+        );
+        filter(&mut sql, " AND ");
+        sql.push_str(
+            " ORDER BY 4 * s + 2 * f + b DESC, m.received_at_millis DESC, m.id DESC LIMIT ?",
+        );
         sql
     };
+    // Positional parameters bind in the order they are written: the credit tests in the
+    // projection, then the match and the predicates, then the cut.
+    credit_values.append(&mut values);
+    credit_values.push(cut.into());
 
+    let terms = u32::try_from(scopes.len()).unwrap_or(u32::MAX);
     let store = &account.store.store;
     let mut stmt = store.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(values), |r| {
+        .query_map(rusqlite::params_from_iter(credit_values), |r| {
             Ok((
                 r.get::<_, Vec<u8>>(0)?,
                 r.get::<_, i64>(1)?,
-                r.get::<_, Option<i64>>(2)?,
+                r.get::<_, bool>(2)?,
+                r.get::<_, bool>(3)?,
+                r.get::<_, bool>(4)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     let mut found = Vec::new();
     for row in rows {
-        let (key, received, docid) = row.map_err(|e| e.to_string())?;
+        let (key, received, subject, sender, body) = row.map_err(|e| e.to_string())?;
         let bytes: [u8; 16] = key.try_into().map_err(|_| "identity is not 16 bytes")?;
         found.push((
             LocalId::from_bytes(bytes),
-            u64::try_from(received).unwrap_or(0),
-            docid,
-        ));
-    }
-
-    // Which field each term matched in, for D-79. Only asked where the order depends on it:
-    // a query with no relevance signal is ordered by received time alone.
-    let credit = if query.carries_a_relevance_signal() {
-        scopes
-            .iter()
-            .map(|(scope, phrase)| Credit::of(store, scope, *phrase))
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        Vec::new()
-    };
-    let terms = u32::try_from(scopes.len()).unwrap_or(u32::MAX);
-
-    Ok(found
-        .into_iter()
-        .map(|(id, received, docid)| {
-            let mut f = Features {
-                received_millis: received,
+            Features {
+                matched_subject: subject,
+                matched_sender: sender,
+                matched_body: body,
+                matched_phrase: phrase,
                 // Conjunctive: every text term is present in every message returned.
                 terms_present: terms,
                 terms_total: terms,
-                ..Features::default()
-            };
-            if let Some(docid) = docid {
-                for c in &credit {
-                    f.matched_subject |= c.subject.contains(&docid);
-                    f.matched_sender |= c.sender.contains(&docid);
-                    f.matched_body |= c.body.contains(&docid);
-                    f.matched_phrase |= c.phrase;
-                }
-            }
-            (id, f)
-        })
-        .collect())
-}
-
-/// Where one text term matched, as D-79 credits it: the subject, the sender, or the text of
-/// the message — its preview or its body.
-struct Credit {
-    subject: HashSet<i64>,
-    sender: HashSet<i64>,
-    body: HashSet<i64>,
-    phrase: bool,
-}
-
-impl Credit {
-    fn of(
-        store: &rusqlite::Connection,
-        scope: &TextScope<'_>,
-        phrase: bool,
-    ) -> Result<Self, String> {
-        let within = |wanted: &[Column]| -> Result<HashSet<i64>, String> {
-            let columns: Vec<Column> = wanted
-                .iter()
-                .copied()
-                .filter(|c| scope.columns.contains(c))
-                .collect();
-            if columns.is_empty() {
-                return Ok(HashSet::new());
-            }
-            let mut stmt = store
-                .prepare("SELECT rowid FROM message_text WHERE message_text MATCH ?1")
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map([scope.expression(&columns)], |r| r.get::<_, i64>(0))
-                .map_err(|e| e.to_string())?;
-            rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
-        };
-        Ok(Self {
-            subject: within(&[Column::Subject])?,
-            sender: within(&[Column::Sender])?,
-            body: within(&[Column::Snippet, Column::Body])?,
-            // A phrase every returned message matched is a phrase match for each of them.
-            phrase,
-        })
+                received_millis: u64::try_from(received).unwrap_or(0),
+            },
+        ));
     }
+    Ok(found)
 }
 
 fn millis_value(millis: u64) -> rusqlite::types::Value {
@@ -759,5 +785,111 @@ mod tests {
             assert!(!body.contains('<'), "markup was indexed: {body}");
         }
         assert!(indexed > 0, "no opened message had its body indexed");
+    }
+
+    #[test]
+    fn an_attachment_is_found_by_its_filename_once_its_message_is_opened() {
+        // D-81: filenames arrive with the structure, which is fetched when a message is opened,
+        // so before that the name is nowhere in the index and after it the message is found by
+        // it. The replayed corpus's ordinary messages carry `statement.pdf`.
+        let mut app = App::new();
+        app.add_replayed_account("mail").unwrap();
+        app.sync("mail", 10).unwrap();
+        let rows = crate::rows::message_rows(app.account("mail").unwrap(), 50).unwrap();
+        let before = found(&mut app, "statement.pdf", 50);
+        let opened = rows
+            .iter()
+            .map(|r| r.id)
+            .find(|id| !before.contains(id) && app.open_document(*id, false).is_ok())
+            .expect("no message outside the results opened");
+
+        let attachments: String = app
+            .account("mail")
+            .unwrap()
+            .store
+            .store
+            .query_row(
+                "SELECT coalesce(attachments, '') FROM message_text
+                 WHERE rowid = (SELECT docid FROM message_text_key WHERE message_id = ?1)",
+                [opened.to_bytes().to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            attachments.contains("statement.pdf"),
+            "the filename was not indexed: {attachments:?}"
+        );
+        assert!(found(&mut app, "statement.pdf", 50).contains(&opened));
+        assert!(found(&mut app, "statem", 50).contains(&opened));
+    }
+
+    fn mark_read(app: &mut App, account: &str, id: LocalId) {
+        app.account(account)
+            .unwrap()
+            .store
+            .store
+            .execute(
+                "UPDATE message SET flags = ?1 WHERE id = ?2",
+                rusqlite::params![sift_store::flags::READ, id.to_bytes().to_vec()],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn the_overlay_decides_what_fills_the_limit() {
+        // The statement cuts each account at `limit` plus the messages the overlay names. A
+        // cut at `limit` alone would spend a place on the archived row and return one short;
+        // an unread check on the server's flags alone would miss the message the user has
+        // just marked unread.
+        let mut app = one_account();
+        let ids: Vec<LocalId> = (1..=5)
+            .map(|n| {
+                let id = put(
+                    &mut app,
+                    "work",
+                    &Mail {
+                        subject: "Report",
+                        received: n,
+                        ..Mail::default()
+                    },
+                );
+                mark_read(&mut app, "work", id);
+                id
+            })
+            .collect();
+        let queue = &mut app.accounts.get_mut("work").unwrap().queue;
+        queue.enqueue(1, ids[0], sift_mutations::intent::Intent::MarkUnread, 0);
+        queue.enqueue(2, ids[4], sift_mutations::intent::Intent::Archive, 0);
+
+        assert_eq!(found(&mut app, "is:unread", 1), vec![ids[0]]);
+        assert_eq!(found(&mut app, "is:read", 2), vec![ids[3], ids[2]]);
+        assert_eq!(found(&mut app, "report is:read", 2), vec![ids[3], ids[2]]);
+        assert_eq!(
+            found(&mut app, "report", 5),
+            vec![ids[3], ids[2], ids[1], ids[0]]
+        );
+    }
+
+    #[test]
+    fn a_keystroke_reads_no_more_rows_than_it_can_show() {
+        // NFR-5: neither a bare operator nor a one-letter prefix over a large mailbox takes
+        // every matching message out of the store.
+        let mut app = one_account();
+        for n in 0..300 {
+            put(
+                &mut app,
+                "work",
+                &Mail {
+                    subject: "Report",
+                    received: n,
+                    ..Mail::default()
+                },
+            );
+        }
+        let account = app.account("work").unwrap();
+        for query in ["is:unread", "r", "report", "\"report\"", "from:someone"] {
+            let rows = matching(account, &Query::parse(query), 20).unwrap();
+            assert_eq!(rows.len(), 20, "{query} read {} rows", rows.len());
+        }
     }
 }
