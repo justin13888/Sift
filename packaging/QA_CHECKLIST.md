@@ -226,7 +226,7 @@ It is not a threshold this run passes or fails.
 | UNI-1 | `brew uninstall --cask sift` | The app is gone. `~/Library/Containers/net.justinchung.sift` and the Keychain items remain | D-33, [README](README.md#what-the-cask-publishes) | | |
 | UNI-2 | `brew install --cask local/sift/sift` again, and launch it | Every account is still there, and no one has to sign in again | D-33, D-45 | | |
 | UNI-3 | `brew uninstall --zap --cask sift` | Every path in the Cask's `zap` stanza is gone | #19 | | |
-| UNI-4 | After UNI-3, `security find-generic-password -s net.justinchung.sift` and a Keychain Access search for `net.justinchung.sift` | Neither finds anything. The Keychain Access search also covers the data-protection keychain, which the `security` command does not list | #19, NFR-23 | | |
+| UNI-4 | After UNI-3, `security find-generic-password -s net.justinchung.sift` and a Keychain Access search for `net.justinchung.sift` | Neither finds anything. The Keychain Access search also covers the data-protection keychain, which the `security` command does not list | #19, NFR-23 | #141 (zap cannot reach data-protection items) | |
 
 ## Findings
 

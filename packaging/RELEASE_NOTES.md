@@ -133,6 +133,8 @@ issue number is where the fix is tracked.
 
 - **The DMG window has no background art or arranged icons.** Drag *Sift* onto *Applications*
   (#132).
+- **`brew uninstall --zap` leaves your accounts' sign-in credentials in the Keychain.** Remove
+  each account in Sift before you uninstall, and they are deleted with it (#141).
 
 ### Before you install
 
@@ -143,4 +145,5 @@ issue number is where the fix is tracked.
   can delete its data at `~/Library/Application Support/net.justinchung.sift`.
 - **Uninstalling keeps your data unless you ask.** `brew uninstall --cask sift` and
   `brew upgrade` remove only the app. `brew uninstall --zap --cask sift` also removes the
-  mailboxes Sift stored and its Keychain items.
+  mailboxes Sift stored, but not the accounts' sign-in credentials in the Keychain (#141). To
+  remove those, use *Remove Account…* on every account before you uninstall.
