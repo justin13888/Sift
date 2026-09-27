@@ -93,8 +93,8 @@ precisely when opening the full window is most expensive.
 
 ## D-98 — Actions are a register, and the register is what FR-24 and the test harness both use
 
-**Chosen:** every user-initiated operation is a **named action** with a stable identifier, a scope, and
-an enablement rule; the set is enumerated here; the command palette is a view of it; and the shell test
+**Chosen:** every user-initiated Sift operation is a **named action** with a stable identifier, a scope,
+and an enablement rule (the platform's own standard commands sit beside the register, not in it — D-118); the set is enumerated here; the command palette is a view of it; and the shell test
 harness invokes actions by identifier. Default bindings are per platform and are **not** user-rebindable
 in the first release.
 **Rejected:** actions defined per shell; a palette with its own list; rebindable bindings now.
