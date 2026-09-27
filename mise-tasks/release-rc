@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+#MISE description="The release candidate: universal, Developer ID signed, notarized and stapled Sift.app in a DMG, and the Cask's checksum. Publishes nothing."
+#USAGE arg "<version>" help="The user-facing version, X.Y.Z (D-62) — the Cask's version and the DMG's name"
+#
+# D-33, D-45, D-46, D-62, D-63. The artefact the Cask channel ships, made on the release
+# machine from its own keychain, and **left there**: this task never pushes, tags, uploads or
+# updates a tap. It ends by printing what a person runs to publish.
+#
+#   1. Refuse to start dirty, off the default branch's history, insecure, or unconfigured, and
+#      name every missing precondition at once rather than the first one a later step trips on.
+#   2. `mise run macos --release --universal` with the version, the build number and the
+#      revision — which builds both core slices, archives, exports for Developer ID, and reads
+#      back the clients, the schemes, the entitlements, the identity, the timestamp, the
+#      stamps and both architectures.
+#   3. Notarize the app and staple it, so a first launch does not need the network.
+#   4. A DMG of the stapled app, itself signed, notarized, stapled and assessed.
+#   5. Its sha256 beside it and in `packaging/homebrew/sift.rb`, which must then pass
+#      `brew style`. That diff is left in the worktree for a person to commit.
+#   6. The dSYM beside the DMG: `profile.release` keeps line tables so a D-35 backtrace can be
+#      symbolicated, and without the matching dSYM it cannot.
+#
+# **Never from CI and never from `mise run check`.** D-63 makes the release path the only thing
+# that holds signing credentials; this reads them from the local keychain.
+#
+# **The build number is the revision's position on the default branch's first-parent history**
+# (`git rev-list --count --first-parent`). That is at least 1, grows with every change that
+# lands, and is the same for the same revision — so re-running a version is idempotent and two
+# revisions can never share a number. What it cannot catch on its own is one revision released
+# under two versions, or one version given two revisions; the release tags can, so both are
+# checked against every `v*` tag here and on the remote.
+set -euo pipefail
+
+cd "${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
+root="$PWD"
+
+fail() {
+    echo "release-rc: $1" >&2
+    shift
+    local line
+    for line in "$@"; do echo "            $line" >&2; done
+    exit 1
+}
+
+[[ "$(uname -s)" == "Darwin" ]] || fail "the Cask artefact is built on macOS only."
+[[ "${CI:-}" != "true" ]] || fail "never from CI (D-63): signing credentials live on the release machine alone."
+
+[[ $# -eq 1 ]] || fail "usage: mise run release-rc -- <version>   (for example 0.1.0)"
+version="$1"
+# D-62 — the one user-facing version. Three integers, because that is what the bundle's short
+# version string is defined to be and what the Cask compares; a pre-release is a lower number,
+# not a suffix.
+[[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+    || fail "'$version' is not a version — expected X.Y.Z, three non-negative integers."
+
+team="854G577S2Y"
+profile="sift-notary"
+cask="packaging/homebrew/sift.rb"
+tag="v$version"
+
+# ---------------------------------------------------------------------------------------------
+# 1. Preconditions — every one checked, every missing one named.
+# ---------------------------------------------------------------------------------------------
+problems=()
+
+# A clean worktree. The one change tolerated is this task's own output, the Cask, so a second
+# run of the same version is not refused for the diff the first one left.
+dirty="$(git status --porcelain=v1 --untracked-files=all | grep -vF " $cask" || true)"
+if [[ -n "$dirty" ]]; then
+    problems+=("the worktree is not clean — commit or remove:" "$(sed 's/^/  /' <<<"$dirty")")
+fi
+
+# The revision is on the default branch's first-parent history, which is what makes its build
+# number unique. A shallow clone would count only what it has.
+if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+    problems+=("this clone is shallow, so the build number would be short — git fetch --unshallow")
+fi
+default_ref="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/master)"
+default_branch="${default_ref#origin/}"
+git fetch --quiet origin "$default_branch" --tags \
+    || problems+=("could not fetch origin/$default_branch to place this revision on it")
+revision="$(git rev-parse HEAD)"
+# `grep` without `-q`: an early exit would leave `git` writing into a closed pipe, and under
+# `pipefail` that SIGPIPE would read as "not on the branch".
+if ! git rev-list --first-parent "origin/$default_branch" | grep -x "$revision" >/dev/null; then
+    problems+=("HEAD ($revision) is not on origin/$default_branch's first-parent history." \
+        "A release is cut from a revision that landed: git switch --detach origin/$default_branch")
+fi
+build_number="$(git rev-list --count --first-parent HEAD)"
+
+# The release tags: one version, one revision; one revision, one version.
+if tagged="$(git rev-parse --verify --quiet "refs/tags/$tag^{commit}")"; then
+    [[ "$tagged" == "$revision" ]] \
+        || problems+=("$tag already names $tagged, not $revision — a version identifies one revision (D-62).")
+fi
+# The peeled line follows the tag's own, so the last match is the commit an annotated tag names.
+if ! remote_tag="$(git ls-remote --tags origin \
+    | awk -v ref="refs/tags/$tag" '$2 == ref || $2 == ref "^{}" { sha = $1 } END { print sha }')"; then
+    problems+=("could not list origin's tags to check $tag against")
+elif [[ -n "$remote_tag" && "$remote_tag" != "$revision" ]]; then
+    problems+=("origin's $tag names $remote_tag, not $revision — a version identifies one revision (D-62).")
+fi
+for other in $(git tag --points-at HEAD --list 'v*'); do
+    [[ "$other" == "$tag" ]] \
+        || problems+=("HEAD is already released as $other, so build $build_number is taken — land a change first.")
+done
+
+# The advisory gate first, so a candidate never ships a lockfile carrying a known advisory.
+if ! mise run deny >&2; then
+    problems+=("mise run deny fails — see above; a release is never cut over an advisory.")
+fi
+
+# The identity that signs the app's export and the DMG.
+identity="$(security find-identity -v -p codesigning \
+    | sed -n "s/^ *[0-9]*) \([0-9A-F]\{40\}\) \"Developer ID Application: .* ($team)\"$/\1/p" \
+    | awk 'NR == 1')"
+[[ -n "$identity" ]] || problems+=("no valid 'Developer ID Application: … ($team)' identity in the keychain.")
+
+# The notary credentials, stored once by a person (`xcrun notarytool store-credentials`).
+if ! xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; then
+    problems+=("no usable notarytool keychain profile '$profile'. Store one with:" \
+        "  xcrun notarytool store-credentials $profile --apple-id <apple-id> --team-id $team" \
+        "(it prompts for an app-specific password from account.apple.com)")
+fi
+
+# An OAuth client for every provider kind the candidate offers. A release bundle with none
+# can only open fixtures. Resolved the way `mise-tasks/macos` resolves them, which reads the
+# bundle back afterwards to confirm each one landed.
+client() {
+    local variable="$1" file
+    shift
+    local value="${!variable:-}"
+    for file in "$@"; do
+        [[ -n "$value" || ! -f "$file" ]] || value="$(tr -d '[:space:]' <"$file")"
+    done
+    printf '%s' "$value"
+}
+gmail="$(client SIFT_OAUTH_CLIENT_ID_GMAIL shells/macos/oauth-client.gmail.txt)"
+[[ -n "$gmail" ]] || gmail="$(client SIFT_OAUTH_CLIENT_ID shells/macos/oauth-client.txt)"
+graph="$(client SIFT_OAUTH_CLIENT_ID_GRAPH shells/macos/oauth-client.graph.txt)"
+[[ -n "$gmail" ]] || problems+=("no gmail OAuth client: shells/macos/oauth-client.gmail.txt or SIFT_OAUTH_CLIENT_ID_GMAIL")
+[[ -n "$graph" ]] || problems+=("no graph OAuth client: shells/macos/oauth-client.graph.txt or SIFT_OAUTH_CLIENT_ID_GRAPH")
+
+command -v brew >/dev/null 2>&1 || problems+=("brew is not on PATH, and the Cask is checked with brew style.")
+
+if [[ ${#problems[@]} -gt 0 ]]; then
+    echo "release-rc: not starting — ${#problems[@]} precondition(s) unmet:" >&2
+    for line in "${problems[@]}"; do echo "  - $line" >&2; done
+    exit 1
+fi
+
+out="target/release-rc/$version"
+rm -rf "$out"
+mkdir -p "$out"
+short="$(git rev-parse --short=12 HEAD)"
+echo "release-rc: $version, build $build_number, revision $short"
+
+# ---------------------------------------------------------------------------------------------
+# 2. The universal, Developer ID signed bundle, read back by the build task.
+# ---------------------------------------------------------------------------------------------
+"$root/mise-tasks/macos" --release --universal \
+    --marketing-version "$version" \
+    --build-number "$build_number" \
+    --source-revision "$revision"
+app="shells/macos/.build/export/Sift.app"
+xcarchive="shells/macos/.build/Sift.xcarchive"
+[[ -d "$app" ]] || fail "the build left no $app."
+
+# ---------------------------------------------------------------------------------------------
+# 3. Notarize and staple, bounded: notarytool gives up after its timeout and this fails.
+# ---------------------------------------------------------------------------------------------
+notarize() {
+    local what="$1" result="$out/notary.$(basename "$1").json" id status
+    xcrun notarytool submit "$what" --keychain-profile "$profile" \
+        --wait --timeout 1h --output-format json >"$result" \
+        || true
+    id="$(plutil -extract id raw -o - "$result" 2>/dev/null || true)"
+    status="$(plutil -extract status raw -o - "$result" 2>/dev/null || true)"
+    if [[ "$status" != "Accepted" ]]; then
+        echo "release-rc: notarization of $what ended '${status:-without a status}'." >&2
+        cat "$result" >&2 || true
+        if [[ -n "$id" ]]; then
+            xcrun notarytool log "$id" --keychain-profile "$profile" >&2 || true
+        fi
+        exit 1
+    fi
+    echo "release-rc: notarized $what ($id)"
+}
+
+zip="$out/Sift.app.zip"
+ditto -c -k --keepParent "$app" "$zip"
+notarize "$zip"
+rm -f "$zip"
+xcrun stapler staple "$app"
+xcrun stapler validate "$app"
+codesign --verify --deep --strict "$app" || fail "the stapled app's signature does not verify."
+assessment="$(spctl -a -vv -t exec "$app" 2>&1)" || fail "Gatekeeper rejects the app:" "$assessment"
+grep -q 'source=Notarized Developer ID' <<<"$assessment" \
+    || fail "Gatekeeper accepts the app, but not as notarized Developer ID:" "$assessment"
+echo "release-rc: $app stapled; $(tr '\n' ' ' <<<"$assessment")"
+
+# ---------------------------------------------------------------------------------------------
+# 4. The DMG — named as the Cask's URL expects, signed, notarized, stapled, assessed.
+# ---------------------------------------------------------------------------------------------
+dmg="$out/Sift-$version.dmg"
+stage="$out/stage"
+mkdir -p "$stage"
+ditto "$app" "$stage/Sift.app"
+ln -s /Applications "$stage/Applications"
+hdiutil create -volname "Sift" -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$dmg" >/dev/null
+rm -rf "$stage"
+codesign --sign "$identity" --timestamp "$dmg"
+codesign --verify --strict "$dmg" || fail "the DMG's signature does not verify."
+notarize "$dmg"
+xcrun stapler staple "$dmg"
+xcrun stapler validate "$dmg"
+assessment="$(spctl -a -t open --context context:primary-signature -vv "$dmg" 2>&1)" \
+    || fail "Gatekeeper rejects the DMG:" "$assessment"
+grep -q 'source=Notarized Developer ID' <<<"$assessment" \
+    || fail "Gatekeeper accepts the DMG, but not as notarized Developer ID:" "$assessment"
+
+# ---------------------------------------------------------------------------------------------
+# 5. The checksum, beside the DMG and in the Cask.
+# ---------------------------------------------------------------------------------------------
+sha="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+(cd "$out" && shasum -a 256 "Sift-$version.dmg" >"Sift-$version.dmg.sha256")
+
+updated="$out/sift.rb"
+awk -v version="$version" -v sha="$sha" '
+    /^  version "[^"]*"$/ { print "  version \"" version "\""; v++; next }
+    /^  sha256 (:no_check|"[0-9a-f]*")$/ { print "  sha256 \"" sha "\""; s++; next }
+    { print }
+    END { if (v != 1 || s != 1) exit 1 }
+' "$cask" >"$updated" || fail "$cask does not have exactly one version and one sha256 line to write."
+cp "$updated" "$cask"
+rm -f "$updated"
+# The frozen-string-literal cop is the one that a Cask in a tap is excluded from and a file
+# outside one is not; every Cask cop still runs.
+brew style --except-cops Style/FrozenStringLiteralComment "$cask" \
+    || fail "$cask no longer passes brew style."
+
+# ---------------------------------------------------------------------------------------------
+# 6. The dSYM — one bundle holding both architectures, each with its own UUID.
+# ---------------------------------------------------------------------------------------------
+dsym="$xcarchive/dSYMs/Sift.app.dSYM"
+[[ -d "$dsym" ]] || fail "the archive holds no $dsym to symbolicate with."
+ditto "$dsym" "$out/Sift.app.dSYM"
+dwarfdump --uuid "$out/Sift.app.dSYM" | tee "$out/Sift.app.dSYM.uuids"
+for arch in arm64 x86_64; do
+    grep -q "($arch)" "$out/Sift.app.dSYM.uuids" || fail "the dSYM has no $arch slice."
+done
+(cd "$out" && ditto -c -k --keepParent Sift.app.dSYM "Sift-$version.dSYM.zip")
+
+cat <<DONE
+
+release-rc: Sift $version (build $build_number, $short) — nothing has been published.
+
+  $dmg
+  $dmg.sha256          $sha
+  $out/Sift-$version.dSYM.zip
+  $cask                version and sha256 written, not committed
+
+To publish, a person runs:
+
+  git tag -s $tag $revision -m "Sift $version"
+  git push origin $tag
+  gh release create $tag --verify-tag --prerelease --title "Sift $version" \\
+      "$dmg" "$dmg.sha256" "$out/Sift-$version.dSYM.zip"
+  git switch -c release/$version && git commit -m "build(packaging): Sift $version in the Cask" -- $cask
+  # then open that as a pull request, and copy $cask into the tap once it merges
+DONE
