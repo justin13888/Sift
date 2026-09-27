@@ -87,6 +87,22 @@ where email tracking is covered, since the public lists cover it poorly, and it 
 copyleft list. NFR-42's budget covers the same three lists in every build, including the App Store
 build where EasyList and EasyPrivacy can only arrive as imported custom rules.
 
+**How the split is enforced.** The two public lists are compiled in only under a build flag, registered
+with the other [feature flags](../build/workspace.md#feature-flags-are-a-register-not-a-habit), that
+the Cask and Flatpak builds turn on and that no other build may. They are taken into the tree unmodified
+at a recorded upstream revision, beside their licence text and the attribution their terms ask for, and
+reach a user only as a reviewed change to the tree, as D-111 below requires of every list.
+
+**The compiled rules are held in the form the web engine consumes**, the serialized content-rule list,
+rather than as parsed rules. With the three lists loaded the parsed form is several times the serialized
+one and would alone exceed NFR-42, while the web engine needs only the serialized form. First
+measurements, on a development machine rather than the
+[reference environment](../product/reference-environment.md) and so evidence for NFR-42 rather than its
+validation: the loaded engine holds roughly 28 MB with the three lists, inside the 40 MB; building it
+passes through a transient peak of roughly three times that, which NFR-42 as written does not address;
+and the three lists compile to somewhat over 137,000 content rules, near the ceiling a single rule list
+in the web engine accepts.
+
 Under D-111 below, a *subscription* is the choice of which bundled lists are enabled, and a *custom rule*
 is one the user writes or imports from a file they choose. Neither names a remote source: a list Sift does
 not bundle reaches the engine as the user's own custom rules, never as an address Sift fetches — which is

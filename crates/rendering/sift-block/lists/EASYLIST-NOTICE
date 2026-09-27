@@ -1,0 +1,50 @@
+EasyList and EasyPrivacy
+========================
+
+easylist.txt and easyprivacy.txt in this directory are EasyList and EasyPrivacy, by
+The EasyList authors (https://easylist.to/). They are not Sift's work and are not
+covered by Sift's own licence.
+
+Licence
+-------
+
+The EasyList project states, at https://easylist.to/pages/licence.html:
+
+    Unless otherwise noted, the contents of the EasyList repository
+    (https://github.com/easylist) is dual licensed under the GNU
+    General Public License version 3 of the License, or (at your option)
+    any later version, and Creative Commons Attribution-ShareAlike 3.0
+    Unported, or (at your option) any later version. You may use and/or
+    modify the files as permitted by either licence; if required,
+    "The EasyList authors (https://easylist.to/)" should be
+    attributed as the source of the material. All relevant licence files
+    are included in the repository.
+
+Sift takes both lists under the GNU General Public License, version 3 or (at your
+option) any later version (D-112). Its text is COPYING.GPL-3.0 in this directory.
+
+Which builds carry them
+-----------------------
+
+Only builds with the sift-block `public-lists` feature on: the Homebrew Cask and the
+Flatpak (D-112). The rules compiled from them for the web engine's content blocker are
+treated as an adaptation and ship only in those same builds, under the same terms.
+
+Revision
+--------
+
+Both files are the lists exactly as published, unmodified, taken on 2026-09-27 from
+
+    https://easylist.to/easylist/easylist.txt
+    https://easylist.to/easylist/easyprivacy.txt
+
+at list version 202609271831, built from https://github.com/easylist/easylist commit
+ffa7535fa4fd31aa6953ad2a2447b918c0c4d07c. Each file's own header records the same
+version and commit.
+
+Refreshing them (D-111)
+-----------------------
+
+Sift fetches no list at run time. A newer list reaches users only as a reviewed change
+to this directory, carried by a new build: replace both files with the published ones,
+unmodified, and update the version, commit and date above in the same commit.
