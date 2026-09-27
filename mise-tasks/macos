@@ -258,7 +258,10 @@ else
     archive="shells/macos/.build/Sift.xcarchive"
     export_dir="shells/macos/.build/export"
     rm -rf "$archive" "$export_dir"
-    xcode -allowProvisioningUpdates -archivePath "$archive" archive
+    # The archive is signed for development first, so it needs the same profile — and the
+    # same registration of this Mac — that a Debug build does.
+    xcode -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
+        -archivePath "$archive" archive
     xcodebuild -exportArchive \
         -archivePath "$archive" \
         -exportPath "$export_dir" \
