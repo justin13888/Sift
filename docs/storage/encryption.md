@@ -398,9 +398,12 @@ key, which is a strictly weaker claim about a device that may hold backups.
 ### D-106 — One key per *file*, derived by role from the key its owner holds
 
 **Chosen:** the credential item stays exactly as above — one account key, held directly — and the key a
-file is actually sealed under is **derived from it by role**, one role per file. The key identifier in
-each header is derived from the same owner by a separate context.
-**Rejected:** sealing an account's two files under the account key itself.
+file is actually sealed under is **derived from it by role**, one role per database, **then by part and
+by a per-file salt**, so the database, its write-ahead log, its rollback journal, and every incarnation of
+each are under keys of their own. The key identifier in each header is derived from the same owner by a
+separate context, one per role.
+**Rejected:** sealing an account's two files under the account key itself; sealing a database's log and
+journal under the database's own key.
 
 **Why, and this corrects a defect rather than refining a preference.** D-76 derives its nonce as
 `page number ‖ write counter`, and the counter is part of *the file's own state* — it lives in that
@@ -420,6 +423,28 @@ counter space walks a single file's, so it passes either way.
 Derivation by role closes it: identical `(page, counter)` pairs across the two files are harmless because
 they are under different keys.
 
+**Separation is per file, not per database.** A role names a *database*, and the engine derives up to two
+more files from each one's path — its write-ahead log and its rollback journal — each with a counter of
+its own, starting from its own header. One role key over all three is the same collision one level down:
+the database and its log both seal their first block at their first counter. So no file is sealed under
+its role key directly. Each file's key is derived from the role key **by part** — database, write-ahead
+log, rollback journal — **and by a salt** chosen at random when the file is created and carried in its
+header.
+
+The salt closes the collision in time rather than in space. The engine deletes the write-ahead log on a
+clean close and creates it again on the next open, at the same path under the same role key, and a new
+file's counter starts over; a store discarded and refilled under [D-73](cache-and-blobs.md) does the same.
+Without the salt every incarnation would reissue the nonces of the one before it. The salt is short —
+it occupies what the header had left, so the format and its fixture did not move — and a rollback
+journal is created once per transaction, so a new file's counter also **starts at a random point** in a
+space of 2^62 rather than at zero. Two incarnations reissue a nonce only if they draw the same salt *and*
+counter windows that overlap. This is not the random nonce D-76 rejects: the nonce is still the page
+number and a counter that only rises and is durable; only where a new file's counter begins is random.
+
+The key identifier is **not** separated by part. It names a key *generation* — what D-22 rotates and
+FR-4 destroys — and a generation spans every file of its database, so each file carries its database's
+identifier. The collision is one of keys, and the keys are what differ.
+
 **What it does not change.** FR-4's proof is untouched, which is the property the paragraphs above chose
 this hierarchy for. The account key is still the one credential item, derivation is still one-way, and
 destroying that item still makes both files unreadable *by construction* rather than by a promise to
@@ -434,8 +459,9 @@ material, with nothing between the two uses.
 **The contexts are permanent.** Changing one makes every file under it unreadable, which is a key
 destruction wearing the clothes of a refactor.
 
-**What it costs:** one more derivation per file open, and a closed role set that every new sealed file
-must be added to — an omission being a collision rather than a compile error, which is why the set is an
+**What it costs:** two more derivations per file open, and a file sealed before separation was per file
+does not open under it — acceptable only because no such file was ever shipped. And a closed role set
+that every new sealed file must be added to — an omission being a collision rather than a compile error, which is why the set is an
 enumeration rather than a free-form string.
 
 **Contestable because:** it adds a layer to a hierarchy whose whole argument above was that the simplest

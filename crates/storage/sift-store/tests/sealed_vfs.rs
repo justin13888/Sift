@@ -10,7 +10,8 @@
 //! that wrote everything in the clear.
 
 use rusqlite::Connection;
-use sift_crypto::derive::{Role, file_key, file_key_id};
+use sift_crypto::derive::{Part, Role, file_key, file_key_id, part_key};
+use sift_crypto::page::{Header, PageCipher};
 use sift_store::vfs;
 use std::path::{Path, PathBuf};
 
@@ -195,6 +196,210 @@ fn the_store_and_the_journal_do_not_share_a_key() {
         file_key_id(&owner, Role::Journal),
         "one key over two files is the nonce reuse D-106 exists to prevent"
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// #155: D-106 below the database — the database, its log and its journal, and each
+// incarnation of any of them, are sealed under keys of their own.
+// ---------------------------------------------------------------------------------------
+
+/// Where the sealed meta block starts, and where block zero does.
+const META_AT: usize = sift_crypto::page::HEADER_LEN;
+const DATA_AT: usize = META_AT + 88;
+const META_PAGE: u32 = u32::MAX;
+
+/// Every sealed unit in a file's bytes: `(page number, counter, sealed bytes)`.
+fn sealed_units(bytes: &[u8]) -> Vec<(u32, u64, Vec<u8>)> {
+    let counter = |at: usize| {
+        let mut c = [0u8; 8];
+        c.copy_from_slice(&bytes[at..at + 8]);
+        u64::from_be_bytes(c)
+    };
+    let mut out = Vec::new();
+    if bytes.len() >= DATA_AT {
+        out.push((
+            META_PAGE,
+            counter(META_AT),
+            bytes[META_AT..DATA_AT].to_vec(),
+        ));
+    }
+    let mut at = DATA_AT;
+    let mut block = 0u32;
+    while at + vfs::SEALED_BLOCK <= bytes.len() {
+        out.push((
+            block,
+            counter(at),
+            bytes[at..at + vfs::SEALED_BLOCK].to_vec(),
+        ));
+        at += vfs::SEALED_BLOCK;
+        block += 1;
+    }
+    out
+}
+
+/// The nonce identity of every unit a file holds, under the one owner key a test uses: which
+/// key sealed it is the file's part and its salt, and the nonce is the page and the counter.
+fn nonces(bytes: &[u8], part: Part) -> Vec<(Part, [u8; 6], u32, u64)> {
+    let salt = Header::decode(bytes).expect("a Sift header").salt;
+    sealed_units(bytes)
+        .into_iter()
+        .filter(|(_, counter, _)| *counter != 0)
+        .map(|(page, counter, _)| (part, salt, page, counter))
+        .collect()
+}
+
+/// The cipher a file's own header says it is sealed under, rebuilt from outside the VFS.
+fn cipher_of(owner: &[u8; 32], bytes: &[u8], part: Part) -> PageCipher {
+    let header = Header::decode(bytes).expect("a Sift header");
+    let key = part_key(&file_key(owner, Role::Store), part, &header.salt);
+    PageCipher::new(&key, &header)
+}
+
+fn wal_of(path: &Path) -> PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push("-wal");
+    PathBuf::from(p)
+}
+
+/// The issue's first test. While the connection is open, the database and its write-ahead log
+/// are both on disk, and each seals under its own key — so a unit of one does not open under
+/// the other's, and neither is under the key the database was registered with.
+#[test]
+fn a_database_and_its_write_ahead_log_are_sealed_under_different_keys() {
+    let dir = scratch("wal-key");
+    let path = dir.join("account.store");
+    let owner = owner(40);
+    let conn = open_sealed(&path, &owner);
+    conn.execute_batch("CREATE TABLE t (x TEXT);")
+        .expect("schema");
+    for i in 0..20 {
+        conn.execute("INSERT INTO t VALUES (?1)", [format!("row {i}")])
+            .expect("insert");
+    }
+
+    let db = std::fs::read(&path).expect("the database");
+    let wal = std::fs::read(wal_of(&path)).expect("the log, while the connection is open");
+    let (db_cipher, wal_cipher) = (
+        cipher_of(&owner, &db, Part::Database),
+        cipher_of(&owner, &wal, Part::WriteAheadLog),
+    );
+    let registered = PageCipher::new(
+        &file_key(&owner, Role::Store),
+        &Header::decode(&db).expect("header"),
+    );
+
+    let (db_units, wal_units) = (sealed_units(&db), sealed_units(&wal));
+    assert!(
+        db_units.len() > 1 && wal_units.len() > 1,
+        "nothing to compare"
+    );
+    for (page, _, sealed) in &db_units {
+        db_cipher
+            .open(*page, sealed)
+            .expect("a database unit opens as the database's");
+        assert!(
+            wal_cipher.open(*page, sealed).is_err(),
+            "a database unit opened as the log's"
+        );
+        assert!(
+            registered.open(*page, sealed).is_err(),
+            "sealed under the registered key"
+        );
+    }
+    for (page, _, sealed) in &wal_units {
+        wal_cipher
+            .open(*page, sealed)
+            .expect("a log unit opens as the log's");
+        assert!(
+            db_cipher.open(*page, sealed).is_err(),
+            "a log unit opened as the database's"
+        );
+    }
+
+    // Both files carry the database's key identifier: it names the generation, which D-22
+    // rotates across all of them, and the separation is in the key.
+    assert_eq!(
+        Header::decode(&db).expect("header").key_id,
+        Header::decode(&wal).expect("header").key_id
+    );
+    drop(conn);
+    vfs::withdraw_key(&path);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The issue's second test. A clean close deletes the write-ahead log, and the next open creates
+/// it again at the same path under the same registered key. No nonce the first incarnation
+/// issued — no `(key, page, counter)` — is issued again by a later one, or by the database.
+#[test]
+fn a_write_ahead_log_created_again_at_the_same_path_reissues_no_nonce() {
+    let dir = scratch("wal-again");
+    let path = dir.join("account.store");
+    let owner = owner(41);
+    let mut issued = std::collections::BTreeSet::new();
+    let mut salts = std::collections::BTreeSet::new();
+
+    for round in 0..4 {
+        let conn = open_sealed(&path, &owner);
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS t (x TEXT);")
+            .expect("schema");
+        for i in 0..10 {
+            conn.execute("INSERT INTO t VALUES (?1)", [format!("{round}-{i}")])
+                .expect("insert");
+        }
+        let wal = std::fs::read(wal_of(&path)).expect("the log, while the connection is open");
+        salts.insert(Header::decode(&wal).expect("header").salt);
+        for nonce in nonces(&wal, Part::WriteAheadLog) {
+            assert!(issued.insert(nonce), "round {round} reissued {nonce:?}");
+        }
+        drop(conn);
+        vfs::withdraw_key(&path);
+        assert!(
+            !wal_of(&path).exists(),
+            "the log survived the close, so this is not the recreation under test"
+        );
+    }
+    assert_eq!(salts.len(), 4, "an incarnation of the log reused a salt");
+
+    let db = std::fs::read(&path).expect("the database");
+    for nonce in nonces(&db, Part::Database) {
+        assert!(issued.insert(nonce), "the database reissued {nonce:?}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The same property for the database itself: D-73's discard-and-refill deletes a store and
+/// creates it again at the same path under the same account key.
+#[test]
+fn a_database_created_again_at_the_same_path_is_a_new_key() {
+    let dir = scratch("db-again");
+    let path = dir.join("account.store");
+    let owner = owner(42);
+    let mut incarnations = Vec::new();
+
+    for _ in 0..2 {
+        {
+            let conn = open_sealed(&path, &owner);
+            conn.execute_batch("CREATE TABLE t (x TEXT); INSERT INTO t VALUES ('refilled');")
+                .expect("write");
+        }
+        vfs::withdraw_key(&path);
+        incarnations.push(std::fs::read(&path).expect("the database"));
+        std::fs::remove_file(&path).expect("discard");
+    }
+
+    let (first, second) = (&incarnations[0], &incarnations[1]);
+    assert_ne!(
+        Header::decode(first).expect("header").salt,
+        Header::decode(second).expect("header").salt
+    );
+    let second_cipher = cipher_of(&owner, second, Part::Database);
+    for (page, _, sealed) in sealed_units(first) {
+        assert!(
+            second_cipher.open(page, &sealed).is_err(),
+            "the discarded store's page {page} opened under the refilled store's key"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The write-ahead log's header is 32 bytes. A layer that reported lengths rounded up to its
