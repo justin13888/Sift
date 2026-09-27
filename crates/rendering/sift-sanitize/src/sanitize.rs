@@ -257,7 +257,7 @@ fn walk(
                     g.parent.set(Some(Rc::downgrade(&wrapper)));
                 }
                 *wrapper.children.borrow_mut() = grandchildren;
-                walk(&wrapper, depth + 1, state)?;
+                walk(&wrapper, depth + 1, in_anchor, state)?;
                 wrapper.parent.set(Some(Rc::downgrade(node)));
                 keep.push(wrapper);
             }
