@@ -24,3 +24,7 @@ blake3 = { version = "1", default-features = false, features = ["pure", "std"] }
 # The end-to-end tests write through the real schema. A test that kept its messages in a map
 # would be a mock, and would prove nothing about the store.
 sift-store.workspace = true
+# D-44's move rejoin is tested against one adapter's recorded move, read by that adapter's own
+# parser: a fixture re-parsed here would be testing a copy of the wire format. Test-only — the
+# library itself never learns which provider it is walking.
+sift-graph.workspace = true
