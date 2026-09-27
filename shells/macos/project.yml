@@ -131,5 +131,13 @@ targets:
     platform: macOS
     sources:
       - path: Sources/SiftShell
+      # The application icon (#62). An asset catalog, so `actool` compiles it into the bundle's
+      # `.icns` and asset archive and writes the icon keys — D-61's platform machinery, rather
+      # than an `.icns` copied in by a script. The menu-bar extra does not use it: that stays
+      # a system symbol.
+      - path: Assets.xcassets
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     scheme:
       gatherCoverageData: false

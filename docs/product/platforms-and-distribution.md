@@ -161,6 +161,7 @@ that agreement fully in place. Naming them is the decision, because the names ar
 | Public privacy list | EasyPrivacy | as EasyList | Homebrew Cask, Flatpak |
 | Bundled email list | written by the Sift project, in the tree | Sift's own | every channel |
 | Sender-infrastructure list | curated by the Sift project, in the tree | Sift's own | every channel |
+| Application icon | original artwork made by the Sift project, in the tree; no third-party mark, symbol or template | Sift's own | every channel |
 | Fonts | the set named under [font and colour divergence](#font-and-colour-divergence) | SIL Open Font License 1.1, every face | every channel |
 
 **Rejected:** shipping the public lists in every channel and relying on the share-alike licence's
