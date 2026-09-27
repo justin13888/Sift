@@ -4,6 +4,13 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<!-- The application icon, compiled from Assets.xcassets by the asset catalog compiler (#62).
+	     The name is the catalog's icon set for the asset archive; the file is the `.icns` the
+	     compiler emits beside it for anything that still reads the older key. -->
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
