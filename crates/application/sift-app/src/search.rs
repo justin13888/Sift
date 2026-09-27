@@ -226,6 +226,15 @@ impl App {
                 }
             };
             coverage.attachments &= evaluates_attachments;
+            // A term that reaches bodies and was not sent — an operator this build does not
+            // know, or a phrase this server cannot quote — was matched only against what the
+            // local index holds, so for it the unopened bodies were searched by nobody.
+            if local_only.terms.iter().any(|t| {
+                t.text_scope()
+                    .is_some_and(|s| !s.is_empty() && s.columns.contains(&Column::Body))
+            }) {
+                coverage.bodies = false;
+            }
             if found.len() >= usize::try_from(L32_SERVER_SEARCH_HITS).unwrap_or(usize::MAX) {
                 notes.push(format!(
                     "`{name}`'s server returned its first {L32_SERVER_SEARCH_HITS} matches, and \
@@ -436,14 +445,14 @@ impl App {
         if self.is_paused(name) {
             return held("syncing is paused for it");
         }
-        match self.network {
-            sift_net::tier::Tier::OfflineNoPath => return held("there is no network connection"),
-            sift_net::tier::Tier::OfflinePortal => {
-                return held("the network is asking you to sign in to it");
-            }
-            sift_net::tier::Tier::Paused => return held("syncing is paused"),
-            tier if !tier.permits_server_search() => return held("the network policy forbids it"),
-            _ => {}
+        // The tier's own answer decides; the match only words the refusal.
+        if !self.network.permits_server_search() {
+            return held(match self.network {
+                sift_net::tier::Tier::OfflineNoPath => "there is no network connection",
+                sift_net::tier::Tier::OfflinePortal => "the network is asking you to sign in to it",
+                sift_net::tier::Tier::Paused => "syncing is paused",
+                _ => "the network policy forbids it",
+            });
         }
         if account.needs_authentication {
             return held("it needs you to sign in again");
@@ -1584,6 +1593,104 @@ mod tests {
         );
         // And the body caveat stands, because no server reached the bodies.
         assert!(report.caveats[0].contains("only for messages you have opened"));
+    }
+
+    #[test]
+    fn an_account_that_needs_signing_in_again_is_not_asked_and_says_so() {
+        // A refused credential holds the server half back before any request, and the report
+        // names why rather than returning a silently smaller set.
+        let mut app = synced();
+        app.account("mail").unwrap().needs_authentication = true;
+        let before = held(&mut app);
+
+        let local = app.search("quokka", None, 20).unwrap();
+        assert_eq!(local.delegable_accounts, 0);
+        assert!(
+            local
+                .caveats
+                .iter()
+                .any(|c| c.contains("`mail` was not searched on its server")
+                    && c.contains("sign in again")),
+            "{:?}",
+            local.caveats
+        );
+
+        let report = app.search_with_server("quokka", None, 20).unwrap();
+        assert!(report.hits.is_empty());
+        assert_eq!(held(&mut app), before, "a held-back account was asked");
+        assert!(
+            report.caveats.iter().any(|c| c.contains("sign in again")),
+            "{:?}",
+            report.caveats
+        );
+        assert!(report.caveats[0].contains("only for messages you have opened"));
+    }
+
+    #[test]
+    fn attachment_presence_is_asked_of_the_server_and_its_hits_are_the_servers() {
+        // Sync does not record attachment presence, so locally `has:attachment` matches nothing
+        // and says so. A server that evaluates it answers for the whole mailbox: its hits are
+        // labelled Server, the archived one is inserted, and the caveat is no longer true.
+        let mut app = synced();
+        let local = app.search("has:attachment", None, 20).unwrap();
+        assert!(local.hits.is_empty());
+        assert_eq!(local.delegable_accounts, 1);
+        assert!(
+            local.caveats.iter().any(|c| c.contains("`has:attachment`")),
+            "{:?}",
+            local.caveats
+        );
+
+        let report = app.search_with_server("has:attachment", None, 20).unwrap();
+        let mut found: Vec<(String, Source)> = report
+            .hits
+            .iter()
+            .map(|h| (remote_of(&mut app, h.row.id), h.source))
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            found,
+            vec![
+                ("m1".to_owned(), Source::Server),
+                ("m5".to_owned(), Source::Server)
+            ]
+        );
+        assert!(
+            report
+                .caveats
+                .iter()
+                .all(|c| !c.contains("`has:attachment`")),
+            "{:?}",
+            report.caveats
+        );
+    }
+
+    #[test]
+    fn a_body_term_that_was_not_sent_keeps_the_body_caveat() {
+        // An operator this build does not know is applied locally, never sent. The server
+        // searched bodies for `quokka`, but nobody searched unopened bodies for the other term,
+        // so the report may not claim they were.
+        let mut app = synced();
+        let report = app
+            .search_with_server("quokka ticket:12345", None, 20)
+            .unwrap();
+        assert!(
+            report
+                .caveats
+                .iter()
+                .any(|c| c.contains("only for messages you have opened")),
+            "{:?}",
+            report.caveats
+        );
+        // Whereas every body-scoped term sent keeps it dropped.
+        let sent = app.search_with_server("quokka", None, 20).unwrap();
+        assert!(
+            sent.caveats
+                .iter()
+                .all(|c| !c.contains("only for messages you have opened")),
+            "{:?}",
+            sent.caveats
+        );
     }
 
     #[test]

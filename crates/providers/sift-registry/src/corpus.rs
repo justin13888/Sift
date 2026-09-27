@@ -81,6 +81,13 @@ pub fn gmail() -> Replay {
         &wire::search_target("\"quokka\"", 50),
         br#"{"messages":[{"id":"m5","threadId":"t5"},{"id":"m2","threadId":"t1"}],"resultSizeEstimate":2}"#,
     );
+    // And for attachment presence, which sync does not record: m1 (held, never opened) and the
+    // archived m5 both carry one.
+    r.on(
+        "GET",
+        &wire::search_target("has:attachment", 50),
+        br#"{"messages":[{"id":"m1","threadId":"t1"},{"id":"m5","threadId":"t5"}],"resultSizeEstimate":2}"#,
+    );
     for (id, thread, subject, received, read) in envelopes {
         r.on(
             "GET",
