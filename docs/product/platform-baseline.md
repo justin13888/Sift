@@ -100,10 +100,10 @@ submission to any channel**, and MUST NOT thereafter be changed.
 | Identifier | Value | Constraint |
 |---|---|---|
 | Bundle identifier | `net.justinchung.sift` | Reverse-DNS under a domain the copyright holder controls. One value for both macOS channels, per D-45. Permanently bound to the App Store record and never reusable |
-| Team identifier | **outstanding** — fixed by the developer account | Prefixes the Keychain access group; fixed by the developer account |
+| Team identifier | `854G577S2Y` | Issued by the developer account rather than chosen. Prefixes the Keychain access group, and every macOS build is signed under it |
 | OAuth redirect URI scheme | `net.justinchung.sift` | Registered in the bundle's URL types. Derived from the OAuth client where a provider requires it, so it is bound to the bundle identifier and to R-1's verified client — see [credentials](../security/credentials.md) |
 | Flatpak application id | `net.justinchung.Sift` | Must correspond to a namespace the publisher controls. It is also the D-Bus well-known name, the desktop-file name, the portal identity for autostart and permission grants, and the data root. Renaming creates a new application with no upgrade path |
-| Keychain service and access-group names | service `net.justinchung.sift`; access group `<team>.net.justinchung.sift` | Published in the Cask zap stanza, so a change breaks zap cleanup for existing users |
+| Keychain service and access-group names | service `net.justinchung.sift`; access group `854G577S2Y.net.justinchung.sift` | Published in the Cask zap stanza, so a change breaks zap cleanup for existing users |
 | App Store build number space | begins at 1 | Monotonically increasing for the life of the app record; a number is never reused or decreased |
 
 Two of the six are **not** free choices once the first is made. The Keychain access group is the team
@@ -121,7 +121,7 @@ schemes — Sift's own, and the one derived from whichever client it was configu
 one is empty on a build with no client, which is a build that runs against the recorded corpus and cannot
 sign in to anything. A client identifier is configuration rather than a secret: it appears in every
 authorization URL the flow generates, which is why PKCE exists. The team identifier is the one value here that is
-issued rather than chosen, and it is outstanding until the developer account exists.
+issued rather than chosen: the developer account fixed it, and the register records what it issued.
 
 **The bundle identifier arrived by accident and was inspected rather than kept.** It was declared by a
 Tauri scaffold that [D-1](../architecture/ui-shell.md) rejects and that opened a local development server
@@ -210,6 +210,15 @@ The sandbox entitlement set is: the app sandbox itself, outgoing network connect
 read-write file access for FR-10's save, Keychain access groups for NFR-23, and the address-book
 entitlement with its usage description — without which [FR-40](../architecture/presentation-layer.md) is
 silently absent rather than degraded.
+
+**Development builds carry the same set.** A development build that ran unsandboxed, or outside the access
+group, would exercise a different container and a different keychain from the product that ships, and would
+hide exactly the failures D-45 exists to surface. The access group is an entitlement the platform honours
+only when a provisioning profile under the team authorises it, so a development build is signed under the
+team too; what differs between a development and a release build is the signing identity, not the
+entitlements. Neither carries any relaxation of the hardened runtime, and only a development build permits
+a debugger to attach. A machine with no identity at all can still build the bundle as a check, but the
+platform will not launch it.
 
 **NFR-49 MUST be verified on both macOS channels rather than once.** The mechanism by which a saved
 attachment acquires the platform's untrusted-source marking is not the same for a sandboxed build and an

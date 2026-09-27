@@ -95,7 +95,16 @@ pub const FLATPAK_APPLICATION_ID: &str = "net.justinchung.Sift";
 /// users. Individual items are not permanent; **the naming scheme is**.
 pub const KEYCHAIN_SERVICE: &str = "net.justinchung.sift";
 
-/// The Keychain access group, once the team identifier is known.
+/// The Apple developer Team identifier the macOS bundle is signed under — D-45.
+///
+/// **Issued, not chosen**: the developer account fixed it, and it is the one value in the
+/// register nobody here decided. It prefixes the Keychain access group, so it is as permanent
+/// as that group — which the Cask zap stanza publishes. `shells/macos/project.yml` and
+/// `shells/macos/Sift.entitlements` carry the same string.
+pub const TEAM_IDENTIFIER: &str = "854G577S2Y";
+
+/// The Keychain access group for a team identifier — [`TEAM_IDENTIFIER`]'s is the one Sift
+/// uses.
 ///
 /// The team identifier prefixes it, which is why D-45 requires **both** macOS channels be
 /// sandboxed under one team: Keychain item access binds to the creating code's designated
@@ -121,6 +130,11 @@ mod tests {
             ("internal scheme", INTERNAL_SCHEME),
             ("Flatpak application id", FLATPAK_APPLICATION_ID),
             ("Keychain service", KEYCHAIN_SERVICE),
+            ("Team identifier", TEAM_IDENTIFIER),
+            (
+                "Keychain access group",
+                &keychain_access_group(TEAM_IDENTIFIER),
+            ),
         ] {
             assert!(
                 DOC.contains(value),
@@ -182,6 +196,33 @@ mod tests {
         assert_eq!(
             keychain_access_group("ABCDE12345"),
             "ABCDE12345.net.justinchung.sift"
+        );
+    }
+
+    /// D-45: the bundle's signing team and the access group it claims are the same strings
+    /// the core writes to. If `project.yml` or `Sift.entitlements` drifted from this module,
+    /// the bundle would sign under one team and the store would address another group — a
+    /// failure that shows only in a user's Keychain, as every write refused.
+    #[test]
+    fn the_macos_bundle_signs_under_the_team_and_claims_its_access_group() {
+        const PROJECT: &str = include_str!("../../../../shells/macos/project.yml");
+        const ENTITLEMENTS: &str = include_str!("../../../../shells/macos/Sift.entitlements");
+        assert!(
+            PROJECT.contains(&format!("DEVELOPMENT_TEAM: {TEAM_IDENTIFIER}")),
+            "shells/macos/project.yml does not sign under {TEAM_IDENTIFIER}"
+        );
+        let group = keychain_access_group(TEAM_IDENTIFIER);
+        assert!(
+            ENTITLEMENTS.contains(&format!("<string>{group}</string>")),
+            "shells/macos/Sift.entitlements does not claim {group}"
+        );
+        // Ten upper-case alphanumerics is the shape the developer account issues; a typo
+        // here would be a group no signing identity can claim.
+        assert_eq!(TEAM_IDENTIFIER.len(), 10);
+        assert!(
+            TEAM_IDENTIFIER
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
         );
     }
 }

@@ -14,15 +14,15 @@ That task is four commands in two toolchains, and the shape of it *is* D-61:
 cargo build --release -p sift-abi        # produces libsift_abi.a
 cargo xtask header                       # asserts the committed header matches the ABI
 xcodegen generate --spec shells/macos/project.yml --project shells/macos
-xcodebuild -project shells/macos/Sift.xcodeproj -scheme Sift -configuration Release \
-           -derivedDataPath shells/macos/.build/xcode build
+xcodebuild ... -allowProvisioningUpdates archive   # then -exportArchive for Developer ID
 ```
 
 The header step is not ceremony. The project links `-lsift_abi` against a committed header, so
 without it a drifted ABI links successfully against a stale declaration.
 
-`Sift.app` lands in `shells/macos/.build/xcode/Build/Products/<Configuration>/`, so
-`mise run clean-swift` still reclaims the whole build tree.
+A Release `Sift.app` lands in `shells/macos/.build/export/`, a Debug one in
+`shells/macos/.build/xcode/Build/Products/Debug/`, so `mise run clean-swift` still reclaims the
+whole build tree.
 
 ## Why the project is generated
 
@@ -37,16 +37,39 @@ lines of UUID-keyed plist.
 `Info.plist` is committed beside it, because it is the file every one of those obligations
 eventually lands in.
 
-## A development build is signed ad-hoc, and has no team
+## Every build is signed under the team, sandboxed and hardened
 
-`docs/product/platform-baseline.md` records the team identifier as **outstanding** — it is
-issued rather than chosen. So the project declares no `DEVELOPMENT_TEAM` and signs ad-hoc,
-which needs no identity and therefore works on a fresh checkout and on CI.
+D-45. The bundle is signed under team `854G577S2Y` with the entitlements in `Sift.entitlements`
+— the sandbox, outgoing network, user-selected file access, the Keychain access group
+`854G577S2Y.net.justinchung.sift`, and the address book — and the hardened runtime, in **both**
+configurations. What differs is the identity:
 
-That is also why it declares **no entitlements** yet: the sandbox, the network, the
-user-selected file access, the Keychain access group and the address book all need a real team
-prefix, and the hardened runtime and notarization belong to the Cask path rather than to a
-development build. The set below is what the shipped bundle must carry, not what this one does.
+| | Debug | Release |
+|---|---|---|
+| Identity | Apple Development | Developer ID Application, timestamped |
+| How | `build` | `archive`, then `-exportArchive` with `ExportOptions.plist` |
+| `get-task-allow` | yes, so a debugger attaches | never |
+
+The access group is a restricted entitlement: a process claiming it without a provisioning
+profile that authorises it is killed at launch. So the build needs the developer account signed
+in to Xcode (Settings → Accounts), and passes `-allowProvisioningUpdates` so Xcode fetches the
+profile — and, on a Mac's first Debug build, registers that Mac with the team.
+
+`mise run macos` then reads the bundle back: `codesign --verify --strict`, the entitlements
+**exactly** as declared (plus the application and team identifiers the profile stamps, and
+`get-task-allow` on Debug), the hardened-runtime flag, the signing identity, and on Release the
+timestamp. A bundle that lost an entitlement fails the task rather than a user's Keychain.
+
+**A machine with no identity** — CI first — builds with `--ad-hoc` (implied when `CI=true`):
+the same entitlements and runtime, with only the identity overridden. That checks the bundle
+builds and carries the right set; the platform will not launch it, so `--ad-hoc` refuses
+`--run`.
+
+**Accounts added by an earlier, ad-hoc build must be added again.** Their credentials sit in
+the login keychain under the old ad-hoc signature, which the team-signed bundle neither reads
+nor migrates; it keeps its own in the data-protection keychain, in the access group above. The
+same goes for `~/Library/Application Support/net.justinchung.sift`: a sandboxed build keeps its
+data inside `~/Library/Containers/net.justinchung.sift` instead, and starts empty.
 
 D-46's universal artefact is likewise not built here: `cargo` produces one architecture, so the
 project builds the one it has.

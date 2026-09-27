@@ -35,6 +35,12 @@
 	<key>LSUIElement</key>
 	<true/>
 
+	<!-- FR-40: the address-book entitlement in Sift.entitlements is inert without this — the
+	     platform refuses the request rather than asking, and the feature is silently absent
+	     rather than degraded. Read-only, and it never leaves the machine. -->
+	<key>NSContactsUsageDescription</key>
+	<string>Sift shows the names you already have for the people who write to you. Your contacts are only read, and never leave this Mac.</string>
+
 	<!-- D-36 — the authorization callback arrives through the registered URI scheme, delivered
 	     by the platform's own launch machinery. Not a socket: NFR-24 admits none, for any
 	     purpose. The scheme is derived from the bundle identifier because that is what the

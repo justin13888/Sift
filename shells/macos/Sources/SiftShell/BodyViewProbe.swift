@@ -50,14 +50,30 @@ import WebKit
 /// write storage from inside a body is script and the network, both covered above.
 enum BodyViewProbe {
     /// Run the corpus at `arguments[0]`. The return value is the process's exit status.
+    ///
+    /// `-` reads the corpus from standard input. That is how `mise run body-view-probe` hands
+    /// it over: the bundle is sandboxed (D-45), so a path into the checkout is outside what it
+    /// may open — and relative paths resolve inside its container — while a descriptor the
+    /// parent opened is readable as it is.
     static func run(arguments: [String]) -> Int32 {
         guard let path = arguments.first else {
-            FileHandle.standardError.write("usage: Sift --probe-body-view <corpus>\n".data(using: .utf8)!)
+            FileHandle.standardError.write("usage: Sift --probe-body-view <corpus | ->\n".data(using: .utf8)!)
             return 2
         }
         let samples: [Sample]
         do {
-            samples = try Sample.parse(String(contentsOfFile: path, encoding: .utf8))
+            let text: String
+            if path == "-" {
+                let data = FileHandle.standardInput.readDataToEndOfFile()
+                guard let decoded = String(data: data, encoding: .utf8) else {
+                    print("probe: the corpus on standard input is not UTF-8")
+                    return 2
+                }
+                text = decoded
+            } else {
+                text = try String(contentsOfFile: path, encoding: .utf8)
+            }
+            samples = try Sample.parse(text)
         } catch {
             print("probe: cannot read the corpus at \(path): \(error)")
             return 2

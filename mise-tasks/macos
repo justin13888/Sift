@@ -3,6 +3,7 @@
 #USAGE flag "--debug" help="Build the debug configuration instead of release"
 #USAGE flag "--release" help="Build the release configuration (the default)"
 #USAGE flag "--run" help="Launch the bundle after building"
+#USAGE flag "--ad-hoc" help="Sign ad-hoc instead of under the team (for a machine with no identity; CI implies it)"
 #
 # D-61: **the platform's own application toolchain owns the bundle**, and the Rust core is
 # built into a static library it links. The Rust workspace never produces the `.app`, so this
@@ -40,14 +41,34 @@ command -v xcodegen >/dev/null 2>&1 || {
 
 configuration="Release"
 launch=false
+ad_hoc=false
 for arg in "$@"; do
     case "$arg" in
         --debug) configuration="Debug" ;;
         --release) configuration="Release" ;;
         --run) launch=true ;;
-        *) echo "macos: unknown argument '$arg' (expected --debug, --release or --run)" >&2; exit 1 ;;
+        --ad-hoc) ad_hoc=true ;;
+        *) echo "macos: unknown argument '$arg' (expected --debug, --release, --run or --ad-hoc)" >&2; exit 1 ;;
     esac
 done
+
+# **D-45's signing posture, and the one machine it cannot apply to.** `project.yml` signs every
+# configuration under the team (see the comment there). A CI runner holds no identity and no
+# developer account, so it cannot — and a smoke build there has nothing to gain from one. It
+# builds ad-hoc: same project, same entitlements, same hardened runtime, with only the identity
+# overridden. The readback below still checks the entitlement set, so a bundle that lost one
+# fails in CI too; what it cannot check there is the team and the profile.
+#
+# Stated rather than silent: an ad-hoc bundle claims a restricted entitlement no profile
+# authorises, so the platform refuses to launch it. It is a build check, not a product.
+if [[ "${CI:-}" == "true" ]]; then
+    ad_hoc=true
+fi
+if [[ "$ad_hoc" == true && "$launch" == true ]]; then
+    echo "macos: --ad-hoc and --run do not combine. An ad-hoc bundle claims the Keychain access" >&2
+    echo "       group with no profile authorising it, and the platform refuses to launch it." >&2
+    exit 1
+fi
 
 if [[ "$configuration" == "Release" ]]; then
     cargo build --release -p sift-abi
@@ -189,16 +210,71 @@ xcodegen generate --spec shells/macos/project.yml --project shells/macos --quiet
 # while wiring nothing, and it would make the check below compare this shell against itself.
 # Unsetting them for the build leaves the xcconfig as the only route, so the check afterwards is
 # a statement about the project rather than about this environment.
-env -u SIFT_OAUTH_CLIENT_ID -u SIFT_OAUTH_CLIENT_ID_GMAIL -u SIFT_OAUTH_CLIENT_ID_GRAPH \
-    -u SIFT_OAUTH_SCHEME \
-xcodebuild \
-    -project shells/macos/Sift.xcodeproj \
-    -scheme Sift \
-    -configuration "$configuration" \
-    -derivedDataPath shells/macos/.build/xcode \
-    build
+xcode() {
+    env -u SIFT_OAUTH_CLIENT_ID -u SIFT_OAUTH_CLIENT_ID_GMAIL -u SIFT_OAUTH_CLIENT_ID_GRAPH \
+        -u SIFT_OAUTH_SCHEME \
+    xcodebuild \
+        -project shells/macos/Sift.xcodeproj \
+        -scheme Sift \
+        -configuration "$configuration" \
+        -derivedDataPath shells/macos/.build/xcode \
+        "$@"
+}
 
-app="shells/macos/.build/xcode/Build/Products/$configuration/Sift.app"
+# The team the register records, and the access group it prefixes. `project.yml` and
+# `Sift.entitlements` carry the same strings; this is how the readback addresses them.
+team="854G577S2Y"
+
+# Three ways to sign, one per situation — D-45, and `project.yml`'s comment on the split.
+#
+# **Provisioning updates are allowed**, because the Keychain access group is a restricted
+# entitlement: without a profile authorising it the platform kills the process at launch. The
+# developer account signed in to Xcode supplies it — the development profile for Debug, the
+# Developer ID profile at export for Release. Registering this Mac is part of the first: a
+# development profile names the machines it may run on.
+if [[ "$ad_hoc" == true ]]; then
+    echo "macos: signing ad-hoc — a build check with no team and no profile, which the"
+    echo "       platform will not launch. Drop --ad-hoc (or CI) to sign under $team."
+    # The identity and nothing else. The entitlements and the hardened runtime are the ones a
+    # signed build has, so what this checks is the product rather than a relaxed copy of it.
+    #
+    # **Xcode will not sign this one**, and says why: the access group needs a profile, and it
+    # refuses to sign a restricted entitlement without one, ad-hoc or not. So Xcode builds it
+    # unsigned and `codesign` applies the committed entitlements file and the runtime flag —
+    # the same two inputs `project.yml` gives Xcode, which is what makes the readback below
+    # meaningful here too.
+    #
+    # **The Release export is cleared too**, though this path never writes it. The probes run
+    # `.build/export/Sift.app`, and an ad-hoc build that left an earlier team-signed export in
+    # place would have them exercise that stale bundle as though it were this one. With it gone
+    # they find nothing, and refuse by name.
+    rm -rf shells/macos/.build/Sift.xcarchive shells/macos/.build/export
+    xcode CODE_SIGNING_ALLOWED=NO build
+    app="shells/macos/.build/xcode/Build/Products/$configuration/Sift.app"
+    codesign --force --sign - --options runtime \
+        --entitlements shells/macos/Sift.entitlements "$app"
+elif [[ "$configuration" == "Debug" ]]; then
+    xcode -allowProvisioningUpdates -allowProvisioningDeviceRegistration build
+    app="shells/macos/.build/xcode/Build/Products/$configuration/Sift.app"
+else
+    # An archive, then an export for Developer ID: the export is what re-signs with the
+    # Developer ID Application identity, embeds the Developer ID profile, and timestamps.
+    # Both are removed first, so a failed step cannot leave the previous run's bundle where the
+    # readback would find it.
+    archive="shells/macos/.build/Sift.xcarchive"
+    export_dir="shells/macos/.build/export"
+    rm -rf "$archive" "$export_dir"
+    # The archive is signed for development first, so it needs the same profile — and the
+    # same registration of this Mac — that a Debug build does.
+    xcode -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
+        -archivePath "$archive" archive
+    xcodebuild -exportArchive \
+        -archivePath "$archive" \
+        -exportPath "$export_dir" \
+        -exportOptionsPlist shells/macos/ExportOptions.plist \
+        -allowProvisioningUpdates
+    app="$export_dir/Sift.app"
+fi
 # The identifier register in `docs/product/platform-baseline.md`, consumed once for the life
 # of the project. `project.yml` sets the same string; this is how the task addresses it.
 bundle_id="net.justinchung.sift"
@@ -255,6 +331,81 @@ for required in "$SIFT_OAUTH_SCHEME" net.justinchung.sift; do
     fi
 done
 echo "       registers  $(sort -u <<<"$built_schemes" | tr '\n' ' ')"
+
+# **The signature is read back too**, for the reason the URL types are: a bundle that lost an
+# entitlement should fail here rather than in a user's Keychain. D-45.
+codesign --verify --strict --deep "$app" || {
+    echo "macos: the bundle's signature does not verify strictly." >&2
+    exit 1
+}
+
+# The entitlements it carries are **exactly** the declared set, plus what the signing step
+# adds by construction and nothing else:
+#
+#   - the application identifier and team identifier, which a provisioning profile stamps on
+#     every bundle it authorises — absent on an ad-hoc build, which has no profile;
+#   - `get-task-allow` on Debug only, so a debugger can attach to a development build. A
+#     Release bundle carrying it is a bundle any process of the user's may attach to.
+#
+# Compared as canonical property lists, so ordering and comments in `Sift.entitlements` do not
+# matter and a key's value does.
+expected="shells/macos/.build/entitlements.expected.plist"
+actual="shells/macos/.build/entitlements.actual.plist"
+cp shells/macos/Sift.entitlements "$expected"
+if [[ "$ad_hoc" != true ]]; then
+    plutil -insert 'com\.apple\.application-identifier' -string "$team.$bundle_id" "$expected"
+    plutil -insert 'com\.apple\.developer\.team-identifier' -string "$team" "$expected"
+    if [[ "$configuration" == "Debug" ]]; then
+        plutil -insert 'com\.apple\.security\.get-task-allow' -bool YES "$expected"
+    fi
+fi
+codesign -d --entitlements - --xml "$app" >"$actual" 2>/dev/null
+if ! diff -u <(plutil -convert xml1 -o - "$expected") <(plutil -convert xml1 -o - "$actual") >&2; then
+    echo "macos: the bundle's entitlements are not the declared set (- declared, + in bundle)." >&2
+    echo "       shells/macos/Sift.entitlements is the source of truth; D-45 and" >&2
+    echo "       docs/product/platform-baseline.md say what it must hold." >&2
+    exit 1
+fi
+
+# The hardened runtime, on every build. Notarization refuses a binary without it, and the
+# threat model's in-address-space exclusion rests on it.
+signature="$(codesign -d --verbose=4 "$app" 2>&1)"
+if ! grep -qE '^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*runtime' <<<"$signature"; then
+    echo "macos: the bundle is not signed with the hardened runtime." >&2
+    exit 1
+fi
+
+# Under the team, by the identity the configuration calls for, and — for Release — with a
+# secure timestamp, without which a Developer ID signature stops validating when the
+# certificate expires.
+if [[ "$ad_hoc" != true ]]; then
+    case "$configuration" in
+        Release) authority="Developer ID Application: .* ($team)" ;;
+        Debug) authority="Apple Development: " ;;
+    esac
+    if ! grep -q "^TeamIdentifier=$team\$" <<<"$signature" \
+        || ! grep -q "^Authority=$authority" <<<"$signature"; then
+        echo "macos: the bundle is not signed by the identity $configuration requires." >&2
+        echo "       expected: $authority, team $team" >&2
+        grep -E '^(Authority|TeamIdentifier)=' <<<"$signature" | sed 's/^/       got:      /' >&2
+        exit 1
+    fi
+    if [[ "$configuration" == "Release" ]] && ! grep -q '^Timestamp=' <<<"$signature"; then
+        echo "macos: the Release bundle carries no secure timestamp." >&2
+        exit 1
+    fi
+    [[ -f "$app/Contents/embedded.provisionprofile" ]] || {
+        echo "macos: the bundle embeds no provisioning profile, so the platform will refuse" >&2
+        echo "       the Keychain access group it claims — and the process with it." >&2
+        exit 1
+    }
+fi
+if [[ "$ad_hoc" == true ]]; then
+    echo "       signed     ad-hoc (not launchable)"
+else
+    echo "       signed     $(grep -m1 '^Authority=' <<<"$signature" | sed 's/^Authority=//')"
+fi
+echo "       sandboxed, hardened runtime, entitlements as declared"
 
 if [[ "$launch" == true ]]; then
     # LaunchServices reports canonical paths; `$PWD` is whatever MISE_PROJECT_ROOT said. A

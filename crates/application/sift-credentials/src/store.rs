@@ -26,7 +26,7 @@
 // `-D warnings` rejects the crate — which is what failed `linux` and the floor build while
 // passing on the machine the change was written on.
 #[cfg(target_os = "macos")]
-use sift_foundation::identifiers::KEYCHAIN_SERVICE;
+use sift_foundation::identifiers::{KEYCHAIN_SERVICE, TEAM_IDENTIFIER, keychain_access_group};
 use sift_foundation::identity::AccountId;
 
 /// The credential items one account can have. **Closed**, so erasure is an enumeration.
@@ -165,15 +165,55 @@ pub use unimplemented::Platform;
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{CredentialStore, Item, KEYCHAIN_SERVICE, StoreError, key_for};
+    use super::{
+        CredentialStore, Item, KEYCHAIN_SERVICE, StoreError, TEAM_IDENTIFIER, key_for,
+        keychain_access_group,
+    };
+    use security_framework::access_control::{ProtectionMode, SecAccessControl};
+    use security_framework::base::Error;
+    use security_framework::passwords::{self, PasswordOptions};
     use sift_foundation::identity::AccountId;
+
+    /// `errSecItemNotFound`.
+    const ITEM_NOT_FOUND: i32 = -25_300;
+    /// `errSecMissingEntitlement`: this process carries no keychain access group, so the
+    /// data-protection keychain will not serve it at all.
+    const MISSING_ENTITLEMENT: i32 = -34_018;
 
     /// The platform keychain.
     ///
-    /// The access group the items land in is decided by the bundle's entitlements rather
-    /// than by this code — D-45 requires both macOS channels be sandboxed under one team,
-    /// because Keychain access binds to the creating code's designated requirement and the
-    /// ACLs only match if both builds present the same one.
+    /// # The bundle: the data-protection keychain, in the team's access group
+    ///
+    /// D-45 signs the bundle under the team and sandboxes it, with
+    /// `854G577S2Y.net.justinchung.sift` as its one Keychain access group. Every item is
+    /// written there, and read and deleted there, with the attributes
+    /// `docs/product/platform-baseline.md` ("Credential storage attributes") requires:
+    ///
+    /// - **not synchronizable** — a synchronizing item would redefine "installation" as *per
+    ///   account holder*, placing D-43's convergent secret on every machine the user owns;
+    /// - **available after first unlock, and not device-only** — what a resident login item
+    ///   needs, and what survives a migration to new hardware without D-43 discarding the
+    ///   blob store wholesale.
+    ///
+    /// The group is named explicitly rather than left to the entitlement's default, so an
+    /// item cannot land in some other group a later entitlement change puts first.
+    ///
+    /// # Everything else: the login keychain, as before
+    ///
+    /// A process with no access-group entitlement — the development tools, the corpus
+    /// generator, a test binary — is refused by the data-protection keychain outright
+    /// (`errSecMissingEntitlement`). It falls back to the file-based login keychain, which is
+    /// still the operating system's credential store, so NFR-23 holds either way; what it
+    /// loses is the team-scoped access group, which only a signed bundle can hold. The two
+    /// stores never exchange items, so a signed bundle never reads what a tool wrote.
+    ///
+    /// **A bundle cannot take that fallback by accident**: `mise run macos` reads every
+    /// signed bundle's entitlements back and fails a build that lost the access group.
+    ///
+    /// Items an ad-hoc build wrote to the login keychain are **not migrated**. Their access
+    /// control names the ad-hoc code's designated requirement, which the signed bundle does
+    /// not satisfy, so they could not be read without a prompt anyway; a development account
+    /// is re-added instead.
     #[derive(Debug, Clone, Copy)]
     pub struct Platform;
 
@@ -183,35 +223,87 @@ mod macos {
         }
     }
 
+    /// The data-protection query for one item: the service, the item key, the team's access
+    /// group, and the not-synchronizable store. Write, read and delete all start from it, so
+    /// the three cannot address different items.
+    fn protected(key: &str) -> PasswordOptions {
+        let mut options = PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, key);
+        options.use_protected_keychain();
+        options.set_access_group(&keychain_access_group(TEAM_IDENTIFIER));
+        options.set_access_synchronized(Some(false));
+        options
+    }
+
+    fn unavailable(e: &Error) -> StoreError {
+        StoreError::Unavailable(e.to_string())
+    }
+
+    /// What a failed read means. **Absent is not the same as unreadable.** Before first
+    /// unlock the store refuses with a different code, and reporting that as "not there"
+    /// would invite a caller to mint a replacement for a secret that still exists — D-43's
+    /// installation secret first among them.
+    pub(super) fn read_error(e: &Error) -> StoreError {
+        if e.code() == ITEM_NOT_FOUND {
+            StoreError::NotFound
+        } else {
+            unavailable(e)
+        }
+    }
+
+    /// What a failed delete means. Deleting what is not there satisfies the caller's
+    /// intent; anything else is the store refusing, and FR-4's erasure is a claim that the
+    /// item is gone — which a refusal does not establish.
+    pub(super) fn delete_outcome(e: &Error) -> Result<(), StoreError> {
+        if e.code() == ITEM_NOT_FOUND {
+            Ok(())
+        } else {
+            Err(unavailable(e))
+        }
+    }
+
     impl CredentialStore for Platform {
         fn write(&self, account: AccountId, item: Item, secret: &str) -> Result<(), StoreError> {
-            security_framework::passwords::set_generic_password(
-                KEYCHAIN_SERVICE,
-                &key_for(account, item),
-                secret.as_bytes(),
+            let key = key_for(account, item);
+            let mut options = protected(&key);
+            // After first unlock, and *not* this-device-only. No flags: nothing about reading
+            // a token should ask the user for presence.
+            let access = SecAccessControl::create_with_protection(
+                Some(ProtectionMode::AccessibleAfterFirstUnlock),
+                0,
             )
-            .map_err(|e| StoreError::Unavailable(e.to_string()))
+            .map_err(|e| unavailable(&e))?;
+            options.set_access_control(access);
+            match passwords::set_generic_password_options(secret.as_bytes(), options) {
+                Err(e) if e.code() == MISSING_ENTITLEMENT => {
+                    passwords::set_generic_password(KEYCHAIN_SERVICE, &key, secret.as_bytes())
+                        .map_err(|e| unavailable(&e))
+                }
+                other => other.map_err(|e| unavailable(&e)),
+            }
         }
 
         fn read(&self, account: AccountId, item: Item) -> Result<String, StoreError> {
-            let bytes = security_framework::passwords::get_generic_password(
-                KEYCHAIN_SERVICE,
-                &key_for(account, item),
-            )
-            .map_err(|_| StoreError::NotFound)?;
+            let key = key_for(account, item);
+            let bytes = match passwords::generic_password(protected(&key)) {
+                Err(e) if e.code() == MISSING_ENTITLEMENT => {
+                    passwords::get_generic_password(KEYCHAIN_SERVICE, &key)
+                }
+                other => other,
+            }
+            .map_err(|e| read_error(&e))?;
             String::from_utf8(bytes)
                 .map_err(|_| StoreError::Unavailable("the stored item was not text".into()))
         }
 
         fn delete(&self, account: AccountId, item: Item) -> Result<(), StoreError> {
-            match security_framework::passwords::delete_generic_password(
-                KEYCHAIN_SERVICE,
-                &key_for(account, item),
-            ) {
-                Ok(()) => Ok(()),
-                // Deleting what is not there satisfies the caller's intent.
-                Err(_) => Ok(()),
-            }
+            let key = key_for(account, item);
+            let result = match passwords::delete_generic_password_options(protected(&key)) {
+                Err(e) if e.code() == MISSING_ENTITLEMENT => {
+                    passwords::delete_generic_password(KEYCHAIN_SERVICE, &key)
+                }
+                other => other,
+            };
+            result.or_else(|e| delete_outcome(&e))
         }
     }
 }
@@ -337,6 +429,48 @@ mod tests {
             store.read(account, Item::Refresh),
             Err(StoreError::NotFound)
         );
+    }
+
+    /// `errSecInteractionNotAllowed` — what the keychain answers before first unlock.
+    #[cfg(target_os = "macos")]
+    const INTERACTION_NOT_ALLOWED: i32 = -25_308;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_read_the_store_refuses_is_unavailable_and_only_an_absent_item_is_not_found() {
+        use security_framework::base::Error;
+        // D-43: a locked store reported as "not there" would have a caller mint a
+        // replacement for a secret that still exists.
+        assert_eq!(
+            macos::read_error(&Error::from_code(-25_300)),
+            StoreError::NotFound
+        );
+        for code in [INTERACTION_NOT_ALLOWED, -34_018, -25_293] {
+            assert!(
+                matches!(
+                    macos::read_error(&Error::from_code(code)),
+                    StoreError::Unavailable(_)
+                ),
+                "code {code} read as absent"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_delete_the_store_refuses_is_an_error_and_only_an_absent_item_is_success() {
+        use security_framework::base::Error;
+        // FR-4: erasure claims the item is gone, which a refusal does not establish.
+        assert_eq!(macos::delete_outcome(&Error::from_code(-25_300)), Ok(()));
+        for code in [INTERACTION_NOT_ALLOWED, -34_018, -25_293] {
+            assert!(
+                matches!(
+                    macos::delete_outcome(&Error::from_code(code)),
+                    Err(StoreError::Unavailable(_))
+                ),
+                "code {code} deleted as success"
+            );
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
