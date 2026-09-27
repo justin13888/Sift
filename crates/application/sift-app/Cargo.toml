@@ -23,6 +23,9 @@ sift-store.workspace = true
 # FR-20's operator grammar. The parser is the index's; executing it is the application's.
 sift-index.workspace = true
 sift-sync.workspace = true
+# D-58's policy tiers. FR-21 puts server-side search under them, so the layer that decides
+# whether to send one has to know which tier it is in.
+sift-net.workspace = true
 # D-25's single timing wheel. The crate existed, was tested, and was reached by nothing: no
 # edge to it from here meant every periodic obligation in the specification — the aligned
 # poll, the queue flush, the backoff retry — had no caller, and mail arrived only when a

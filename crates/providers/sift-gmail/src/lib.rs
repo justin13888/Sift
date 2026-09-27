@@ -42,8 +42,8 @@ pub use adapter::{Gmail, GmailError};
 
 use sift_provider::capability::{
     ArchiveSemantics, Capabilities, DeltaMechanism, IdStability, JunkReporting,
-    LocationCardinality, Magnitude, MagnitudeSource, PushMechanism, SnippetSource, TagSupport,
-    ThreadOperations, TrashSemantics,
+    LocationCardinality, Magnitude, MagnitudeSource, PushMechanism, ServerSearch, SnippetSource,
+    TagSupport, ThreadOperations, TrashSemantics,
 };
 
 /// What a Gmail account declares.
@@ -66,7 +66,14 @@ pub fn capabilities() -> Capabilities {
         // No doorbell. See `oauth`, and D-7 as amended.
         push: PushMechanism::PollOnly,
         id_stability: IdStability::StableGlobally,
-        server_search: true,
+        // Every FR-20 operator but location. The provider's `in:` takes its own label
+        // vocabulary, and Sift's location term matches a semantic kind *or* a display name —
+        // `in:archive` names nothing here — so the term is applied locally to what the search
+        // returns rather than translated into something that means a different set.
+        server_search: ServerSearch {
+            location: false,
+            ..ServerSearch::ALL
+        },
         // Q-9, answered for this provider. See `BATCH_SIZE` for why it is the smaller of the
         // two numbers the provider publishes.
         max_batch_size: Magnitude::Known {

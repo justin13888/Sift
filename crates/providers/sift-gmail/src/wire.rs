@@ -16,7 +16,9 @@
 //!    404 from the history endpoint and leaves here as [`Refusal::CursorInvalidated`].
 
 use base64::Engine as _;
-use sift_provider::adapter::{Change, Envelope, Provenance, RemoteFolderId, RemoteMessageId};
+use sift_provider::adapter::{
+    Change, Envelope, Provenance, RemoteFolderId, RemoteMessageId, SearchTerm,
+};
 use sift_provider::rfc5322;
 
 use crate::label::Label;
@@ -86,6 +88,52 @@ pub fn list_target(folder: &RemoteFolderId, page: Option<&str>, page_size: u32) 
         target.push_str(&format!("&pageToken={}", encode(page)));
     }
     target
+}
+
+/// A server-side search — FR-21. The same list endpoint a backfill walks, asked with the
+/// provider's own query parameter instead of a label, and one page of at most `limit`.
+///
+/// Spam and trash stay excluded, which is the provider's default and the same scope its own
+/// search box has.
+#[must_use]
+pub fn search_target(query: &str, limit: u32) -> String {
+    format!("{USER}/messages?maxResults={limit}&q={}", encode(query))
+}
+
+/// FR-20's terms, written in the provider's query syntax.
+///
+/// Every value is **quoted**, so nothing a person types can become an operator the grammar did
+/// not parse: `from:"a OR b"` is text, not a disjunction. The syntax has no escape inside a
+/// quoted value, so a quote a person typed is replaced by a space, which is what the provider's
+/// own tokenizer would have split on anyway. Dates go as epoch seconds, which the syntax accepts
+/// and which carry no time zone for it to reinterpret.
+///
+/// # Errors
+/// The term this provider's declared capability does not cover — a location. The caller was
+/// told not to send it, and refusing is how a term is kept from being silently dropped.
+pub fn search_query(terms: &[SearchTerm]) -> Result<String, &'static str> {
+    let quoted = |value: &str| format!("\"{}\"", value.replace('"', " "));
+    let mut parts = Vec::with_capacity(terms.len());
+    for term in terms {
+        parts.push(match term {
+            SearchTerm::Word(t) | SearchTerm::Phrase(t) => quoted(t),
+            SearchTerm::Sender(t) => format!("from:{}", quoted(t)),
+            SearchTerm::Recipient(t) => format!("to:{}", quoted(t)),
+            SearchTerm::Subject(t) => format!("subject:{}", quoted(t)),
+            SearchTerm::HasAttachment(true) => "has:attachment".to_owned(),
+            SearchTerm::HasAttachment(false) => "-has:attachment".to_owned(),
+            SearchTerm::Unread(true) => "is:unread".to_owned(),
+            SearchTerm::Unread(false) => "is:read".to_owned(),
+            // To the second, which is the provider's resolution; the grammar's dates are
+            // midnights, so nothing is lost at the boundary a person can type.
+            SearchTerm::Before(millis) => format!("before:{}", millis / 1000),
+            SearchTerm::After(millis) => format!("after:{}", millis / 1000),
+            SearchTerm::Location(_) => {
+                return Err("this provider does not search by location on Sift's behalf");
+            }
+        });
+    }
+    Ok(parts.join(" "))
 }
 
 /// One page of the change feed, from a history identifier.

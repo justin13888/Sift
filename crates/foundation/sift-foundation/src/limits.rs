@@ -1,6 +1,6 @@
 //! Every numeric bound Sift enforces at runtime, in one place.
 //!
-//! Owns L-1 through L-29. See `docs/limits.md`.
+//! Owns L-1 through L-32. See `docs/limits.md`.
 //!
 //! # Why this is a register rather than a scattered set of constants
 //!
@@ -148,6 +148,13 @@ pub const L23_CONNECTIONS: u64 = 16;
 /// The page size D-53's resumable backfill requires. It is the granularity a resume
 /// rewinds to, so it trades round trips against work repeated after an interruption.
 pub const L26_BACKFILL_PAGE: u64 = 500;
+
+/// L-32 · Messages one account's server-side search returns per query — FR-21.
+///
+/// Each hit the store does not hold costs one envelope fetch and one ingested row, so this
+/// bounds what a single search can add; bodies are never fetched for it. A search that
+/// reaches the bound says the server may hold more rather than implying it was exhaustive.
+pub const L32_SERVER_SEARCH_HITS: u64 = 50;
 
 /// L-29 · Concurrent resource loads per rendered document.
 ///
@@ -577,6 +584,12 @@ pub const ALL: &[Limit] = &[
         bounds: "the scheduler's coalescing window, handed to the platform timer as leeway",
         consequence: Deadline,
     },
+    Limit {
+        id: "L-32",
+        magnitude: Count(L32_SERVER_SEARCH_HITS),
+        bounds: "messages one account's server-side search returns per query",
+        consequence: Capacity,
+    },
 ];
 
 /// Look a limit up by identifier.
@@ -592,11 +605,11 @@ mod tests {
 
     #[test]
     fn the_register_holds_every_identifier_the_document_owns_exactly_once() {
-        // docs/limits.md says it owns L-1 through L-31. A gap here means a bound that
+        // docs/limits.md says it owns L-1 through L-32. A gap here means a bound that
         // exists in the specification and is enforced by nothing, or the reverse.
         let ids: BTreeSet<&str> = ALL.iter().map(|l| l.id).collect();
         assert_eq!(ids.len(), ALL.len(), "an identifier appears twice");
-        for n in 1..=31 {
+        for n in 1..=32 {
             let id = format!("L-{n}");
             assert!(
                 ids.contains(id.as_str()),
@@ -605,7 +618,7 @@ mod tests {
         }
         assert_eq!(
             ALL.len(),
-            31,
+            32,
             "an identifier is here and not in docs/limits.md"
         );
     }

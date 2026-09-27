@@ -1505,12 +1505,14 @@ fn a_relevance_corpus_under_tilde_is_written_to_the_home_directory() {
     std::fs::remove_dir_all(&home).expect("cleanup");
 }
 
-/// FR-21's label. Nothing delegates yet, and the transcript says so rather than leaving the
-/// absence of server results to imply it.
+/// FR-21's label. `search` is the local half, and the transcript says so — and how many
+/// providers the server half would ask — rather than leaving the absence of server results to
+/// imply that none could.
 #[test]
 fn a_search_says_that_nothing_was_asked_of_a_provider() {
     let mut cmds = hostile();
     cmds.push("search receipt");
     let out = session(&cmds);
     assert!(out.contains("nothing was asked of a provider"), "{out}");
+    assert!(out.contains("though 1 could search its server"), "{out}");
 }

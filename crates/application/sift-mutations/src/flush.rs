@@ -318,7 +318,7 @@ mod tests {
             delta: DeltaMechanism::HistoryCursor,
             push: PushMechanism::PollOnly,
             id_stability: IdStability::StableGlobally,
-            server_search: true,
+            server_search: sift_provider::capability::ServerSearch::ALL,
             max_batch_size: Magnitude::Unknown,
             request_budget: Magnitude::Unknown,
             snippet_source: SnippetSource::ProviderSupplied,
@@ -399,6 +399,13 @@ mod tests {
         }
         fn watch(&self, _: &[RemoteFolderId]) -> Result<(), Self::Error> {
             Ok(())
+        }
+        fn search(
+            &self,
+            _: &[sift_provider::adapter::SearchTerm],
+            _: usize,
+        ) -> Result<Vec<RemoteMessageId>, Self::Error> {
+            Ok(Vec::new())
         }
         fn classify(&self, error: &Self::Error) -> Failure {
             match *error {

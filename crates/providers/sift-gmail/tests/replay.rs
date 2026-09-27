@@ -12,8 +12,8 @@
 
 use sift_gmail::{Gmail, GmailError, wire};
 use sift_provider::adapter::{
-    Adapter, Change, Cursor, Operation, Provenance, RemoteFolderId, RemoteMessageId, SpecialUse,
-    WireMutation,
+    Adapter, Change, Cursor, Operation, Provenance, RemoteFolderId, RemoteMessageId, SearchTerm,
+    SpecialUse, WireMutation,
 };
 use sift_provider::transport::{Exchange, Replay, Response, TransportError};
 
@@ -1177,4 +1177,111 @@ fn a_malformed_structure_refuses_without_panicking() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 9. Server-side search — FR-21.
+// ---------------------------------------------------------------------------
+
+const SEARCH: &[u8] = include_bytes!("../fixtures/search.json");
+
+#[test]
+fn a_search_is_one_request_for_identifiers_and_never_a_body() {
+    let terms = [
+        SearchTerm::Word("quokka".into()),
+        SearchTerm::Sender("ops@example.test".into()),
+    ];
+    let query = wire::search_query(&terms).unwrap();
+    assert_eq!(query, "\"quokka\" from:\"ops@example.test\"");
+    let mut r = account();
+    r.on("GET", &wire::search_target(&query, 50), SEARCH);
+    let g = gmail(r);
+
+    let ids = g.search(&terms, 50).unwrap();
+    // The provider's own order, the identifiers it named, and no second page: L-32 is one
+    // request's worth, not a walk.
+    assert_eq!(
+        ids.iter().map(|i| i.0.as_str()).collect::<Vec<_>>(),
+        ["m7", "m2", "m9"]
+    );
+    let replay = replay_of(&g);
+    assert_eq!(replay.performed.len(), 1);
+    assert!(replay.performed[0].target.contains("q="));
+    assert!(
+        !replay.performed[0].target.contains("format=full"),
+        "a search fetched a whole message"
+    );
+}
+
+#[test]
+fn a_search_is_cut_at_the_bound_it_asked_for() {
+    let terms = [SearchTerm::Word("quokka".into())];
+    let query = wire::search_query(&terms).unwrap();
+    let mut r = account();
+    r.on("GET", &wire::search_target(&query, 2), SEARCH);
+    let g = gmail(r);
+    // The fixture answers three to a request for two, and the third is not believed.
+    assert_eq!(g.search(&terms, 2).unwrap().len(), 2);
+}
+
+#[test]
+fn nothing_typed_becomes_an_operator_the_grammar_did_not_parse() {
+    // A person's `OR`, `-` or `in:` inside a value is text, and a stray quote cannot close
+    // the value early and open a clause of its own.
+    let query = wire::search_query(&[
+        SearchTerm::Phrase("a OR b".into()),
+        SearchTerm::Subject("x\" in:trash \"y".into()),
+        SearchTerm::Word("-urgent".into()),
+    ])
+    .unwrap();
+    assert_eq!(query, "\"a OR b\" subject:\"x  in:trash  y\" \"-urgent\"");
+}
+
+#[test]
+fn every_declared_operator_translates_and_the_undeclared_one_is_refused() {
+    let caps = sift_gmail::capabilities().server_search;
+    let all = [
+        SearchTerm::Word("w".into()),
+        SearchTerm::Phrase("p q".into()),
+        SearchTerm::Sender("s".into()),
+        SearchTerm::Recipient("r".into()),
+        SearchTerm::Subject("t".into()),
+        SearchTerm::HasAttachment(true),
+        SearchTerm::Unread(false),
+        SearchTerm::Before(1_767_225_600_000),
+        SearchTerm::After(946_684_800_000),
+        SearchTerm::Location("archive".into()),
+    ];
+    for term in &all {
+        let translated = wire::search_query(core::slice::from_ref(term));
+        assert_eq!(
+            translated.is_ok(),
+            caps.evaluates(term),
+            "{term:?}: the capability and the translation disagree"
+        );
+    }
+    assert_eq!(
+        wire::search_query(&all[5..9]).unwrap(),
+        "has:attachment is:read before:1767225600 after:946684800"
+    );
+
+    // Handed a term it did not declare, the adapter refuses rather than widening the search,
+    // and nothing leaves the process.
+    let g = gmail(account());
+    let refused = g
+        .search(&[SearchTerm::Location("archive".into())], 50)
+        .unwrap_err();
+    assert!(matches!(refused, GmailError::Unsupported(_)));
+    assert_eq!(
+        g.classify(&refused),
+        sift_provider::adapter::Failure::Permanent
+    );
+    assert!(replay_of(&g).performed.is_empty());
+}
+
+#[test]
+fn an_empty_search_asks_for_nothing() {
+    let g = gmail(account());
+    assert!(g.search(&[], 50).unwrap().is_empty());
+    assert!(replay_of(&g).performed.is_empty());
 }

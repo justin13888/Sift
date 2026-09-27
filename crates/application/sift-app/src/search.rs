@@ -34,20 +34,30 @@
 //! and attachment filenames are indexed when a body is **first fetched** (D-81), so the bodies
 //! of messages nobody has opened are not in the local index — D-81's stated consequence, and
 //! [`Report::caveats`] says so under every query it applies to. FR-21's server-side search is
-//! how a query will reach those bodies; until it does, a search that admits its scope is
-//! better than one that quietly covers less than the user assumes.
+//! how a query reaches those bodies, and a search that admits its scope is better than one that
+//! quietly covers less than the user assumes.
 //!
-//! # FR-21's source labels
+//! # FR-21 — two halves, and their labels
 //!
-//! Results are labelled by where they came from. Nothing delegates to a provider yet, so every
-//! result is [`Source::Local`] — and the label exists now rather than later because merging two
-//! sources without saying which is which is the shape of the mistake FR-21 exists to prevent.
+//! [`App::search`] is the local half: no network, every keystroke. It also plans the server
+//! half and reports how many accounts it would ask ([`Report::delegable_accounts`]), and why any
+//! account the policy tier holds back will not be asked. [`App::search_with_server`] is the
+//! second half, which a shell runs after the first is on screen and off its main loop: each
+//! account whose declared capability covers the query is asked for at most L-32 identifiers,
+//! what the store does not hold arrives as envelopes and is ingested, and the result joins the
+//! local candidates under D-79. Results are labelled by where they came from, because merging
+//! two sources without saying which is which is the shape of the mistake FR-21 exists to
+//! prevent.
 
 use std::collections::{BTreeSet, HashMap};
 
+use rusqlite::OptionalExtension as _;
 use sift_foundation::identity::LocalId;
+use sift_foundation::limits::L32_SERVER_SEARCH_HITS;
 use sift_index::merge::{self, Features, Result_};
 use sift_index::query::{Column, Query, Term, TextScope};
+use sift_provider::adapter::{Failure, SearchTerm};
+use sift_provider::erased::ErasedAdapter;
 
 use crate::rows::MessageRow;
 use crate::{App, OpenAccount};
@@ -55,10 +65,11 @@ use crate::{App, OpenAccount};
 /// Where a result came from — FR-21.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
-    /// Sift's own store.
+    /// Sift's own index found it.
     Local,
-    /// The provider answered. **Not reachable yet**, and the variant exists because a merge
-    /// that does not distinguish the two is the mistake the requirement is about.
+    /// The provider's search found it and Sift's own index did not — usually because the words
+    /// matched are in a body nobody has opened. A message both found is labelled
+    /// [`Source::Local`]: it is one row, and it was already in the local results.
     Server,
 }
 
@@ -86,8 +97,35 @@ pub struct Report {
     /// they have no attachments has been misled by a filter that was never evaluated. A search
     /// that admits its scope is better than one that quietly covers less than assumed.
     pub caveats: Vec<String>,
-    /// How many accounts could have been asked to search server-side, and were not.
+    /// How many accounts could search server-side for this query and have not been asked.
+    ///
+    /// Non-zero from [`App::search`] exactly when [`App::search_with_server`] has something to
+    /// add, which is how a shell knows to ask for the second half — and zero from the second
+    /// half itself, which asked every one of them.
     pub delegable_accounts: usize,
+}
+
+/// Whether, and how, one account's server is asked about one query.
+enum Plan {
+    Ask {
+        /// FR-20's terms this account evaluates itself.
+        terms: Vec<SearchTerm>,
+        /// The rest, applied locally to what the server returns.
+        local_only: Query,
+    },
+    /// Not asked. `Some` carries what the report must say about it; `None` is an account that
+    /// could not have been asked about this query at all, whose silence is already covered by
+    /// the local caveats.
+    Skip(Option<String>),
+}
+
+/// What the server half managed to cover, across every account in scope.
+#[derive(Debug, Clone, Copy, Default)]
+struct Coverage {
+    /// Every account's server searched the text, so unopened bodies were reached.
+    bodies: bool,
+    /// And every one evaluated attachment presence itself.
+    attachments: bool,
 }
 
 impl App {
@@ -102,27 +140,199 @@ impl App {
         limit: u32,
     ) -> Result<Report, String> {
         let query = Query::parse(input);
-        let interpretation = query.terms.iter().map(describe).collect();
+        let names = self.scope(account)?;
+        let (owner, candidates) = self.local_candidates(&names, &query, limit)?;
 
-        let names: Vec<String> = match account {
-            Some(name) => vec![name.to_owned()],
+        // Nothing leaves the process here. What the server half *would* do is planned, so the
+        // shell knows whether to ask for it, and an account the tier or a pause holds back says
+        // so now rather than after a second round trip that was never going to happen.
+        let mut delegable = 0;
+        let mut notes = Vec::new();
+        for name in &names {
+            match self.plan(name, &query) {
+                Plan::Ask { .. } => delegable += 1,
+                Plan::Skip(Some(note)) => notes.push(note),
+                Plan::Skip(None) => {}
+            }
+        }
+
+        let mut report = self.assemble(&query, candidates, &owner, limit)?;
+        report.caveats = caveats(&query, Coverage::default());
+        report.caveats.extend(notes);
+        report.delegable_accounts = delegable;
+        Ok(report)
+    }
+
+    /// Search every account, or one, **and ask each provider that can** — FR-21.
+    ///
+    /// The second half of a search, and the only one that touches the network. A shell shows
+    /// [`App::search`]'s local results first and calls this afterwards, off its main loop (#49),
+    /// when that report's [`Report::delegable_accounts`] is non-zero; a slow or failing provider
+    /// therefore delays only its own half and never the local one.
+    ///
+    /// For each account whose capability covers the query and whose tier permits it, the
+    /// provider is asked for at most L-32 identifiers. Those the store does not hold have their
+    /// **envelopes** fetched and ingested as discovered — never a body — so every result can be
+    /// opened and triaged like any other row, and the body a person then opens is indexed by
+    /// D-81's first-fetch rule. Terms the provider does not evaluate are applied locally to what
+    /// it returned. The server's hits join the local candidates under D-79, deduplicated to the
+    /// local row where the local index already found the message, and labelled
+    /// [`Source::Server`] where it did not.
+    ///
+    /// **The query is not retained.** It lives for this call and in the request that carries
+    /// it, and nothing here writes it anywhere — privacy's *queries are not retained*.
+    ///
+    /// # Errors
+    /// The named account does not exist, or the store refused. A provider that fails, refuses
+    /// or cannot be reached is not an error: its half is skipped and the report says so.
+    pub fn search_with_server(
+        &mut self,
+        input: &str,
+        account: Option<&str>,
+        limit: u32,
+    ) -> Result<Report, String> {
+        let query = Query::parse(input);
+        let names = self.scope(account)?;
+        let (mut owner, mut candidates) = self.local_candidates(&names, &query, limit)?;
+        let local: BTreeSet<u128> = candidates.iter().map(|c| c.message).collect();
+
+        let mut notes = Vec::new();
+        let mut coverage = Coverage {
+            bodies: true,
+            attachments: true,
+        };
+        for name in &names {
+            let (terms, local_only) = match self.plan(name, &query) {
+                Plan::Ask { terms, local_only } => (terms, local_only),
+                Plan::Skip(note) => {
+                    coverage = Coverage::default();
+                    notes.extend(note);
+                    continue;
+                }
+            };
+            let evaluates_attachments = !query
+                .terms
+                .iter()
+                .any(|t| matches!(t, Term::HasAttachment(_)))
+                || terms
+                    .iter()
+                    .any(|t| matches!(t, SearchTerm::HasAttachment(_)));
+            let found = match self.ask(name, &terms)? {
+                Ok(found) => found,
+                Err(note) => {
+                    coverage = Coverage::default();
+                    notes.push(note);
+                    continue;
+                }
+            };
+            coverage.attachments &= evaluates_attachments;
+            // A term that reaches bodies and was not sent — an operator this build does not
+            // know, or a phrase this server cannot quote — was matched only against what the
+            // local index holds, so for it the unopened bodies were searched by nobody.
+            if local_only.terms.iter().any(|t| {
+                t.text_scope()
+                    .is_some_and(|s| !s.is_empty() && s.columns.contains(&Column::Body))
+            }) {
+                coverage.bodies = false;
+            }
+            if found.len() >= usize::try_from(L32_SERVER_SEARCH_HITS).unwrap_or(usize::MAX) {
+                notes.push(format!(
+                    "`{name}`'s server returned its first {L32_SERVER_SEARCH_HITS} matches, and \
+                     may hold more. A narrower search shows them."
+                ));
+            }
+            if !local_only.terms.is_empty() {
+                notes.push(format!(
+                    "`{name}`'s server cannot evaluate {}, so that was applied to the messages it \
+                     returned rather than to its whole mailbox.",
+                    local_only
+                        .terms
+                        .iter()
+                        .map(describe)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ));
+            }
+
+            let account = self
+                .accounts
+                .get(name)
+                .ok_or_else(|| format!("no account `{name}`"))?;
+            let count = u32::try_from(found.len()).unwrap_or(u32::MAX);
+            let passing: Vec<LocalId> = matching(account, &local_only, count, Some(&found))?
+                .into_iter()
+                .map(|(id, _)| id)
+                .filter(|id| !local.contains(&id.as_u128()))
+                .collect();
+            // A hit the local index also matches is a local result the local cut had not
+            // reached, and is labelled as one; only what the local index cannot find is the
+            // server's. Either way it is one row.
+            let also_local = matching(account, &query, count, Some(&passing))?;
+            let also: BTreeSet<u128> = also_local.iter().map(|(id, _)| id.as_u128()).collect();
+            let server_only: Vec<LocalId> = passing
+                .iter()
+                .copied()
+                .filter(|id| !also.contains(&id.as_u128()))
+                .collect();
+            let labelled = also_local
+                .into_iter()
+                .map(|(id, features)| (id, merge::Source::Local, features))
+                .chain(
+                    server_features(account, &query, &server_only)?
+                        .into_iter()
+                        .map(|(id, features)| (id, merge::Source::Server, features)),
+                );
+            for (id, source, features) in labelled {
+                owner.insert(id.as_u128(), name);
+                candidates.push(Result_ {
+                    message: id.as_u128(),
+                    source,
+                    features,
+                    local_score: None,
+                });
+            }
+        }
+
+        let mut report = self.assemble(&query, candidates, &owner, limit)?;
+        report.caveats = caveats(&query, coverage);
+        report.caveats.extend(notes);
+        report.delegable_accounts = 0;
+        Ok(report)
+    }
+
+    /// The accounts a search covers: the one named, or every one.
+    fn scope(&self, account: Option<&str>) -> Result<Vec<String>, String> {
+        Ok(match account {
+            Some(name) => {
+                if !self.accounts.contains_key(name) {
+                    return Err(format!("no account `{name}`"));
+                }
+                vec![name.to_owned()]
+            }
             None => self
                 .account_names()
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-        };
+        })
+    }
 
-        // Each account's leading matches in D-79's order — enough of them that the merged
-        // order's first `limit` visible rows are all among them — before anything is cut.
+    /// Each account's leading local matches in D-79's order — enough of them that the merged
+    /// order's first `limit` visible rows are all among them — before anything is cut.
+    fn local_candidates<'n>(
+        &self,
+        names: &'n [String],
+        query: &Query,
+        limit: u32,
+    ) -> Result<(HashMap<u128, &'n str>, Vec<Result_>), String> {
         let mut owner: HashMap<u128, &str> = HashMap::new();
         let mut candidates = Vec::new();
-        for name in &names {
+        for name in names {
             let account = self
                 .accounts
                 .get(name)
                 .ok_or_else(|| format!("no account `{name}`"))?;
-            for (id, features) in matching(account, &query, limit)? {
+            for (id, features) in matching(account, query, limit, None)? {
                 owner.insert(id.as_u128(), name);
                 candidates.push(Result_ {
                     message: id.as_u128(),
@@ -132,11 +342,20 @@ impl App {
                 });
             }
         }
+        Ok((owner, candidates))
+    }
 
-        // D-79's order across accounts, and only then the limit — applied to what the user
-        // will actually see, so a row the overlay hides does not use up a place.
+    /// D-79's order across accounts and sources, and only then the limit — applied to what the
+    /// user will actually see, so a row the overlay hides does not use up a place.
+    fn assemble(
+        &self,
+        query: &Query,
+        candidates: Vec<Result_>,
+        owner: &HashMap<u128, &str>,
+        limit: u32,
+    ) -> Result<Report, String> {
         let mut hits = Vec::new();
-        for result in merge::merge(&query, candidates) {
+        for result in merge::merge(query, candidates) {
             if hits.len() >= limit as usize {
                 break;
             }
@@ -150,22 +369,304 @@ impl App {
             else {
                 continue;
             };
-            if seen_as_asked(&query, &row) {
+            if seen_as_asked(query, &row) {
                 hits.push(Hit {
                     row,
-                    source: Source::Local,
+                    source: match result.source {
+                        merge::Source::Local => Source::Local,
+                        merge::Source::Server => Source::Server,
+                    },
                     features: result.features,
                 });
             }
         }
-
         Ok(Report {
             hits,
-            interpretation,
-            caveats: caveats(&query),
+            interpretation: query.terms.iter().map(describe).collect(),
+            caveats: Vec::new(),
             delegable_accounts: 0,
         })
     }
+
+    /// Whether one account's server is asked about `query`, and with which terms.
+    ///
+    /// **Capability first, never provider** (D-12): the account's declared
+    /// [`ServerSearch`](sift_provider::capability::ServerSearch) decides which terms are sent,
+    /// and the rest are applied locally to what comes back. Then the policy tier — FR-21 puts
+    /// server search under it — and the account's own pause (D-95).
+    fn plan(&self, name: &str, query: &Query) -> Plan {
+        let Some(account) = self.accounts.get(name) else {
+            return Plan::Skip(None);
+        };
+        let capability = account.capabilities.server_search;
+        // A capability shape has no provider behind it, and never will.
+        if !capability.offered()
+            || (account.adapter.is_none() && crate::shape_named(&account.kind).is_ok())
+        {
+            return Plan::Skip(None);
+        }
+
+        let mut terms = Vec::new();
+        let mut local_only = Vec::new();
+        for term in &query.terms {
+            // A text term of punctuation alone asks nothing locally, and is not sent either.
+            if term.text_scope().is_some_and(|scope| scope.is_empty()) {
+                continue;
+            }
+            match delegated(term) {
+                Some(wire) if capability.evaluates(&wire) => terms.push(wire),
+                _ => local_only.push(term.clone()),
+            }
+        }
+        // Worth a request only if the server can say something the local index cannot: text,
+        // which reaches bodies nobody opened, or attachment presence, which sync does not
+        // record. A query of flags, folders and dates is a list, and the list is local.
+        let reaches_further = terms.iter().any(|t| {
+            matches!(
+                t,
+                SearchTerm::Word(_)
+                    | SearchTerm::Phrase(_)
+                    | SearchTerm::Sender(_)
+                    | SearchTerm::Recipient(_)
+                    | SearchTerm::Subject(_)
+                    | SearchTerm::HasAttachment(_)
+            )
+        });
+        if !reaches_further {
+            return Plan::Skip(None);
+        }
+
+        let held = |why: &str| {
+            Plan::Skip(Some(format!(
+                "`{name}` was not searched on its server because {why}, so only the mail Sift \
+                 already holds was searched there."
+            )))
+        };
+        if self.is_paused(name) {
+            return held("syncing is paused for it");
+        }
+        // The tier's own answer decides; the match only words the refusal.
+        if !self.network.permits_server_search() {
+            return held(match self.network {
+                sift_net::tier::Tier::OfflineNoPath => "there is no network connection",
+                sift_net::tier::Tier::OfflinePortal => "the network is asking you to sign in to it",
+                sift_net::tier::Tier::Paused => "syncing is paused",
+                _ => "the network policy forbids it",
+            });
+        }
+        if account.needs_authentication {
+            return held("it needs you to sign in again");
+        }
+        Plan::Ask {
+            terms,
+            local_only: Query { terms: local_only },
+        }
+    }
+
+    /// Ask one account's provider, and bring what it found into the store.
+    ///
+    /// Answers the local identities of the messages it found, in the provider's order, or the
+    /// sentence the report carries about why it could not.
+    ///
+    /// # Errors
+    /// The store refused — which, unlike a provider's failure, is not something to report and
+    /// carry on from.
+    fn ask(
+        &mut self,
+        name: &str,
+        terms: &[SearchTerm],
+    ) -> Result<Result<Vec<LocalId>, String>, String> {
+        let failed = |kind: &str| {
+            format!(
+                "`{name}`'s server search did not complete ({kind}), so only the mail Sift \
+                 already holds was searched there."
+            )
+        };
+        // A restored account is reconnected the way a sync reconnects it: this is already a
+        // network call, and a launch that reconnected every account up front would be one that
+        // waits on the network.
+        if self.account(name)?.adapter.is_none()
+            && let Err(why) = self.reconnect(name)
+        {
+            return Ok(Err(failed(&why)));
+        }
+        let account = self.account(name)?;
+        let Some(adapter) = account.adapter.take() else {
+            return Ok(Err(failed("it has no provider behind it")));
+        };
+        let outcome = found(adapter.as_ref(), account, terms);
+        // The adapter goes back before the result is examined, as it does after a sync.
+        account.adapter = Some(adapter);
+        Ok(outcome?.map_err(|failure| failed(failure_words(failure))))
+    }
+}
+
+/// One search against one provider: identifiers, then envelopes for the ones not held, then
+/// the local identity of each. The inner error is the provider's; the outer one the store's.
+fn found(
+    adapter: &dyn ErasedAdapter,
+    account: &mut OpenAccount,
+    terms: &[SearchTerm],
+) -> Result<Result<Vec<LocalId>, Failure>, String> {
+    let bound = usize::try_from(L32_SERVER_SEARCH_HITS).unwrap_or(usize::MAX);
+    let remote = match ErasedAdapter::search(adapter, terms, bound) {
+        Ok(ids) => ids,
+        Err(e) => return Ok(Err(e.failure)),
+    };
+    let unknown = sift_sync::ingest::unknown_to_us(&account.store.store, &remote)
+        .map_err(|e| e.to_string())?;
+    // Envelopes only, batched as a sync batches them. *Sift MUST NOT fetch whole messages*
+    // holds here as it does for a backfill.
+    let batch = account.capabilities.batch_size() as usize;
+    let mut envelopes = Vec::with_capacity(unknown.len());
+    for chunk in unknown.chunks(batch.max(1)) {
+        match ErasedAdapter::fetch_envelopes(adapter, chunk) {
+            Ok(mut more) => envelopes.append(&mut more),
+            Err(e) => return Ok(Err(e.failure)),
+        }
+    }
+    if !envelopes.is_empty() {
+        sift_sync::ingest::ingest_found(&mut account.store.store, &envelopes, &account.ids)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Every identifier the provider named that is now a row — whether it was held before or
+    // arrived just now. One whose envelope did not come back vanished between the two
+    // requests, and is not a result.
+    let mut stmt = account
+        .store
+        .store
+        .prepare("SELECT id FROM message WHERE remote_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut local = Vec::with_capacity(remote.len());
+    for id in &remote {
+        let key: Option<Vec<u8>> = stmt
+            .query_row([&id.0], |r| r.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(key) = key {
+            let bytes: [u8; 16] = key.try_into().map_err(|_| "identity is not 16 bytes")?;
+            local.push(LocalId::from_bytes(bytes));
+        }
+    }
+    Ok(Ok(local))
+}
+
+/// A provider's failure, in words a person can act on. The kind only: what the provider said
+/// is a content value under D-68, and a report shown in the window is not where it belongs.
+const fn failure_words(failure: Failure) -> &'static str {
+    match failure {
+        Failure::CredentialRefused => "it needs you to sign in again",
+        Failure::Throttled { .. } => "the provider asked Sift to slow down",
+        Failure::Transient | Failure::Unknown | Failure::CursorInvalidated => {
+            "the provider did not answer"
+        }
+        Failure::Permanent => "the provider refused the search",
+    }
+}
+
+/// FR-20's term as a provider is asked it, or `None` for one no provider is asked: an operator
+/// this build does not know stays text, and is applied locally rather than guessed at.
+fn delegated(term: &Term) -> Option<SearchTerm> {
+    Some(match term {
+        Term::Word(t) => SearchTerm::Word(t.clone()),
+        Term::Phrase(t) => SearchTerm::Phrase(t.clone()),
+        Term::Sender(t) => SearchTerm::Sender(t.clone()),
+        Term::Recipient(t) => SearchTerm::Recipient(t.clone()),
+        Term::Subject(t) => SearchTerm::Subject(t.clone()),
+        Term::HasAttachment(want) => SearchTerm::HasAttachment(*want),
+        Term::Unread(want) => SearchTerm::Unread(*want),
+        Term::Location(t) => SearchTerm::Location(t.clone()),
+        Term::Before(millis) => SearchTerm::Before(*millis),
+        Term::After(millis) => SearchTerm::After(*millis),
+        Term::Unknown(_) => return None,
+    })
+}
+
+/// D-79's features of messages a provider found, against the whole query.
+///
+/// **Computed from the message, not from the provider's ranking**, which is what lets a server
+/// result join a merge whose other members came from local indexes (D-79). Which field matched
+/// is asked of the local index, which holds every envelope field; a message whose match is in
+/// none of them matched where only the server could see — its body — and is credited there.
+/// The provider matched every term it was sent and the local filter every other, so coverage
+/// is complete.
+fn server_features(
+    account: &OpenAccount,
+    query: &Query,
+    ids: &[LocalId],
+) -> Result<Vec<(LocalId, Features)>, String> {
+    let scopes: Vec<(TextScope<'_>, bool)> = query
+        .terms
+        .iter()
+        .filter_map(|t| {
+            t.text_scope()
+                .map(|scope| (scope, matches!(t, Term::Phrase(_))))
+        })
+        .filter(|(scope, _)| !scope.is_empty())
+        .collect();
+    let relevance = query.carries_a_relevance_signal() && !scopes.is_empty();
+    let terms = u32::try_from(scopes.len()).unwrap_or(u32::MAX);
+    let store = &account.store.store;
+    let mut matched = store
+        .prepare(
+            "SELECT EXISTS (SELECT 1 FROM message_text_key k
+                            WHERE k.message_id = ?1
+                              AND k.docid IN (SELECT rowid FROM message_text
+                                              WHERE message_text MATCH ?2))",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut received = store
+        .prepare("SELECT received_at_millis FROM message WHERE id = ?1")
+        .map_err(|e| e.to_string())?;
+
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let key = id.to_bytes().to_vec();
+        let mut credit = |wanted: &[Column]| -> Result<bool, String> {
+            if !relevance {
+                return Ok(false);
+            }
+            for (scope, _) in &scopes {
+                let columns: Vec<Column> = wanted
+                    .iter()
+                    .copied()
+                    .filter(|c| scope.columns.contains(c))
+                    .collect();
+                if columns.is_empty() {
+                    continue;
+                }
+                let hit: bool = matched
+                    .query_row(rusqlite::params![key, scope.expression(&columns)], |r| {
+                        r.get(0)
+                    })
+                    .map_err(|e| e.to_string())?;
+                if hit {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        let subject = credit(&[Column::Subject])?;
+        let sender = credit(&[Column::Sender])?;
+        let local_body = credit(&[Column::Snippet, Column::Body])?;
+        let millis: i64 = received
+            .query_row([&key], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        out.push((
+            *id,
+            Features {
+                matched_subject: subject,
+                matched_sender: sender,
+                matched_body: local_body || (relevance && !subject && !sender),
+                matched_phrase: relevance && scopes.iter().any(|(_, phrase)| *phrase),
+                terms_present: terms,
+                terms_total: terms,
+                received_millis: u64::try_from(millis).unwrap_or(0),
+            },
+        ));
+    }
+    Ok(out)
 }
 
 /// One account's leading messages that satisfy every term, in D-79's order, with its features
@@ -183,23 +684,25 @@ impl App {
 /// That count is exact rather than generous: the merged order's first `limit` visible rows
 /// from this account are its first `limit` rows here, except for rows the overlay hides or
 /// re-reads, and every one of those is a message the overlay names.
+///
+/// `only` restricts the statement to the messages a provider found, which is how the terms it
+/// could not evaluate are applied to what it returned (FR-21): the same predicates, over those
+/// rows and no others.
 fn matching(
     account: &OpenAccount,
     query: &Query,
     limit: u32,
+    only: Option<&[LocalId]>,
 ) -> Result<Vec<(LocalId, Features)>, String> {
+    let literal = |id: &LocalId| {
+        let hex: String = id.to_bytes().iter().map(|b| format!("{b:02X}")).collect();
+        format!("X'{hex}'")
+    };
     // The messages the overlay has an opinion about (D-51). Their identities are ours, not
     // the user's text, so they are written into the statement as literals rather than bound
     // one parameter each, which no parameter limit then caps.
     let pending: BTreeSet<LocalId> = account.queue.entries().iter().map(|q| q.message).collect();
-    let pending_literals = pending
-        .iter()
-        .map(|id| {
-            let hex: String = id.to_bytes().iter().map(|b| format!("{b:02X}")).collect();
-            format!("X'{hex}'")
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    let pending_literals = pending.iter().map(literal).collect::<Vec<_>>().join(", ");
     let cut = i64::from(limit).saturating_add(i64::try_from(pending.len()).unwrap_or(i64::MAX));
 
     let scopes: Vec<(TextScope<'_>, bool)> = query
@@ -214,6 +717,16 @@ fn matching(
 
     let mut clauses: Vec<String> = Vec::new();
     let mut values: Vec<rusqlite::types::Value> = Vec::new();
+    // Our identities, not the user's text, so literals rather than parameters — as above.
+    if let Some(only) = only {
+        if only.is_empty() {
+            return Ok(Vec::new());
+        }
+        clauses.push(format!(
+            "m.id IN ({})",
+            only.iter().map(literal).collect::<Vec<_>>().join(", ")
+        ));
+    }
     for term in &query.terms {
         match term {
             Term::Before(millis) => {
@@ -395,12 +908,17 @@ fn seen_as_asked(query: &Query, row: &MessageRow) -> bool {
 /// Keyed on the terms actually used rather than listed unconditionally: a caveat printed under
 /// every search is one nobody reads, and the one that matters is the one about the operator the
 /// user just typed.
-fn caveats(query: &Query) -> Vec<String> {
+///
+/// `coverage` is what the server half reached for every account in scope; each caveat it
+/// makes untrue is dropped, and none is dropped on the strength of a server that was not asked.
+fn caveats(query: &Query, coverage: Coverage) -> Vec<String> {
     let mut out = Vec::new();
-    if query.terms.iter().any(|t| {
-        t.text_scope()
-            .is_some_and(|s| s.columns.contains(&Column::Body))
-    }) {
+    if !coverage.bodies
+        && query.terms.iter().any(|t| {
+            t.text_scope()
+                .is_some_and(|s| s.columns.contains(&Column::Body))
+        })
+    {
         out.push(
             "Message bodies are searched only for messages you have opened. Sift indexes a \
              body when it is first fetched, so mail nobody has opened was matched on its \
@@ -408,10 +926,11 @@ fn caveats(query: &Query) -> Vec<String> {
                 .to_owned(),
         );
     }
-    if query
-        .terms
-        .iter()
-        .any(|t| matches!(t, Term::HasAttachment(_)))
+    if !coverage.attachments
+        && query
+            .terms
+            .iter()
+            .any(|t| matches!(t, Term::HasAttachment(_)))
     {
         out.push(
             "`has:attachment` matched nothing. Sync records the envelope, which does not say \
@@ -928,8 +1447,350 @@ mod tests {
         }
         let account = app.account("work").unwrap();
         for query in ["is:unread", "r", "report", "\"report\"", "from:someone"] {
-            let rows = matching(account, &Query::parse(query), 20).unwrap();
+            let rows = matching(account, &Query::parse(query), 20, None).unwrap();
             assert_eq!(rows.len(), 20, "{query} read {} rows", rows.len());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // FR-21 — the server half, over D-65's recorded corpus.
+    // -----------------------------------------------------------------------
+
+    /// A replayed account after its first sync: envelopes for what the folders list, no
+    /// bodies, and an archived message (`m5`) whose body holds a word nothing local does.
+    fn synced() -> App {
+        let mut app = App::new();
+        app.add_replayed_account("mail").unwrap();
+        app.sync("mail", 10).unwrap();
+        app
+    }
+
+    fn held(app: &mut App) -> i64 {
+        app.account("mail")
+            .unwrap()
+            .store
+            .store
+            .query_row("SELECT count(*) FROM message", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn remote_of(app: &mut App, id: LocalId) -> String {
+        app.account("mail")
+            .unwrap()
+            .store
+            .store
+            .query_row(
+                "SELECT remote_id FROM message WHERE id = ?1",
+                [id.to_bytes().to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_word_only_in_an_unopened_body_is_found_by_the_server_and_opens() {
+        // The issue's acceptance, end to end: never fetched, found by the server, labelled as
+        // such, opened, and then held by the local index after that first fetch.
+        let mut app = synced();
+
+        let local = app.search("quokka", None, 20).unwrap();
+        assert!(
+            local.hits.is_empty(),
+            "the local index knew a body it never saw"
+        );
+        assert_eq!(local.delegable_accounts, 1, "the shell was not told to ask");
+        assert!(
+            local.caveats[0].contains("only for messages you have opened"),
+            "{:?}",
+            local.caveats
+        );
+
+        let before = held(&mut app);
+        let report = app.search_with_server("quokka", None, 20).unwrap();
+        assert_eq!(report.delegable_accounts, 0);
+        let found: Vec<(String, Source)> = report
+            .hits
+            .iter()
+            .map(|h| (remote_of(&mut app, h.row.id), h.source))
+            .collect();
+        assert!(
+            found.contains(&("m5".to_owned(), Source::Server)),
+            "the archived message was not a server result: {found:?}"
+        );
+        assert!(found.iter().all(|(_, source)| *source == Source::Server));
+        // One row per message: what was already held was not inserted again, and what was not
+        // was inserted once.
+        let now = held(&mut app);
+        assert!(now > before && now <= before + 2, "{before} -> {now}");
+        let again = app.search_with_server("quokka", None, 20).unwrap();
+        assert_eq!(
+            held(&mut app),
+            now,
+            "a second search inserted a second copy"
+        );
+        assert_eq!(again.hits.len(), report.hits.len());
+        // Every account's server searched the text, so the body caveat is no longer true.
+        assert!(
+            report
+                .caveats
+                .iter()
+                .all(|c| !c.contains("only for messages you have opened")),
+            "{:?}",
+            report.caveats
+        );
+
+        // It opens — and its body is then in the local index, by D-81's first-fetch rule.
+        let m5 = report
+            .hits
+            .iter()
+            .map(|h| h.row.id)
+            .find(|id| remote_of(&mut app, *id) == "m5")
+            .unwrap();
+        app.open_document(m5, false).unwrap();
+        let after = app.search("quokka", None, 20).unwrap();
+        assert!(
+            after
+                .hits
+                .iter()
+                .any(|h| h.row.id == m5 && h.source == Source::Local),
+            "the opened body did not reach the local index"
+        );
+    }
+
+    #[test]
+    fn offline_the_server_half_is_skipped_and_said_to_be() {
+        // FR-21 under the policy tier: no attempt of any kind with no path (NFR-38), and a
+        // report that names the skipped half rather than a silently smaller set.
+        let mut app = synced();
+        app.set_network_tier(sift_net::tier::Tier::OfflineNoPath);
+        let before = held(&mut app);
+
+        let local = app.search("quokka", None, 20).unwrap();
+        assert_eq!(
+            local.delegable_accounts, 0,
+            "the shell was sent to ask offline"
+        );
+        assert!(
+            local
+                .caveats
+                .iter()
+                .any(|c| c.contains("`mail` was not searched on its server")
+                    && c.contains("no network connection")),
+            "{:?}",
+            local.caveats
+        );
+
+        let report = app.search_with_server("quokka", None, 20).unwrap();
+        assert!(report.hits.is_empty());
+        assert_eq!(held(&mut app), before, "something was fetched with no path");
+        assert!(
+            report
+                .caveats
+                .iter()
+                .any(|c| c.contains("no network connection")),
+            "{:?}",
+            report.caveats
+        );
+        // And the body caveat stands, because no server reached the bodies.
+        assert!(report.caveats[0].contains("only for messages you have opened"));
+    }
+
+    #[test]
+    fn an_account_that_needs_signing_in_again_is_not_asked_and_says_so() {
+        // A refused credential holds the server half back before any request, and the report
+        // names why rather than returning a silently smaller set.
+        let mut app = synced();
+        app.account("mail").unwrap().needs_authentication = true;
+        let before = held(&mut app);
+
+        let local = app.search("quokka", None, 20).unwrap();
+        assert_eq!(local.delegable_accounts, 0);
+        assert!(
+            local
+                .caveats
+                .iter()
+                .any(|c| c.contains("`mail` was not searched on its server")
+                    && c.contains("sign in again")),
+            "{:?}",
+            local.caveats
+        );
+
+        let report = app.search_with_server("quokka", None, 20).unwrap();
+        assert!(report.hits.is_empty());
+        assert_eq!(held(&mut app), before, "a held-back account was asked");
+        assert!(
+            report.caveats.iter().any(|c| c.contains("sign in again")),
+            "{:?}",
+            report.caveats
+        );
+        assert!(report.caveats[0].contains("only for messages you have opened"));
+    }
+
+    #[test]
+    fn attachment_presence_is_asked_of_the_server_and_its_hits_are_the_servers() {
+        // Sync does not record attachment presence, so locally `has:attachment` matches nothing
+        // and says so. A server that evaluates it answers for the whole mailbox: its hits are
+        // labelled Server, the archived one is inserted, and the caveat is no longer true.
+        let mut app = synced();
+        let local = app.search("has:attachment", None, 20).unwrap();
+        assert!(local.hits.is_empty());
+        assert_eq!(local.delegable_accounts, 1);
+        assert!(
+            local.caveats.iter().any(|c| c.contains("`has:attachment`")),
+            "{:?}",
+            local.caveats
+        );
+
+        let report = app.search_with_server("has:attachment", None, 20).unwrap();
+        let mut found: Vec<(String, Source)> = report
+            .hits
+            .iter()
+            .map(|h| (remote_of(&mut app, h.row.id), h.source))
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            found,
+            vec![
+                ("m1".to_owned(), Source::Server),
+                ("m5".to_owned(), Source::Server)
+            ]
+        );
+        assert!(
+            report
+                .caveats
+                .iter()
+                .all(|c| !c.contains("`has:attachment`")),
+            "{:?}",
+            report.caveats
+        );
+    }
+
+    #[test]
+    fn a_body_term_that_was_not_sent_keeps_the_body_caveat() {
+        // An operator this build does not know is applied locally, never sent. The server
+        // searched bodies for `quokka`, but nobody searched unopened bodies for the other term,
+        // so the report may not claim they were.
+        let mut app = synced();
+        let report = app
+            .search_with_server("quokka ticket:12345", None, 20)
+            .unwrap();
+        assert!(
+            report
+                .caveats
+                .iter()
+                .any(|c| c.contains("only for messages you have opened")),
+            "{:?}",
+            report.caveats
+        );
+        // Whereas every body-scoped term sent keeps it dropped.
+        let sent = app.search_with_server("quokka", None, 20).unwrap();
+        assert!(
+            sent.caveats
+                .iter()
+                .all(|c| !c.contains("only for messages you have opened")),
+            "{:?}",
+            sent.caveats
+        );
+    }
+
+    #[test]
+    fn a_failing_provider_costs_its_own_half_and_nothing_else() {
+        // The recorded corpus has no answer for this query, which the replay harness reports as
+        // a settled failure. The local half is still the answer, and the report says why it is
+        // the only one.
+        let mut app = synced();
+        let local = app.search("receipt", None, 20).unwrap();
+        assert!(!local.hits.is_empty());
+        let report = app.search_with_server("receipt", None, 20).unwrap();
+        assert_eq!(
+            report.hits.iter().map(|h| h.row.id).collect::<Vec<_>>(),
+            local.hits.iter().map(|h| h.row.id).collect::<Vec<_>>()
+        );
+        assert!(report.hits.iter().all(|h| h.source == Source::Local));
+        assert!(
+            report
+                .caveats
+                .iter()
+                .any(|c| c.contains("server search did not complete")),
+            "{:?}",
+            report.caveats
+        );
+    }
+
+    #[test]
+    fn an_operator_the_server_cannot_evaluate_is_applied_to_what_it_returned() {
+        // This account's capability does not cover a location, so the server is asked for the
+        // word alone and `in:inbox` is applied locally: the archived message is in no folder
+        // and does not survive it. The term is never dropped, and the report says where it ran.
+        let mut app = synced();
+        let report = app.search_with_server("quokka in:inbox", None, 20).unwrap();
+        let remotes: Vec<String> = report
+            .hits
+            .iter()
+            .map(|h| remote_of(&mut app, h.row.id))
+            .collect();
+        assert!(!remotes.contains(&"m5".to_owned()), "{remotes:?}");
+        assert!(
+            report
+                .caveats
+                .iter()
+                .any(|c| c.contains("cannot evaluate in: inbox")),
+            "{:?}",
+            report.caveats
+        );
+    }
+
+    #[test]
+    fn an_account_with_no_provider_is_never_asked_and_never_blamed() {
+        // A capability shape declares every operator and has nothing behind it. It is not
+        // delegable, and its silence is covered by the local caveats rather than a failure.
+        let mut app = one_account();
+        put(
+            &mut app,
+            "work",
+            &Mail {
+                subject: "Invoice",
+                ..Mail::default()
+            },
+        );
+        let local = app.search("invoice", None, 10).unwrap();
+        assert_eq!(local.delegable_accounts, 0);
+        let report = app.search_with_server("invoice", None, 10).unwrap();
+        assert_eq!(report.hits.len(), 1);
+        assert_eq!(report.hits[0].source, Source::Local);
+        assert!(
+            report.caveats.iter().all(|c| !c.contains("server")),
+            "{:?}",
+            report.caveats
+        );
+    }
+
+    #[test]
+    fn a_list_query_is_answered_locally_and_the_server_is_not_asked() {
+        // Flags, folders and dates are a list, and the list is local: a server asked for them
+        // could only repeat it.
+        let mut app = synced();
+        let local = app.search("is:unread in:inbox", None, 20).unwrap();
+        assert_eq!(local.delegable_accounts, 0);
+    }
+
+    #[test]
+    fn every_term_but_an_unknown_operator_is_offered_to_a_provider() {
+        for input in [
+            "w",
+            "\"p q\"",
+            "from:s",
+            "to:r",
+            "subject:t",
+            "has:attachment",
+            "is:unread",
+            "in:inbox",
+            "before:2026-01-01",
+            "after:2026-01-01",
+        ] {
+            let q = Query::parse(input);
+            assert!(delegated(&q.terms[0]).is_some(), "{input}");
+        }
+        assert!(delegated(&Query::parse("ticket:12345").terms[0]).is_none());
     }
 }

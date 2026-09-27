@@ -1699,6 +1699,7 @@ dependencies = [
  "sift-index",
  "sift-mime",
  "sift-mutations",
+ "sift-net",
  "sift-pipeline",
  "sift-provider",
  "sift-registry",

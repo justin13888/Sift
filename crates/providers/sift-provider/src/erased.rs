@@ -20,7 +20,7 @@ use core::fmt;
 
 use crate::adapter::{
     Adapter, Cursor, Delta, Envelope, Failure, MutationOutcome, PartDescriptor, RemoteFolder,
-    RemoteFolderId, RemoteMessageId, WireMutation,
+    RemoteFolderId, RemoteMessageId, SearchTerm, WireMutation,
 };
 use crate::capability::Capabilities;
 
@@ -70,6 +70,11 @@ pub trait ErasedAdapter: Send {
     fn fetch_part(&self, id: &RemoteMessageId, part: &str) -> Result<Vec<u8>, ProviderError>;
     fn apply(&self, batch: &[WireMutation]) -> Result<Vec<MutationOutcome>, ProviderError>;
     fn watch(&self, folders: &[RemoteFolderId]) -> Result<(), ProviderError>;
+    fn search(
+        &self,
+        terms: &[SearchTerm],
+        limit: usize,
+    ) -> Result<Vec<RemoteMessageId>, ProviderError>;
 
     /// NFR-23's one path by which a secret reaches an adapter. Not fallible, so not erased.
     fn present_credential(&self, secret: &str);
@@ -118,6 +123,14 @@ where
 
     fn watch(&self, folders: &[RemoteFolderId]) -> Result<(), ProviderError> {
         Adapter::watch(self, folders).map_err(|e| self.erase(&e))
+    }
+
+    fn search(
+        &self,
+        terms: &[SearchTerm],
+        limit: usize,
+    ) -> Result<Vec<RemoteMessageId>, ProviderError> {
+        Adapter::search(self, terms, limit).map_err(|e| self.erase(&e))
     }
 
     fn present_credential(&self, secret: &str) {
@@ -192,6 +205,14 @@ impl Adapter for dyn ErasedAdapter + '_ {
         ErasedAdapter::watch(self, folders)
     }
 
+    fn search(
+        &self,
+        terms: &[SearchTerm],
+        limit: usize,
+    ) -> Result<Vec<RemoteMessageId>, Self::Error> {
+        ErasedAdapter::search(self, terms, limit)
+    }
+
     fn present_credential(&self, secret: &str) {
         ErasedAdapter::present_credential(self, secret);
     }
@@ -254,6 +275,14 @@ impl<A: Adapter + ?Sized> Adapter for Box<A> {
         (**self).watch(folders)
     }
 
+    fn search(
+        &self,
+        terms: &[SearchTerm],
+        limit: usize,
+    ) -> Result<Vec<RemoteMessageId>, Self::Error> {
+        (**self).search(terms, limit)
+    }
+
     fn present_credential(&self, secret: &str) {
         (**self).present_credential(secret);
     }
@@ -272,8 +301,8 @@ mod tests {
     use super::*;
     use crate::capability::{
         ArchiveSemantics, Capabilities, DeltaMechanism, IdStability, JunkReporting,
-        LocationCardinality, Magnitude, PushMechanism, SnippetSource, TagSupport, ThreadOperations,
-        TrashSemantics,
+        LocationCardinality, Magnitude, PushMechanism, ServerSearch, SnippetSource, TagSupport,
+        ThreadOperations, TrashSemantics,
     };
     use core::cell::Cell;
 
@@ -291,7 +320,7 @@ mod tests {
             delta: DeltaMechanism::ChangesQuery,
             push: PushMechanism::EventStream,
             id_stability: IdStability::StableGlobally,
-            server_search: true,
+            server_search: ServerSearch::ALL,
             max_batch_size: Magnitude::Unknown,
             request_budget: Magnitude::Unknown,
             snippet_source: SnippetSource::ProviderSupplied,
@@ -352,6 +381,9 @@ mod tests {
         fn watch(&self, _: &[RemoteFolderId]) -> Result<(), Wire> {
             Err(Wire("the provider said no"))
         }
+        fn search(&self, _: &[SearchTerm], _: usize) -> Result<Vec<RemoteMessageId>, Wire> {
+            Err(Wire("the provider said no"))
+        }
         fn classify(&self, _: &Wire) -> Failure {
             self.classified.set(self.classified.get() + 1);
             self.verdict
@@ -391,11 +423,16 @@ mod tests {
                 .failure,
             ErasedAdapter::apply(&a, &[]).unwrap_err().failure,
             ErasedAdapter::watch(&a, &[]).unwrap_err().failure,
+            ErasedAdapter::search(&a, &[], 1).unwrap_err().failure,
         ];
 
-        assert_eq!(calls.len(), 7, "the six responsibilities, plus watch");
+        assert_eq!(
+            calls.len(),
+            8,
+            "the seven responsibilities, with structure and part counted apart"
+        );
         assert!(calls.iter().all(|f| *f == Failure::Permanent));
-        assert_eq!(a.classified.get(), 7);
+        assert_eq!(a.classified.get(), 8);
     }
 
     #[test]

@@ -330,7 +330,7 @@ pub fn apply_page(
         match change {
             Change::Present { id, provenance } => {
                 let envelope = envelopes.iter().find(|e| e.id == *id);
-                let outcome = upsert(&tx, folder, id, envelope, *provenance, ids)?;
+                let outcome = upsert(&tx, Some(folder), id, envelope, *provenance, ids)?;
                 match outcome {
                     Upsert::Inserted(local) => {
                         report.inserted += 1;
@@ -382,6 +382,72 @@ pub fn apply_page(
     Ok(report)
 }
 
+/// Ingest the envelopes a server-side search found — FR-21 — and say which local identity
+/// each one has.
+///
+/// **No cursor moves.** A search is not a delta: it says a message exists and matches, never
+/// what changed, so it writes rows and nothing about any folder's position. A message already
+/// held is refreshed from its envelope and keeps its identity and its provenance; one not held
+/// is inserted as **discovered**, never delivered — FR-23's new mail is decided by a delta and
+/// only by one, and a search finding a year-old message is not an arrival.
+///
+/// A message lands in every folder its envelope names that this account knows. One naming none
+/// it knows — a folder the enumeration has not reached — is still inserted, with no location,
+/// because the person searched for it and must be able to open it; the delta that reaches the
+/// folder gives it one. Everything is one transaction, so a failed search leaves nothing
+/// half-written.
+///
+/// # Errors
+/// See [`IngestError`].
+pub fn ingest_found(
+    store: &mut Connection,
+    envelopes: &[Envelope],
+    ids: &LocalIdGenerator,
+) -> Result<Vec<(RemoteMessageId, LocalId)>, IngestError> {
+    let tx = store.transaction()?;
+    let mut found = Vec::with_capacity(envelopes.len());
+    for envelope in envelopes {
+        let folders: Vec<i64> = envelope
+            .folders
+            .iter()
+            .filter_map(|remote| folder_local_id(&tx, remote).ok())
+            .collect();
+        let (first, rest) = match folders.split_first() {
+            Some((first, rest)) => (Some(*first), rest),
+            None => (None, &[][..]),
+        };
+        let local = match upsert(
+            &tx,
+            first,
+            &envelope.id,
+            Some(envelope),
+            Provenance::Discovered,
+            ids,
+        )? {
+            Upsert::Inserted(local) => local,
+            Upsert::Updated => tx.query_row(
+                "SELECT id FROM message WHERE remote_id = ?1",
+                params![envelope.id.0],
+                |r| {
+                    let bytes: Vec<u8> = r.get(0)?;
+                    Ok(LocalId::from_bytes(
+                        bytes.as_slice().try_into().unwrap_or([0; 16]),
+                    ))
+                },
+            )?,
+        };
+        for folder in rest {
+            tx.execute(
+                "INSERT OR IGNORE INTO message_location (message_id, folder_id) VALUES (?1, ?2)",
+                params![local.to_bytes().to_vec(), folder],
+            )?;
+        }
+        found.push((envelope.id.clone(), local));
+    }
+    tx.commit()?;
+    Ok(found)
+}
+
 /// Record that a folder's cursor was refused, without touching the cursor itself.
 ///
 /// D-82 puts the folder into `Invalidated`, which is **not a resting state**: NFR-18 forbids
@@ -420,9 +486,11 @@ enum Upsert {
     Updated,
 }
 
+/// `folder` is `None` only for a message a search found in no folder this account knows; a
+/// delta always names the folder it is walking.
 fn upsert(
     tx: &Transaction<'_>,
-    folder: i64,
+    folder: Option<i64>,
     remote: &RemoteMessageId,
     envelope: Option<&Envelope>,
     provenance: Provenance,
@@ -535,10 +603,12 @@ fn upsert(
         )?;
     }
 
-    tx.execute(
-        "INSERT OR IGNORE INTO message_location (message_id, folder_id) VALUES (?1, ?2)",
-        params![local.to_bytes().to_vec(), folder],
-    )?;
+    if let Some(folder) = folder {
+        tx.execute(
+            "INSERT OR IGNORE INTO message_location (message_id, folder_id) VALUES (?1, ?2)",
+            params![local.to_bytes().to_vec(), folder],
+        )?;
+    }
 
     Ok(if existing.is_some() {
         Upsert::Updated

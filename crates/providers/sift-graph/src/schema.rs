@@ -136,6 +136,11 @@ mod tests {
                 Some("message"),
             ),
             ("GET", wire::envelope_target(&message()), Some("message")),
+            (
+                "GET",
+                wire::search_target("quokka from:a@example.invalid", 50),
+                Some("message"),
+            ),
             ("GET", wire::categories_target(&message()), Some("message")),
             ("GET", wire::body_target(&message()), Some("message")),
             ("PATCH", wire::message_target(&message()), None),
@@ -193,10 +198,10 @@ mod tests {
     fn the_committed_list_parses_and_is_the_size_it_says_it_is() {
         assert_eq!(
             endpoints().len(),
-            10,
+            11,
             "the header's count and the list disagree"
         );
-        assert!(ENDPOINTS.contains("endpoints used here: 10"));
+        assert!(ENDPOINTS.contains("endpoints used here: 11"));
         assert_eq!(selections().len(), 3);
     }
 

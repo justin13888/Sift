@@ -1,8 +1,10 @@
-//! The adapter contract: six responsibilities, and nothing more.
+//! The adapter contract: seven responsibilities, and nothing more.
 //!
 //! `docs/mail/provider-model.md` enumerates them and says "nothing more" in as many words.
 //! The list is short on purpose — everything an adapter is *not* asked to do is something
-//! that would otherwise be done four times, differently.
+//! that would otherwise be done four times, differently. The seventh, FR-21's server-side
+//! search, was the last to be named: until it was, nothing above an adapter could ask a
+//! provider to search, and the body of any message nobody had opened was unfindable.
 //!
 //! Notably absent: threading (D-103 assigns local identity), identity joins (D-44 is one
 //! rule serving four consumers), retry and backoff (D-87 puts a stated delay on the wheel
@@ -101,6 +103,31 @@ pub trait Adapter {
     /// A doorbell. It says something changed; it never says what.
     fn watch(&self, folders: &[RemoteFolderId]) -> Result<(), Self::Error>;
 
+    /// 7. Answer a server-side search — FR-21.
+    ///
+    /// **How a query reaches the body of a message nobody has opened.** D-53's backfill does
+    /// not fetch bodies, so the local index holds envelopes for everything and bodies only for
+    /// what was read (D-81); the provider's own index is the only place the rest is searchable.
+    ///
+    /// It takes FR-20's terms rather than a provider query string: the translation is this
+    /// adapter's, and the layers above never write one. Every term passed is one
+    /// [`ServerSearch`](crate::capability::ServerSearch) says this account evaluates — the
+    /// caller applies the rest locally — and an adapter handed a term it did not declare
+    /// **refuses rather than dropping it**, because a dropped term is a wider result set that
+    /// nothing says was widened.
+    ///
+    /// Answers **identifiers only**, at most `limit` of them (L-32), in the provider's own
+    /// order. Envelopes follow through [`Self::fetch_envelopes`] for the ones the store does not
+    /// hold, and bodies never: *Sift MUST NOT fetch whole messages* holds here too.
+    ///
+    /// The query is not retained anywhere by the adapter — privacy's *queries are not
+    /// retained* — and it leaves the process only in the request that carries it.
+    fn search(
+        &self,
+        terms: &[SearchTerm],
+        limit: usize,
+    ) -> Result<Vec<RemoteMessageId>, Self::Error>;
+
     /// Classify a failure this adapter produced.
     ///
     /// **The adapter says what kind; the scheduler says when.** That split is D-87's and it
@@ -139,6 +166,36 @@ pub trait Adapter {
     fn wire_bytes(&self) -> (u64, u64) {
         (0, 0)
     }
+}
+
+/// One of FR-20's terms, as a provider is asked to evaluate it — FR-21.
+///
+/// **Defined here rather than taken from the index crate**, because D-59 forbids an adapter
+/// reaching storage; the application translates its parsed query into this, and the adapter
+/// translates this into whatever its provider accepts. Text is carried as the person typed it
+/// (lowercased where the grammar lowercases it), and escaping it for the wire is the adapter's
+/// job, so nothing typed can become a provider operator.
+///
+/// There is no variant for an operator the grammar does not know. FR-20 keeps such a term as
+/// text, and the application applies it locally rather than guessing what a provider would
+/// make of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchTerm {
+    /// Free text, anywhere in the message.
+    Word(String),
+    /// Words that must be adjacent, in order.
+    Phrase(String),
+    Sender(String),
+    Recipient(String),
+    Subject(String),
+    HasAttachment(bool),
+    Unread(bool),
+    /// A folder, by its semantic kind or its display name, as the person typed it.
+    Location(String),
+    /// Received strictly before, in milliseconds since the epoch.
+    Before(u64),
+    /// Received strictly after, in milliseconds since the epoch.
+    After(u64),
 }
 
 /// What a failure means to the layer that has to decide what happens next.

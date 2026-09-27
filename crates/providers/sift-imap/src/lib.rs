@@ -104,7 +104,14 @@ pub fn capabilities_from(advertised: &Advertised) -> Capabilities {
             // that folder**, which is a cursor invalidation rather than a corruption.
             IdStability::StablePerFolder
         },
-        server_search: true,
+        // The base search command: text, the address and subject headers, read state and
+        // dates. Not attachment presence, which the base command cannot express, and not a
+        // location, because a search runs inside the one folder that is selected.
+        server_search: sift_provider::capability::ServerSearch {
+            attachment: false,
+            location: false,
+            ..sift_provider::capability::ServerSearch::ALL
+        },
         max_batch_size: Magnitude::Unknown,
         request_budget: Magnitude::Unknown,
         // No preview field exists. Derived **only from a body already fetched, never by

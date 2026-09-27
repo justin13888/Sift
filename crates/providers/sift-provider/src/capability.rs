@@ -41,6 +41,8 @@
 
 use sift_foundation::limits::L15_TAG_NAME_CHARS;
 
+use crate::adapter::SearchTerm;
+
 /// How many locations a message can be in at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocationCardinality {
@@ -195,6 +197,104 @@ impl Magnitude {
     }
 }
 
+/// What an account's server-side search can evaluate — FR-21, and the "Server search" row.
+///
+/// **One flag per FR-20 operator, rather than one flag for the whole feature.** The providers
+/// do not agree: one takes every operator Sift's grammar has, another searches mail
+/// properties and has no notion of read state or folder. A single boolean would force the
+/// application to either send a term a provider cannot evaluate — which it silently ignores
+/// or refuses — or to know which provider it is talking to, which D-12 forbids.
+///
+/// A term whose flag is off is **applied locally to what the server returns**, and a report
+/// says so; it is never dropped. Rule 1 holds: a flag that is absent is `false`, which
+/// [`ServerSearch::NONE`] spells, and an account that declares nothing is not asked at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // one per operator, which is the point
+pub struct ServerSearch {
+    /// Free words, anywhere in the message — including its body.
+    pub text: bool,
+    /// A quoted phrase, whose words must be adjacent.
+    pub phrase: bool,
+    pub sender: bool,
+    pub recipient: bool,
+    pub subject: bool,
+    pub attachment: bool,
+    pub unread: bool,
+    pub location: bool,
+    /// Received before and after a date.
+    pub dates: bool,
+}
+
+impl ServerSearch {
+    /// Nothing delegable. The account is not asked.
+    pub const NONE: Self = Self {
+        text: false,
+        phrase: false,
+        sender: false,
+        recipient: false,
+        subject: false,
+        attachment: false,
+        unread: false,
+        location: false,
+        dates: false,
+    };
+
+    /// Every operator FR-20 names.
+    pub const ALL: Self = Self {
+        text: true,
+        phrase: true,
+        sender: true,
+        recipient: true,
+        subject: true,
+        attachment: true,
+        unread: true,
+        location: true,
+        dates: true,
+    };
+
+    /// Whether this account can be asked to search at all.
+    ///
+    /// **Text is the question.** FR-21 exists to reach body text the local index does not
+    /// hold, and a server that can filter on flags but not on words cannot answer it — every
+    /// structured operator is already answered locally over every envelope.
+    #[must_use]
+    pub const fn offered(self) -> bool {
+        self.text
+    }
+
+    /// Whether this account evaluates `term` itself.
+    #[must_use]
+    pub const fn evaluates(self, term: &SearchTerm) -> bool {
+        match term {
+            SearchTerm::Word(_) => self.text,
+            SearchTerm::Phrase(_) => self.phrase,
+            SearchTerm::Sender(_) => self.sender,
+            SearchTerm::Recipient(_) => self.recipient,
+            SearchTerm::Subject(_) => self.subject,
+            SearchTerm::HasAttachment(_) => self.attachment,
+            SearchTerm::Unread(_) => self.unread,
+            SearchTerm::Location(_) => self.location,
+            SearchTerm::Before(_) | SearchTerm::After(_) => self.dates,
+        }
+    }
+
+    /// What two accounts can both delegate — the capability of a selection spanning them.
+    #[must_use]
+    pub const fn intersection(self, other: Self) -> Self {
+        Self {
+            text: self.text && other.text,
+            phrase: self.phrase && other.phrase,
+            sender: self.sender && other.sender,
+            recipient: self.recipient && other.recipient,
+            subject: self.subject && other.subject,
+            attachment: self.attachment && other.attachment,
+            unread: self.unread && other.unread,
+            location: self.location && other.location,
+            dates: self.dates && other.dates,
+        }
+    }
+}
+
 /// Rule 5 — a probed capability, with the fact that it was probed.
 ///
 /// Two absences that must not be stored as the same thing:
@@ -285,7 +385,8 @@ pub struct Capabilities {
     pub delta: DeltaMechanism,
     pub push: PushMechanism,
     pub id_stability: IdStability,
-    pub server_search: bool,
+    /// Which FR-20 operators the provider's own search evaluates — FR-21.
+    pub server_search: ServerSearch,
     /// Q-9. All four adapters currently declare this `Unknown`.
     pub max_batch_size: Magnitude,
     /// Requests per period, which lets D-87 pace *before* a throttle rather than reacting
@@ -413,7 +514,7 @@ mod tests {
                 delta: DeltaMechanism::ChangesQuery,
                 push: PushMechanism::EventStream,
                 id_stability: IdStability::StableGlobally,
-                server_search: true,
+                server_search: ServerSearch::ALL,
                 max_batch_size: Magnitude::Unknown,
                 request_budget: Magnitude::Unknown,
                 snippet_source: SnippetSource::ProviderSupplied,
@@ -433,7 +534,12 @@ mod tests {
                 delta: DeltaMechanism::DeltaLink,
                 push: PushMechanism::PollOnly,
                 id_stability: IdStability::UnstableOnMove,
-                server_search: true,
+                server_search: ServerSearch {
+                    unread: false,
+                    location: false,
+                    dates: false,
+                    ..ServerSearch::ALL
+                },
                 max_batch_size: Magnitude::Unknown,
                 request_budget: Magnitude::Unknown,
                 snippet_source: SnippetSource::ProviderSupplied,
@@ -453,7 +559,10 @@ mod tests {
                 delta: DeltaMechanism::HistoryCursor,
                 push: PushMechanism::IdleOnePerConnection,
                 id_stability: IdStability::StableGlobally,
-                server_search: true,
+                server_search: ServerSearch {
+                    location: false,
+                    ..ServerSearch::ALL
+                },
                 max_batch_size: Magnitude::Unknown,
                 request_budget: Magnitude::Unknown,
                 snippet_source: SnippetSource::ProviderSupplied,
@@ -475,7 +584,11 @@ mod tests {
                 delta: DeltaMechanism::FullScan,
                 push: PushMechanism::PollOnly,
                 id_stability: IdStability::StablePerFolder,
-                server_search: true,
+                server_search: ServerSearch {
+                    attachment: false,
+                    location: false,
+                    ..ServerSearch::ALL
+                },
                 max_batch_size: Magnitude::Unknown,
                 request_budget: Magnitude::Unknown,
                 snippet_source: SnippetSource::ClientDerived,
@@ -732,5 +845,36 @@ mod tests {
             declared::jmap().snippet_source,
             SnippetSource::ProviderSupplied
         );
+    }
+
+    #[test]
+    fn server_search_is_declared_per_operator_and_absent_means_not_asked() {
+        // FR-21 through D-12: which operators a server evaluates is a capability, so the
+        // application asks the capability rather than the provider. A term whose flag is off
+        // is applied locally, never sent and never dropped.
+        let graph = declared::graph().server_search;
+        assert!(graph.offered());
+        assert!(graph.evaluates(&SearchTerm::Word("invoice".into())));
+        assert!(!graph.evaluates(&SearchTerm::Unread(true)));
+        assert!(!graph.evaluates(&SearchTerm::Before(0)));
+        assert!(
+            declared::jmap()
+                .server_search
+                .evaluates(&SearchTerm::Location("inbox".into()))
+        );
+
+        // Rule 1: nothing declared is nothing offered, and the default is nothing.
+        assert!(!ServerSearch::NONE.offered());
+        assert_eq!(ServerSearch::default(), ServerSearch::NONE);
+        // Flags without text cannot answer the question FR-21 exists for.
+        let flags_only = ServerSearch {
+            text: false,
+            ..ServerSearch::ALL
+        };
+        assert!(!flags_only.offered());
+
+        // A selection spanning two accounts can delegate what both can.
+        let both = ServerSearch::ALL.intersection(graph);
+        assert_eq!(both, graph);
     }
 }

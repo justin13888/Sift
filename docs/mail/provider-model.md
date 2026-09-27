@@ -29,14 +29,24 @@ This is the only way the abstraction survives contact with a fifth provider.
 | Delta mechanism | monotonic history cursor; OData delta link; JMAP changes; QRESYNC; full scan | How [sync](sync-engine.md) discovers change |
 | Push mechanism | event stream; IDLE; NOTIFY; poll only | How sync learns that change exists |
 | ID stability | stable globally; stable per folder; unstable on move | Whether a remote identifier may be used as a join key |
-| Server search | per-provider capability set | What can be delegated to the server — see [search](../storage/search.md) |
+| Server search | per FR-20 operator: free text, phrase, sender, recipient, subject, attachment presence, unread state, location, dates — each evaluated or not | What can be delegated to the server — see [search](../storage/search.md). An account that cannot evaluate free text is not asked at all, because reaching unindexed body text is what FR-21 is for. An operator the account does not evaluate is **applied locally to what the server returns**, and the search says so; it is never sent and never dropped |
 | Maximum batch size | integer, or unknown | Batching limit for bulk operations. Magnitude-valued: unknown means "plan conservatively", never "unsupported" — see the growth rules below |
 | Request budget | integer with a period, or unknown | The rate the provider will accept before throttling. Magnitude-valued, so unknown means "plan conservatively" — see D-87 below and the growth rules |
 | Snippet source | provider-supplied; client-derived; none | Where FR-6's list snippet comes from. Three providers return a preview with the envelope and one does not — see [sync engine](sync-engine.md) |
 
 Adapter responsibilities are: enumerate folders, produce a delta against a cursor, fetch envelopes,
-**describe a message's structure and fetch a specific part of it**, apply a batch of mutations, and expose
-a change-notification stream. Nothing more.
+**describe a message's structure and fetch a specific part of it**, apply a batch of mutations, expose
+a change-notification stream, and **answer a server-side search with message identifiers**. Nothing more.
+
+The seventh was absent until FR-21 was built, and its absence meant nothing above an adapter could ask a
+provider to search — so the body of any message nobody had opened was unfindable, which for a new account
+is nearly every body ([D-81](../storage/search.md)). It takes Sift's parsed terms rather than a provider
+query string, because the translation is the adapter's and a query string written above the adapter layer
+is provider knowledge where D-12 forbids it. It returns identifiers only, bounded by L-32 in
+[limits](../limits.md): envelopes for the ones the store does not hold follow through the third
+responsibility, and bodies never, because *Sift MUST NOT fetch whole messages* holds for a search as much
+as for a backfill. Handed a term its declared capability does not cover, an adapter refuses rather than
+dropping it.
 
 The fourth was previously stated as "fetch a specific body part" alone, which named the second half of an
 operation and not the first. **A caller cannot ask for a part without knowing which parts exist**, and

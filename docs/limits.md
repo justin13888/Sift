@@ -2,7 +2,7 @@
 
 Every numeric bound Sift enforces at runtime, in one place.
 
-**Owns:** L-1 through L-31.
+**Owns:** L-1 through L-32.
 
 **"Enforces at runtime" is the boundary, and it is narrower than the old wording.** This page previously
 claimed every numeric bound in the project, which reached two populations it does not own and should not.
@@ -86,6 +86,7 @@ Asserted by the [resource broker](architecture/resource-broker.md), before a dec
 | **L-23** | Concurrent provider connections per installation | 16 | The budget [scheduling](runtime/scheduling.md) names and does not number. It is that document's own arithmetic — five accounts watching three folders each — plus one for on-demand work, and it is what decides how many folders may be watched at all when a provider cannot watch several over one connection |
 | **L-26** | Envelopes fetched per backfill page | 500 | The page size [D-53](mail/sync-engine.md)'s resumable backfill requires and does not state. It is the granularity a resume rewinds to, so it trades round trips against work repeated after an interruption |
 | **L-29** | Concurrent resource loads per rendered document | 8 | The bound [D-91](architecture/resource-broker.md) requires so that one message with several hundred fetching positions cannot saturate the pool the store, the queue and search share. Requests beyond it queue rather than fail |
+| **L-32** | Messages one account's server-side search returns per query | 50 | The result bound FR-21 in [search](storage/search.md) needs and did not state. Each server hit the store does not hold costs one envelope fetch and one ingested row, so this bounds the bytes and the rows a single search can add; bodies are never fetched for it. Large enough to fill a screen of results after the merge; small enough that a one-word query on a large mailbox is one short request rather than a backfill. A search that reaches the bound says the server may hold more, rather than implying it was exhaustive |
 
 ## Storage and display limits
 

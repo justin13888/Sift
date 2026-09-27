@@ -109,6 +109,23 @@ impl Tier {
             && matches!(self, Self::Unrestricted | Self::Conservative)
     }
 
+    /// Whether a server-side search may be sent — FR-21, which puts it under this table.
+    ///
+    /// **Yes wherever a person may fetch on demand**: it is one bounded request they asked for
+    /// (L-32), which NFR-31 excludes from Minimal's steady-state figure as it excludes opening
+    /// a message. No while paused, because pause stops fetching and a search is a fetch; no
+    /// behind a captive portal, where D-96's one reattempt belongs to the account's own next
+    /// operation rather than to a search; and no with no path, which NFR-38 makes zero
+    /// attempts of any kind. A search refused here says so rather than returning a silently
+    /// smaller set.
+    #[must_use]
+    pub const fn permits_server_search(self) -> bool {
+        matches!(
+            self,
+            Self::Unrestricted | Self::Conservative | Self::Minimal
+        )
+    }
+
     /// Whether any connection may be attempted.
     #[must_use]
     pub const fn may_connect(self) -> bool {
@@ -390,5 +407,18 @@ mod tests {
         a.record(1, LinkClass::Cellular, 100);
         assert!(a.over_cap(1, Some(100)));
         assert!(!a.over_cap(1, None), "an account with no cap was capped");
+    }
+
+    #[test]
+    fn a_server_search_goes_wherever_an_on_demand_fetch_does_and_nowhere_else() {
+        // FR-21 puts server search under this table. It is a request a person made, so the
+        // metered tiers allow it; pause stops fetching, and neither offline state may spend
+        // an attempt on it — NFR-38 says zero, and D-96's reattempt is not a search's.
+        for tier in [Tier::Unrestricted, Tier::Conservative, Tier::Minimal] {
+            assert!(tier.permits_server_search(), "{tier:?}");
+        }
+        for tier in [Tier::OfflinePortal, Tier::OfflineNoPath, Tier::Paused] {
+            assert!(!tier.permits_server_search(), "{tier:?}");
+        }
     }
 }
