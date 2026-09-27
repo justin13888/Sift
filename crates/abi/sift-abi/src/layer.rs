@@ -26,7 +26,7 @@
 //! run twice or run after shutdown resolves to nothing instead of to freed memory.
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 
 use sift_session::Session;
 
@@ -122,6 +122,11 @@ pub struct SiftInit {
 /// The layer, as one process holds it.
 pub(crate) struct Layer {
     pub(crate) session: Mutex<Session>,
+    /// Signalled whenever a job lets go of the session — D-122.
+    ///
+    /// A call that needs a provider waits on this, with the session released, until no
+    /// account's adapter is lent; see [`Layer::session_settled`].
+    pub(crate) returned: Condvar,
     /// D-67's seven, registered **once** and unregistered only at shutdown.
     ///
     /// Held from initialization rather than at first use because a host callback has no
@@ -226,7 +231,74 @@ pub(crate) struct Layer {
     pub(crate) live: Mutex<bool>,
 }
 
+/// The session, taken for one held step at a time — D-122.
+///
+/// What a job that reaches a provider is handed instead of a guard held for its whole walk:
+/// every step takes the lock and lets go of it, so a round trip is made with it released and
+/// a gesture on the shell's loop waits for a store write rather than for a provider.
+pub(crate) struct Held<'a> {
+    layer: &'a Layer,
+    /// Whether the first step waits for every lent adapter to come back first — for a call on
+    /// the shell's loop that would otherwise find its account busy with the worker's job.
+    settle_first: bool,
+}
+
+impl<'a> Held<'a> {
+    /// For the worker's jobs, which are the ones that lend: every step takes the lock as it is.
+    pub(crate) fn new(layer: &'a Layer) -> Self {
+        Self {
+            layer,
+            settle_first: false,
+        }
+    }
+
+    /// For a call that reaches a provider from the shell's loop: its first step waits, with the
+    /// session released, for the job in flight to end — [`Layer::session_settled`] — and the
+    /// rest take the lock as it is, because by then the adapter that is out is its own.
+    pub(crate) fn after_settling(layer: &'a Layer) -> Self {
+        Self {
+            layer,
+            settle_first: true,
+        }
+    }
+}
+
+impl sift_app::Locked for Held<'_> {
+    fn with<R>(&mut self, step: impl FnOnce(&mut sift_app::App) -> R) -> Option<R> {
+        let out = {
+            let mut session = if std::mem::take(&mut self.settle_first) {
+                self.layer.session_settled().ok()?
+            } else {
+                self.layer.session.lock().ok()?
+            };
+            step(session.app_mut())
+        };
+        // After every step rather than only the last: a step is where an adapter comes back,
+        // and a waiter re-checks for itself.
+        self.layer.returned.notify_all();
+        Some(out)
+    }
+}
+
 impl Layer {
+    /// The session, once no account's adapter is out — for a call that needs a provider.
+    ///
+    /// **Waits for the job in flight, not only its current round trip.** A job borrows an
+    /// account's adapter for its whole length — a sync's turn, every page of every watched
+    /// folder up to its cap, or a flush's one batch — and lets go of the session for each round
+    /// trip, so a call that found the adapter out would otherwise have to be refused. This
+    /// waits with the session released, which is what lets the job reach its held steps and,
+    /// at its last, give the adapter back. The lend spans the job rather than one round trip
+    /// because a folder's cursor is read before a page is asked for and written after it, and
+    /// nothing else may move it in between (D-122). A call that needs no provider takes the session directly
+    /// and never waits here.
+    pub(crate) fn session_settled(&self) -> Result<MutexGuard<'_, Session>, ()> {
+        let session = self.session.lock().map_err(|_| ())?;
+        self.returned
+            .wait_while(session, |s| s.app().any_lent())
+            .map_err(|_| ())
+    }
+
     /// Run `call` — which reaches the shell — only if the layer has not been shut down, and
     /// keep it from being shut down until `call` returns.
     ///

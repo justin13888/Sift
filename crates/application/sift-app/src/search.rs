@@ -482,6 +482,11 @@ impl App {
                  already holds was searched there."
             )
         };
+        // A lent adapter is busy rather than missing, and reconnecting it would be a second
+        // conversation with the provider — D-122.
+        if self.account(name)?.lent {
+            return Ok(Err(failed("it is already talking to its provider")));
+        }
         // A restored account is reconnected the way a sync reconnects it: this is already a
         // network call, and a launch that reconnected every account up front would be one that
         // waits on the network.
@@ -1624,6 +1629,47 @@ mod tests {
             report.caveats
         );
         assert!(report.caveats[0].contains("only for messages you have opened"));
+    }
+
+    #[test]
+    fn an_account_whose_adapter_is_lent_is_not_reconnected_around_and_says_so() {
+        // D-122: a job has the adapter out. The server half is skipped as busy rather than
+        // opening a second conversation by reconnecting, and the report names why.
+        let mut app = synced();
+        let account = app.account("mail").unwrap();
+        let adapter = account
+            .adapter
+            .take()
+            .expect("a synced account has its adapter");
+        account.lent = true;
+        let before = held(&mut app);
+
+        let report = app.search_with_server("quokka", None, 20).unwrap();
+        assert!(report.hits.is_empty());
+        assert_eq!(held(&mut app), before, "a lent account was asked");
+        assert!(
+            report
+                .caveats
+                .iter()
+                .any(|c| c.contains("already talking to its provider")),
+            "{:?}",
+            report.caveats
+        );
+        let account = app.account("mail").unwrap();
+        assert!(
+            account.adapter.is_none() && account.lent,
+            "a lent adapter was reconnected around"
+        );
+
+        // And once it is back, the same search reaches the server.
+        account.adapter = Some(adapter);
+        account.lent = false;
+        let report = app.search_with_server("quokka", None, 20).unwrap();
+        assert!(
+            report.hits.iter().any(|h| h.source == Source::Server),
+            "{:?}",
+            report.caveats
+        );
     }
 
     #[test]
