@@ -10,8 +10,9 @@
 //! # The layout
 //!
 //! ```text
-//! offset 0    64 bytes   the crypto header: magic, format version, key id, counter high-water
-//! offset 64   88 bytes   the sealed meta block: the file's exact logical length
+//! offset 0    64 bytes   the crypto header: magic, format version, key id, counter high-water,
+//!                        and the retiring generation while a key rotation is in progress
+//! offset 64  88 bytes   the sealed meta block: the file's exact logical length
 //! offset 152  4120 each  sealed blocks, one per 4096 bytes of logical file
 //! ```
 //!
@@ -35,6 +36,16 @@
 //! issuing any of them**. A crash then leaves the mark ahead of reality, which wastes counters;
 //! the alternative leaves it behind, which reuses them.
 //!
+//! # Key rotation is lazy, per file
+//!
+//! D-22: a rotation installs a new key and pages are re-sealed under it as they are next written.
+//! [`present_rotating_key`] lends both generations; a file still under the old key starts its
+//! rotation at its next header write, recording the counter through which the old key sealed.
+//! Because the counter only rises, that one number places every page in its generation — see
+//! `sift_crypto::page::Retiring`. [`generations`] counts, from disk and without a key, how many
+//! pages each generation still carries, and [`forget_retired`] strikes the old generation from
+//! the header once it carries none — the step before its key is destroyed.
+//!
 //! # Three pragmas are load-bearing rather than advisory
 //!
 //! - `locking_mode=EXCLUSIVE`, because it is what removes the `-shm` file. In shared mode the
@@ -48,8 +59,8 @@
 //! somebody set them, because each one fails silently and none of them fails a test.
 
 use rusqlite::ffi;
-use sift_crypto::page::{Header, KeyId, PageCipher, PageKey};
-use std::collections::HashMap;
+use sift_crypto::page::{Header, KeyId, PageCipher, PageKey, Retiring};
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -76,14 +87,22 @@ const RESERVATION: u64 = 1 << 20;
 /// The VFS's name, as SQLite knows it.
 pub const VFS_NAME: &str = "sift-sealed";
 
+/// What one database was presented with: its current key, and — part-way through D-22's
+/// rotation — the key being retired.
+struct Presented {
+    key: PageKey,
+    key_id: KeyId,
+    retiring: Option<(PageKey, KeyId)>,
+}
+
 /// Keys, by the path of the database they belong to.
 ///
 /// A URI parameter would be the obvious channel and is the wrong one: it puts key material in a
 /// connection string, which is the kind of value that ends up in a log or a crash dump — and
 /// NFR-23 keeps credentials out of both.
-static KEYS: OnceLock<Mutex<HashMap<PathBuf, (PageKey, KeyId)>>> = OnceLock::new();
+static KEYS: OnceLock<Mutex<HashMap<PathBuf, Presented>>> = OnceLock::new();
 
-fn keys() -> &'static Mutex<HashMap<PathBuf, (PageKey, KeyId)>> {
+fn keys() -> &'static Mutex<HashMap<PathBuf, Presented>> {
     KEYS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -95,8 +114,40 @@ fn keys() -> &'static Mutex<HashMap<PathBuf, (PageKey, KeyId)>> {
 /// The identifier travels with the key rather than being derived here, because D-106 derives
 /// both from the account key together and a second derivation is a second answer.
 pub fn present_key(database: &Path, key: PageKey, key_id: KeyId) {
+    present(database, key, key_id, None);
+}
+
+/// Lend both generations of a rotating key to the VFS for the duration of an open.
+///
+/// D-22's rotation is lazy. A file still wholly under the retiring key starts its rotation at
+/// its first write: from then on every page is sealed under `key`, and the header records the
+/// counter through which the retiring key sealed, so both generations stay readable while any
+/// page carries the old identifier. A file already rotating opens its old pages under
+/// `retiring`.
+///
+/// A file whose previous rotation has not been retired — whose header already names a retiring
+/// generation that still has pages — is refused rather than given a third: the header has room
+/// for two generations, and a page under the oldest would become unreadable.
+pub fn present_rotating_key(
+    database: &Path,
+    key: PageKey,
+    key_id: KeyId,
+    retiring: PageKey,
+    retiring_id: KeyId,
+) {
+    present(database, key, key_id, Some((retiring, retiring_id)));
+}
+
+fn present(database: &Path, key: PageKey, key_id: KeyId, retiring: Option<(PageKey, KeyId)>) {
     if let Ok(mut map) = keys().lock() {
-        map.insert(canonical(database), (key, key_id));
+        map.insert(
+            canonical(database),
+            Presented {
+                key,
+                key_id,
+                retiring,
+            },
+        );
     }
 }
 
@@ -144,9 +195,14 @@ fn database_of(name: &Path) -> PathBuf {
     canonical(Path::new(base))
 }
 
-/// The identifier a database is registered under, or `None` if it is not.
-fn key_id_of(database: &Path) -> Option<KeyId> {
-    keys().lock().ok()?.get(database).map(|(_, id)| *id)
+/// The identifiers a database is registered under — current, and retiring if any — or `None`
+/// if it is not registered.
+fn key_ids_of(database: &Path) -> Option<(KeyId, Option<KeyId>)> {
+    keys()
+        .lock()
+        .ok()?
+        .get(database)
+        .map(|p| (p.key_id, p.retiring.as_ref().map(|(_, id)| *id)))
 }
 
 /// Build the cipher **without the key leaving the registry**.
@@ -154,10 +210,21 @@ fn key_id_of(database: &Path) -> Option<KeyId> {
 /// [`PageKey`] is deliberately neither `Copy` nor `Clone` and zeroes itself on drop: key
 /// material that can be copied freely is key material that ends up somewhere NFR-23 forbids.
 /// So the cipher is constructed under the lock, from a borrow, and only the cipher travels.
+///
+/// `header` names the current key and any retiring generation. The retiring key is lent to the
+/// cipher only where the header's retiring generation is the one this database was presented
+/// with; otherwise the cipher recognises that generation's pages and refuses them.
 fn cipher_for(database: &Path, header: &Header) -> Option<PageCipher> {
     let map = keys().lock().ok()?;
-    let (key, _) = map.get(database)?;
-    Some(PageCipher::new(key, header))
+    let presented = map.get(database)?;
+    let retiring = match (&presented.retiring, header.retiring) {
+        (Some((key, id)), Some(r)) if *id == r.key_id => Some(key),
+        _ => None,
+    };
+    Some(match retiring {
+        Some(old) => PageCipher::with_retiring(&presented.key, header, old),
+        None => PageCipher::new(&presented.key, header),
+    })
 }
 
 /// What this layer keeps for one open file.
@@ -380,7 +447,7 @@ unsafe fn sealed_state(
         return Ok(std::ptr::null_mut());
     };
     let database = database_of(Path::new(path));
-    let Some(key_id) = key_id_of(&database) else {
+    let Some((key_id, retiring_id)) = key_ids_of(&database) else {
         return Ok(std::ptr::null_mut());
     };
 
@@ -404,7 +471,9 @@ unsafe fn sealed_state(
         let mut bytes = [0u8; sift_crypto::page::HEADER_LEN];
         // SAFETY: as above.
         unsafe { raw_read(inner, &mut bytes, 0) }.map_err(|_| ffi::SQLITE_IOERR_READ)?;
-        let header = Header::decode(&bytes).map_err(|_| ffi::SQLITE_NOTADB)?;
+        let on_disk = Header::decode(&bytes).map_err(|_| ffi::SQLITE_NOTADB)?;
+        // SAFETY: as above.
+        let header = unsafe { rotate(inner, on_disk, key_id, retiring_id, size) }?;
         let cipher = cipher_for(&database, &header).ok_or(ffi::SQLITE_NOTADB)?;
 
         let mut meta = vec![0u8; META_BLOCK as usize];
@@ -426,6 +495,78 @@ unsafe fn sealed_state(
         }
     };
     Ok(Box::into_raw(Box::new(state)))
+}
+
+/// Which generations an existing file opens under, given the header on disk and the keys it
+/// was presented with.
+///
+/// - **Under the current key:** opens as it is, including any rotation already in progress.
+/// - **Under the key being retired:** D-22's rotation begins. The header now names the current
+///   key and records the on-disk high-water mark as the retiring key's boundary. Nothing is
+///   written here: the next header write carries it, and [`reserve`] syncs that header before
+///   the first counter above the boundary is issued, so no page is ever sealed under the new
+///   key while the disk still says the old one.
+/// - **Under neither:** refused. A file under a key it was not presented with would fail
+///   authentication at the meta block anyway; refusing on the identifier says why.
+unsafe fn rotate(
+    inner: *mut ffi::sqlite3_file,
+    on_disk: Header,
+    key_id: KeyId,
+    retiring_id: Option<KeyId>,
+    size: i64,
+) -> Result<Header, c_int> {
+    if on_disk.key_id == key_id {
+        return Ok(on_disk);
+    }
+    if Some(on_disk.key_id) != retiring_id {
+        return Err(ffi::SQLITE_NOTADB);
+    }
+    // A third generation would leave pages under the oldest with nowhere to be opened from.
+    // Allowed only where that generation no longer carries any page.
+    if let Some(previous) = on_disk.retiring {
+        let mut left = 0u64;
+        // SAFETY: the caller's delegate is live.
+        unsafe {
+            each_counter(inner, size, |counter| {
+                if on_disk.generation_of(counter) == Some(previous.key_id) {
+                    left += 1;
+                }
+            })
+        }?;
+        if left > 0 {
+            return Err(ffi::SQLITE_NOTADB);
+        }
+    }
+    Ok(Header {
+        key_id,
+        retiring: Some(Retiring {
+            key_id: on_disk.key_id,
+            through: on_disk.counter_high_water,
+        }),
+        ..on_disk
+    })
+}
+
+/// Every sealed unit's stored counter — the meta block's, then each block's — read through the
+/// delegate without a key. The counter is in the clear by design; see [`Retiring`].
+unsafe fn each_counter(
+    inner: *mut ffi::sqlite3_file,
+    size: i64,
+    mut visit: impl FnMut(u64),
+) -> Result<(), c_int> {
+    let mut at = CRYPTO_HEADER;
+    while at + 8 <= size {
+        let mut counter = [0u8; 8];
+        // SAFETY: the delegate is live, and the read is within the file.
+        unsafe { raw_read(inner, &mut counter, at) }.map_err(|_| ffi::SQLITE_IOERR_READ)?;
+        visit(u64::from_be_bytes(counter));
+        at = if at == CRYPTO_HEADER {
+            DATA_START
+        } else {
+            at + SEALED_BLOCK as i64
+        };
+    }
+    Ok(())
 }
 
 unsafe extern "C" fn x_close(file: *mut ffi::sqlite3_file) -> c_int {
@@ -760,8 +901,9 @@ unsafe fn reserve(inner: *mut ffi::sqlite3_file, state: &mut Sealed) -> Result<(
         return Ok(());
     }
     let next = state.reserved.max(state.cipher.high_water()) + RESERVATION;
-    let mut header = Header::new(state.cipher.key_id());
-    header.counter_high_water = next;
+    // From the cipher, so the retiring generation is carried into every header written: one
+    // written without it would, after a restart, route every old page to the new key.
+    let header = state.cipher.header(next);
     // SAFETY: the delegate is live for the life of the file.
     unsafe { raw_write(inner, &header.encode(), 0) }?;
     // SAFETY: as above. Synced, because a mark in the page cache is a mark that is not on disk
@@ -782,8 +924,7 @@ unsafe fn flush_meta(inner: *mut ffi::sqlite3_file, state: &mut Sealed) -> Resul
     // SAFETY: the delegate is live for the life of the file.
     unsafe { reserve(inner, state) }?;
 
-    let mut header = Header::new(state.cipher.key_id());
-    header.counter_high_water = state.reserved;
+    let header = state.cipher.header(state.reserved);
     // SAFETY: as above.
     unsafe { raw_write(inner, &header.encode(), 0) }?;
 
@@ -795,4 +936,154 @@ unsafe fn flush_meta(inner: *mut ffi::sqlite3_file, state: &mut Sealed) -> Resul
         .map_err(|_| ffi::SQLITE_IOERR_WRITE)?;
     // SAFETY: as above.
     unsafe { raw_write(inner, &sealed, CRYPTO_HEADER) }
+}
+
+// ---------------------------------------------------------------------------------------
+// Rotation, read from disk.
+//
+// These read the files directly, without any key and without the engine: which generation
+// sealed a page is its counter's business, and the counter is in the clear. They are for a
+// database that is **closed** — the moment D-22's retirement is decided — so that what they
+// read is what the engine left on disk rather than a page it is part-way through rewriting.
+// ---------------------------------------------------------------------------------------
+
+/// The files one database is sealed across: itself, its write-ahead log, its rollback journal.
+fn files_of(database: &Path) -> [PathBuf; 3] {
+    let with = |suffix: &str| {
+        let mut p = database.as_os_str().to_owned();
+        p.push(suffix);
+        PathBuf::from(p)
+    };
+    [database.to_path_buf(), with("-wal"), with("-journal")]
+}
+
+/// One sealed file's header, or `None` where the file does not exist or holds no header yet —
+/// a file SQLite opened and never wrote to.
+fn header_of(file: &std::fs::File) -> std::io::Result<Option<Header>> {
+    use std::os::unix::fs::FileExt as _;
+    let len = file.metadata()?.len();
+    if len < sift_crypto::page::HEADER_LEN as u64 {
+        return Ok(None);
+    }
+    let mut bytes = [0u8; sift_crypto::page::HEADER_LEN];
+    file.read_exact_at(&mut bytes, 0)?;
+    Header::decode(&bytes).map(Some).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("not a sealed file: {e:?}"),
+        )
+    })
+}
+
+fn open_if_present(path: &Path) -> std::io::Result<Option<std::fs::File>> {
+    match std::fs::File::open(path) {
+        Ok(f) => Ok(Some(f)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The headers of a database's sealed files, read without a key.
+///
+/// Cheap — one read per file — which is why an open consults this first and pays for
+/// [`generations`] only when a header names a key it was not given.
+///
+/// # Errors
+/// A file could not be read, or is not a sealed file.
+pub fn headers(database: &Path) -> std::io::Result<Vec<Header>> {
+    let mut out = Vec::new();
+    for path in files_of(database) {
+        if let Some(file) = open_if_present(&path)?
+            && let Some(header) = header_of(&file)?
+        {
+            out.push(header);
+        }
+    }
+    Ok(out)
+}
+
+/// How many sealed units — each file's meta block and every data block — each key generation
+/// carries, across a database's files.
+///
+/// **This is the count D-22's retirement waits on**: a key is destroyed only once it carries
+/// none. Each file is synced before it is read, so a count of zero describes what is durable
+/// rather than what is in a cache a power cut could discard.
+///
+/// It reads every block's counter — eight bytes per block — so it costs a pass over the file's
+/// block index, never a decryption. The database MUST be closed; see the section comment.
+///
+/// # Errors
+/// A file could not be synced or read, or is not a sealed file.
+pub fn generations(database: &Path) -> std::io::Result<BTreeMap<KeyId, u64>> {
+    use std::os::unix::fs::FileExt as _;
+    let mut out = BTreeMap::new();
+    for path in files_of(database) {
+        let Some(file) = open_if_present(&path)? else {
+            continue;
+        };
+        let Some(header) = header_of(&file)? else {
+            continue;
+        };
+        file.sync_all()?;
+        let size = i64::try_from(file.metadata()?.len()).unwrap_or(i64::MAX);
+        let mut at = CRYPTO_HEADER;
+        while at + 8 <= size {
+            let mut counter = [0u8; 8];
+            file.read_exact_at(&mut counter, u64::try_from(at).unwrap_or(0))?;
+            if let Some(id) = header.generation_of(u64::from_be_bytes(counter)) {
+                *out.entry(id).or_insert(0) += 1;
+            }
+            at = if at == CRYPTO_HEADER {
+                DATA_START
+            } else {
+                at + SEALED_BLOCK as i64
+            };
+        }
+    }
+    Ok(out)
+}
+
+/// Strike a retired generation from the headers of a database's files, once no page carries it.
+///
+/// The last step of D-22's rotation before the key itself is destroyed: after this, the files
+/// name only their current key, so the next rotation starts from one generation rather than
+/// being refused as a third. It is also the step that must come **before** destroying the key
+/// — a crash between the two leaves a key nothing needs, never a header naming a key nothing
+/// holds.
+///
+/// Rewrites only the clear header, which carries no secret; no key is needed.
+///
+/// # Errors
+/// [`std::io::ErrorKind::InvalidInput`] where a page still carries `retired`, and any failure to
+/// read, write or sync a file. The database MUST be closed.
+pub fn forget_retired(database: &Path, retired: KeyId) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt as _;
+    let left = generations(database)?.get(&retired).copied().unwrap_or(0);
+    if left > 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{left} sealed units still carry the retiring key"),
+        ));
+    }
+    for path in files_of(database) {
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        let Some(mut header) = header_of(&file)? else {
+            continue;
+        };
+        if header.retiring.map(|r| r.key_id) != Some(retired) {
+            continue;
+        }
+        header.retiring = None;
+        file.write_all_at(&header.encode(), 0)?;
+        file.sync_all()?;
+    }
+    Ok(())
 }

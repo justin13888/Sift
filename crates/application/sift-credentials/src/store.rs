@@ -48,6 +48,15 @@ pub enum Item {
     /// unreadable, which is checkable. It is in `ALL`, so the enumeration erasure walks
     /// already covers it.
     DatabaseKey,
+    /// The previous [`DatabaseKey`](Self::DatabaseKey), held while D-22's lazy rotation still
+    /// has pages sealed under it.
+    ///
+    /// Durable for the same reason the superseded token pair is: a key held only in memory
+    /// would not survive the restart that a half re-sealed store has to be readable across. It
+    /// is destroyed only once no page carries its identifier. It is in `ALL`, so FR-4's
+    /// erasure destroys it along with the current key — an account removed mid-rotation leaves
+    /// neither generation readable.
+    RetiringDatabaseKey,
 }
 
 impl Item {
@@ -58,6 +67,7 @@ impl Item {
         Self::SupersededAccess,
         Self::SupersededRefresh,
         Self::DatabaseKey,
+        Self::RetiringDatabaseKey,
     ];
 
     #[must_use]
@@ -68,6 +78,7 @@ impl Item {
             Self::SupersededAccess => "superseded-access",
             Self::SupersededRefresh => "superseded-refresh",
             Self::DatabaseKey => "database-key",
+            Self::RetiringDatabaseKey => "retiring-database-key",
         }
     }
 }
@@ -362,13 +373,14 @@ mod tests {
                 | Item::Refresh
                 | Item::SupersededAccess
                 | Item::SupersededRefresh
-                | Item::DatabaseKey => true,
+                | Item::DatabaseKey
+                | Item::RetiringDatabaseKey => true,
             };
             assert!(covered);
         }
         assert_eq!(
             Item::ALL.len(),
-            5,
+            6,
             "a variant was added to the enum without joining the enumeration erasure walks"
         );
         let mut names: Vec<&str> = Item::ALL.iter().map(|i| i.name()).collect();
@@ -401,6 +413,18 @@ mod tests {
         // crash between receiving a new pair and using it would leave the account with a
         // token the provider has already invalidated and no way back.
         assert!(Item::ALL.contains(&Item::SupersededRefresh));
+    }
+
+    #[test]
+    fn the_retiring_key_is_durable_and_erased_with_the_account() {
+        // D-22: a half re-sealed store must be readable across a restart, so the retiring key
+        // cannot live only in memory. FR-4: an account removed mid-rotation must leave neither
+        // generation, so erasure's enumeration covers it.
+        assert!(Item::ALL.contains(&Item::RetiringDatabaseKey));
+        assert_ne!(
+            key_for(AccountId::from_u128(3), Item::RetiringDatabaseKey),
+            key_for(AccountId::from_u128(3), Item::DatabaseKey)
+        );
     }
 
     #[cfg(target_os = "macos")]

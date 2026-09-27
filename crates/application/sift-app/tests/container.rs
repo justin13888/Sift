@@ -395,3 +395,152 @@ fn be(bytes: &[u8]) -> u128 {
     out[16 - n..].copy_from_slice(&bytes[..n]);
     u128::from_be_bytes(out)
 }
+
+// ---------------------------------------------------------------------------------------
+// D-22: lazy key rotation, from the credential store down to the pages.
+// ---------------------------------------------------------------------------------------
+
+/// The whole lifecycle: begin, a restart with both generations held, the old key kept while any
+/// page carries it, and destroyed — from the credential store — only once none does.
+#[test]
+fn a_rotated_key_is_retired_from_the_credential_store_only_once_no_page_carries_it() {
+    use sift_app::container::{account_keys, account_secret, begin_account_key_rotation};
+    use sift_store::account::{Account, AccountPaths};
+
+    let dir = scratch("rotation");
+    let store = InMemory::default();
+    let id = AccountId::from_u128(0x0107_0107);
+    let paths = AccountPaths::under(&dir, id);
+    let old = account_secret(&store, id).expect("a key");
+    {
+        let a = Account::open_sealed(&paths, id, &old).expect("open");
+        for i in 0..200 {
+            a.store
+                .execute(
+                    "INSERT INTO tag (name) VALUES (?1)",
+                    [format!("{i}-{}", "x".repeat(400))],
+                )
+                .expect("a row");
+        }
+    }
+
+    begin_account_key_rotation(&store, id).expect("begin");
+    assert!(
+        begin_account_key_rotation(&store, id).is_err(),
+        "a second rotation began over the first"
+    );
+
+    // The next launch: both generations are presented, and a write re-seals what it touches.
+    let keys = account_keys(&store, &dir, id).expect("keys");
+    assert_ne!(keys.current, old, "no new key was minted");
+    assert_eq!(
+        keys.retiring,
+        Some(old),
+        "the old key was not kept for its pages"
+    );
+    {
+        let a = Account::open_sealed_rotating(&paths, id, &keys.current, keys.retiring.as_ref())
+            .expect("open with both generations");
+        a.store
+            .execute("INSERT INTO tag (name) VALUES ('after')", [])
+            .expect("write");
+    }
+
+    // A restart with pages still under the old key: it is kept.
+    let keys = account_keys(&store, &dir, id).expect("keys");
+    assert_eq!(keys.retiring, Some(old));
+    assert!(store.read(id, Item::RetiringDatabaseKey).is_ok());
+    {
+        let a = Account::open_sealed_rotating(&paths, id, &keys.current, keys.retiring.as_ref())
+            .expect("reopen across the restart");
+        let n: i64 = a
+            .store
+            .query_row("SELECT count(*) FROM tag", [], |r| r.get(0))
+            .expect("both generations read");
+        assert_eq!(n, 201);
+        // Every page rewritten, which is what finishes a lazy rotation.
+        a.store.execute_batch("VACUUM;").expect("vacuum store");
+        a.journal.execute_batch("VACUUM;").expect("vacuum journal");
+    }
+
+    // No page carries it now: retired, and gone from the credential store.
+    let keys = account_keys(&store, &dir, id).expect("keys");
+    assert_eq!(keys.retiring, None);
+    assert_eq!(
+        store.read(id, Item::RetiringDatabaseKey),
+        Err(StoreError::NotFound),
+        "the old key outlived every page under it"
+    );
+    let a = Account::open_sealed(&paths, id, &keys.current).expect("the new key alone opens it");
+    let n: i64 = a
+        .store
+        .query_row("SELECT count(*) FROM tag", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(n, 201);
+    drop(a);
+
+    // And the next rotation may begin.
+    begin_account_key_rotation(&store, id).expect("a rotation after retirement");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// D-43 and D-76: the installation secret is never routed through the lazy path, because its
+/// rotation is a discard-and-refill of the blob store and must be presented as that.
+#[test]
+fn the_installation_secret_does_not_rotate_lazily() {
+    use sift_app::container::{Container, INSTALLATION, begin_account_key_rotation};
+
+    let dir = scratch("installation-rotation");
+    let store = InMemory::default();
+    let _ = Container::open(&dir, &store).expect("open");
+    let before = store
+        .read(INSTALLATION, Item::DatabaseKey)
+        .expect("the secret");
+
+    let refused = begin_account_key_rotation(&store, INSTALLATION)
+        .expect_err("the installation secret was rotated lazily");
+    assert!(refused.contains("discard-and-refill"), "{refused}");
+    assert_eq!(
+        store
+            .read(INSTALLATION, Item::DatabaseKey)
+            .expect("the secret"),
+        before,
+        "the refusal changed the secret anyway"
+    );
+    assert_eq!(
+        store.read(INSTALLATION, Item::RetiringDatabaseKey),
+        Err(StoreError::NotFound)
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A crash between the two writes that begin a rotation leaves both items holding one key. That
+/// is read as no rotation, and a retried begin completes it.
+#[test]
+fn a_rotation_interrupted_between_its_two_writes_resumes() {
+    use sift_app::container::{account_keys, account_secret, begin_account_key_rotation};
+
+    let dir = scratch("rotation-crash");
+    let store = InMemory::default();
+    let id = AccountId::from_u128(0x0107_0108);
+    let key = account_secret(&store, id).expect("a key");
+    // Pages under the key, so that it has something to be retained for.
+    drop(
+        sift_store::account::Account::open_sealed(
+            &sift_store::account::AccountPaths::under(&dir, id),
+            id,
+            &key,
+        )
+        .expect("open"),
+    );
+    let text = store.read(id, Item::DatabaseKey).expect("stored");
+    store
+        .write(id, Item::RetiringDatabaseKey, &text)
+        .expect("the first write, and then the crash");
+
+    begin_account_key_rotation(&store, id).expect("resumed");
+    let keys = account_keys(&store, &dir, id).expect("keys");
+    assert_ne!(keys.current, key);
+    assert_eq!(keys.retiring, Some(key));
+    std::fs::remove_dir_all(&dir).ok();
+}
