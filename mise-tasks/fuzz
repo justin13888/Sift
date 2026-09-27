@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="NFR-40 method 4 — fuzz the sanitizer and the MIME parser, seeded with the fidelity corpus. Args: [sanitize] [parse]"
+#MISE description="NFR-40 method 4 — fuzz the sanitizer and the MIME parser, seeded with the fidelity corpus. Args: [--continuous] [sanitize] [parse]"
 #
 # Two targets, each in a fuzz workspace of its own beside the crate it exercises (D-120):
 #
@@ -8,23 +8,30 @@
 #   parse      crates/rendering/sift-mime/fuzz     — no panic, and every accepted structure
 #              within L-2, L-3 and L-5 and inside the bytes it was parsed from
 #
-# With no argument both run. Each runs for FUZZ_SECONDS (default 60): that is the per-change
-# leg, bounded so that it can block a merge (D-63). `FUZZ_SECONDS=0` runs until stopped, which is
-# the continuous tier's run on a dedicated host.
+# With no target named both run, in one of two modes (D-63's tiers, D-120):
+#
+#   per-change     (the default, and the CI leg) a fixed number of executions, FUZZ_RUNS per
+#                  target, from a fixed random seed and the seed corpus alone. The same commit
+#                  explores the same inputs on every run, so the leg fails because of the change
+#                  under review — never because a runner happened to be fast enough to reach a
+#                  finding that was always there, which would block whichever change was unlucky.
+#   --continuous   (`mise run fuzz-continuous`, the dedicated tier) a fresh random seed each run,
+#                  the discovered corpus kept between runs in target/fuzz/corpus/<target>, and
+#                  FUZZ_SECONDS per target — 0, the default, runs until stopped.
 #
 # The seed corpus is rebuilt from the fidelity corpus on every run, so a fixture admitted there
 # seeds the fuzzer with no further step: every message as the sanitizer takes it, every
 # mutation-XSS vector (one payload per record), and — for the parser — every message wrapped in
-# the MIME structures it takes apart. What the fuzzer discovers beyond the seeds accumulates in
-# target/fuzz/corpus/<target>, and a crash is written to target/fuzz/artifacts/<target>.
+# the MIME structures it takes apart. A crash is written to target/fuzz/artifacts/<target>.
 #
 # A crash is a finding, not noise. Minimize it
 #
 #     cargo +<toolchain> fuzz tmin --fuzz-dir <dir> --target-dir target/fuzz/build <target> <artifact>
 #
 # fix the cause, and admit the minimized input to the corpus as a permanent vector
-# (fixtures/mxss/vectors.txt for the sanitizer, under D-115's admission rule) so the fixed
-# behaviour is held by the ordinary test suite rather than by the fuzzer finding it again.
+# (fixtures/mxss/vectors.txt for the sanitizer, under D-115's admission rule) or as a unit test
+# beside the parser, so the fixed behaviour is held by the ordinary test suite rather than by
+# the fuzzer finding it again.
 set -euo pipefail
 
 root="${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
@@ -36,14 +43,28 @@ cd "$root"
 # under the harness makes a new finding indistinguishable from a new compiler. Bump deliberately.
 toolchain="nightly-2026-06-10"
 
-seconds="${FUZZ_SECONDS:-60}"
-[[ "$seconds" =~ ^[0-9]+$ ]] || {
-    echo "fuzz: FUZZ_SECONDS must be a whole number of seconds (0 runs until stopped)" >&2
+continuous=false
+targets=()
+for arg in "$@"; do
+    case "$arg" in
+        --continuous) continuous=true ;;
+        *) targets+=("$arg") ;;
+    esac
+done
+[[ ${#targets[@]} -gt 0 ]] || targets=(sanitize parse)
+
+if $continuous; then
+    bound="${FUZZ_SECONDS:-0}"
+    what="seconds (0 runs until stopped)"
+else
+    # Sized so that both targets together stay within a few minutes on a hosted runner.
+    bound="${FUZZ_RUNS:-100000}"
+    what="executions"
+fi
+[[ "$bound" =~ ^[0-9]+$ ]] || {
+    echo "fuzz: the bound must be a whole number of $what" >&2
     exit 1
 }
-
-targets=("$@")
-[[ ${#targets[@]} -gt 0 ]] || targets=(sanitize parse)
 
 fixtures="crates/rendering/sift-sanitize/fixtures"
 work="$root/target/fuzz"
@@ -111,12 +132,21 @@ for target in "${targets[@]}"; do
     esac
 
     seeds="$work/seeds/$target"
-    corpus="$work/corpus/$target"
     artifacts="$work/artifacts/$target"
+    if $continuous; then
+        corpus="$work/corpus/$target"
+        mode=(-max_total_time="$bound")
+    else
+        # Emptied every run: a corpus grown by an earlier run would make this run explore
+        # different inputs from the same commit's run anywhere else.
+        corpus="$work/per-change/$target"
+        rm -rf "$corpus"
+        mode=(-runs="$bound" -seed=1)
+    fi
     rm -rf "$seeds"
     mkdir -p "$seeds" "$corpus" "$artifacts"
     "seed_$target" "$seeds"
-    echo "fuzz: $target — $(find "$seeds" -type f | wc -l | tr -d ' ') seeds, ${seconds}s (0 is unbounded)"
+    echo "fuzz: $target — $(find "$seeds" -type f | wc -l | tr -d ' ') seeds, ${mode[*]}"
 
     # The build goes under the root target/, which is ignored, rather than beside the fuzz
     # workspace. The corpus directory comes first because libFuzzer writes new inputs to the
@@ -125,7 +155,7 @@ for target in "${targets[@]}"; do
         --fuzz-dir "$dir" \
         --target-dir "$work/build" \
         "$target" "$corpus" "$seeds" -- \
-        -max_total_time="$seconds" \
+        "${mode[@]}" \
         -timeout=10 \
         -artifact_prefix="$artifacts/"
 done
