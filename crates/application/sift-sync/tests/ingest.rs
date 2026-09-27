@@ -1204,3 +1204,413 @@ fn a_found_message_is_discovered_moves_no_cursor_and_keeps_an_identity_already_h
         "a search wrote a folder's sync state"
     );
 }
+
+// ---------------------------------------------------------------------------
+// D-44 — a move on an account whose identifiers do not survive one.
+//
+// The one place this file reads a real adapter's recording: the move the adapter's own replay
+// test records, parsed by the adapter's own parser, walked through the real driver and the real
+// store. What is under test is still the rule — the driver knows only the declared capability.
+// ---------------------------------------------------------------------------
+
+mod moves {
+    use super::*;
+    use sift_graph::wire;
+
+    const BEFORE: &[u8] =
+        include_bytes!("../../../providers/sift-graph/fixtures/envelopes-before-move.json");
+    const AFTER: &[u8] =
+        include_bytes!("../../../providers/sift-graph/fixtures/envelopes-after-move.json");
+    const MOVED_OUT: &[u8] =
+        include_bytes!("../../../providers/sift-graph/fixtures/delta-inbox-moved-out.json");
+    const MOVED_IN: &[u8] =
+        include_bytes!("../../../providers/sift-graph/fixtures/delta-archive-moved-in.json");
+
+    fn envelopes(body: &[u8]) -> Vec<Envelope> {
+        wire::parse_batch(body, usize::MAX)
+            .unwrap()
+            .iter()
+            .map(|item| wire::parse_envelope(&item.body).unwrap())
+            .collect()
+    }
+
+    fn live(body: &[u8]) -> Result<Delta, &'static str> {
+        page(
+            wire::parse_delta(body, true).unwrap().changes,
+            "live",
+            false,
+        )
+    }
+
+    fn folder(id: &str, special_use: SpecialUse) -> RemoteFolder {
+        RemoteFolder {
+            id: RemoteFolderId(id.into()),
+            display_name: id.into(),
+            special_use: Some(special_use),
+        }
+    }
+
+    /// An account holding inbox and archive, both watched, with the adapter's capabilities.
+    /// `archive_first` puts the archive earlier in the walk, so its arrivals are applied
+    /// before the inbox's departures.
+    fn account_with(
+        s: &Scratch,
+        archive_first: bool,
+        rounds: Vec<[Result<Delta, &'static str>; 2]>,
+        held: Vec<Envelope>,
+    ) -> (Account, Scripted, i64, i64) {
+        let inbox = folder("AAMk-inbox", SpecialUse::Inbox);
+        let archive = folder("AAMk-archive", SpecialUse::Archive);
+        let folders = if archive_first {
+            vec![archive, inbox]
+        } else {
+            vec![inbox, archive]
+        };
+        let mut pages = Vec::new();
+        for [inbox_page, archive_page] in rounds {
+            if archive_first {
+                pages.extend([archive_page, inbox_page]);
+            } else {
+                pages.extend([inbox_page, archive_page]);
+            }
+        }
+        let mut adapter = Scripted::new(folders).answering(pages, held);
+        adapter.capabilities = sift_graph::capabilities();
+        assert!(!adapter.capabilities.identifier_survives_a_move());
+        let account = s.open();
+        run::discover_folders(&adapter, &account).unwrap();
+        let inbox =
+            ingest::folder_local_id(&account.store, &RemoteFolderId("AAMk-inbox".into())).unwrap();
+        let archive =
+            ingest::folder_local_id(&account.store, &RemoteFolderId("AAMk-archive".into()))
+                .unwrap();
+        ingest::set_watched(&account.store, archive, true).unwrap();
+        (account, adapter, inbox, archive)
+    }
+
+    fn local_of(account: &Account, remote: &str) -> Vec<u8> {
+        account
+            .store
+            .query_row(
+                "SELECT id FROM message WHERE remote_id = ?1",
+                [remote],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn count(account: &Account, sql: &str) -> i64 {
+        account.store.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    fn the_recorded_move(name: &str, archive_first: bool) {
+        let s = Scratch::new(name);
+        let seed = page(
+            vec![
+                present("AAMk-d1", Provenance::Discovered),
+                present("AAMk-d2", Provenance::Discovered),
+                present("AAMk-u1", Provenance::Discovered),
+            ],
+            "seeded",
+            false,
+        );
+        let mut held = envelopes(BEFORE);
+        held.extend(envelopes(AFTER));
+        let (mut account, adapter, _, archive) = account_with(
+            &s,
+            archive_first,
+            vec![
+                [seed, page(vec![], "quiet", false)],
+                [live(MOVED_OUT), live(MOVED_IN)],
+            ],
+            held,
+        );
+        let ids = ids();
+
+        run::sync_account(&adapter, &mut account, &ids, 1).unwrap();
+        let before = [
+            local_of(&account, "AAMk-d1"),
+            local_of(&account, "AAMk-d2"),
+            local_of(&account, "AAMk-u1"),
+        ];
+
+        let report = run::sync_account(&adapter, &mut account, &ids, 1).unwrap();
+
+        // Nothing lost, nothing invented, nothing left held.
+        assert_eq!(count(&account, "SELECT count(*) FROM message"), 3);
+        assert_eq!(
+            count(
+                &account,
+                "SELECT count(*) FROM message WHERE remote_id IS NULL"
+            ),
+            0,
+            "a departure outlived the round that held it"
+        );
+
+        // The unambiguous move keeps its identity — the shell's selection survives it — and
+        // the provenance it arrived with: moved into the archive is not delivered there.
+        let invoice = local_of(&account, "AAMk-n-u1");
+        assert_eq!(invoice, before[2], "the unambiguous move lost its identity");
+        let (provenance, location): (String, i64) = account
+            .store
+            .query_row(
+                "SELECT m.provenance, l.folder_id FROM message m
+                 JOIN message_location l ON l.message_id = m.id WHERE m.id = ?1",
+                [&invoice],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(provenance, "Discovered");
+        assert_eq!(location, archive);
+        assert_eq!(
+            count(
+                &account,
+                "SELECT message_count FROM thread WHERE remote_thread_id = 'conv-u'"
+            ),
+            1,
+            "the rejoin counted one message twice in its thread"
+        );
+
+        // The duplicates corroborate against **both** departures. Choosing one would be a
+        // guess, and a wrong guess is an archive applied to the wrong message.
+        let d1 = local_of(&account, "AAMk-n-d1");
+        let d2 = local_of(&account, "AAMk-n-d2");
+        assert_ne!(d1, d2, "an ambiguous move merged two messages");
+        for duplicate in [&d1, &d2] {
+            assert!(
+                !before.contains(duplicate),
+                "an ambiguous arrival inherited an identity it could not prove was its own"
+            );
+        }
+
+        assert_eq!(report.rejoined, 1);
+        assert_eq!(report.inserted, 2);
+        // FR-33: each ambiguous arrival is recorded with the two candidates it refused.
+        assert_eq!(report.near_misses.len(), 2);
+        assert!(report.near_misses.iter().all(|n| n.candidates == 2));
+    }
+
+    #[test]
+    fn the_recorded_move_rejoins_the_unambiguous_message_and_leaves_the_ambiguous_distinct() {
+        the_recorded_move("move-inbox-first", false);
+    }
+
+    #[test]
+    fn a_move_rejoins_whichever_folder_the_round_walks_first() {
+        // The arrivals are applied before the departures they rejoin.
+        the_recorded_move("move-archive-first", true);
+    }
+
+    fn unread(id: &str) -> Envelope {
+        let mut e = envelope(id, "Moved", 100);
+        e.thread_id = Some("conversation".into());
+        e.internet_message_id = Some("<moved@x.test>".into());
+        e
+    }
+
+    #[test]
+    fn an_unread_message_moved_in_is_not_announced_as_new_mail() {
+        // The adapter reports every live presence as delivered, because it cannot tell an
+        // arrival from a message moved in. The rejoin can, and FR-23 must hear it.
+        let s = Scratch::new("move-unread");
+        let (mut account, adapter, _, _) = account_with(
+            &s,
+            false,
+            vec![
+                [
+                    page(vec![present("m1", Provenance::Discovered)], "c1", false),
+                    page(vec![], "c1", false),
+                ],
+                [
+                    page(
+                        vec![Change::Removed {
+                            id: RemoteMessageId("m1".into()),
+                        }],
+                        "c2",
+                        false,
+                    ),
+                    page(
+                        vec![present("m1-moved", Provenance::Delivered)],
+                        "c2",
+                        false,
+                    ),
+                ],
+            ],
+            vec![unread("m1"), unread("m1-moved")],
+        );
+        let ids = ids();
+        run::sync_account(&adapter, &mut account, &ids, 1).unwrap();
+        let before = local_of(&account, "m1");
+
+        let report = run::sync_account(&adapter, &mut account, &ids, 1).unwrap();
+        assert_eq!(local_of(&account, "m1-moved"), before);
+        assert_eq!(report.delivered, 0, "a move was announced as new mail");
+        assert_eq!(report.newest, None);
+        assert_eq!(report.rejoined, 1);
+        assert_eq!(
+            count(
+                &account,
+                "SELECT count(*) FROM message WHERE provenance = 'Delivered'"
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn a_departure_nothing_rejoins_is_deleted_even_when_the_round_fails() {
+        // A move to an unwatched folder, or a delete: no arrival. And a round that fails after
+        // the departure was applied still settles it rather than leaving a row nothing reaches.
+        let s = Scratch::new("move-failed-round");
+        let (mut account, adapter, _, _) = account_with(
+            &s,
+            false,
+            vec![
+                [
+                    page(vec![present("m1", Provenance::Discovered)], "c1", false),
+                    page(vec![], "c1", false),
+                ],
+                [
+                    page(
+                        vec![Change::Removed {
+                            id: RemoteMessageId("m1".into()),
+                        }],
+                        "c2",
+                        false,
+                    ),
+                    Err("the archive did not answer"),
+                ],
+            ],
+            vec![unread("m1")],
+        );
+        let ids = ids();
+        run::sync_account(&adapter, &mut account, &ids, 1).unwrap();
+        assert!(run::sync_account(&adapter, &mut account, &ids, 1).is_err());
+        assert_eq!(count(&account, "SELECT count(*) FROM message"), 0);
+    }
+
+    #[test]
+    fn a_departure_a_crashed_round_left_behind_is_settled_by_the_next() {
+        // The departure is marked in the store, not only in memory, so a window that never
+        // closed does not strand it.
+        let s = Scratch::new("move-stranded");
+        let (mut account, adapter, inbox, _) = account_with(
+            &s,
+            false,
+            vec![
+                [
+                    page(vec![present("m1", Provenance::Discovered)], "c1", false),
+                    page(vec![], "c1", false),
+                ],
+                [page(vec![], "c3", false), page(vec![], "c3", false)],
+            ],
+            vec![unread("m1")],
+        );
+        let ids = ids();
+        run::sync_account(&adapter, &mut account, &ids, 1).unwrap();
+        // A holding window applies the departure, and the process ends before it settles.
+        let mut window = ingest::MoveWindow::for_account(false);
+        assert!(window.holds());
+        ingest::apply_page_within(
+            &mut account.store,
+            inbox,
+            &page(
+                vec![Change::Removed {
+                    id: RemoteMessageId("m1".into()),
+                }],
+                "c2",
+                false,
+            )
+            .unwrap(),
+            &[],
+            &ids,
+            &mut window,
+        )
+        .unwrap();
+        assert_eq!(count(&account, "SELECT count(*) FROM message"), 1);
+
+        run::sync_account(&adapter, &mut account, &ids, 1).unwrap();
+        assert_eq!(count(&account, "SELECT count(*) FROM message"), 0);
+    }
+
+    /// A message's tag names, without the isolation marks NFR-54's normalizer stores them in.
+    fn tags_of(account: &Account, message: &[u8]) -> Vec<String> {
+        let mut stmt = account
+            .store
+            .prepare(
+                "SELECT t.name FROM message_tag mt JOIN tag t ON t.id = mt.tag_id
+                 WHERE mt.message_id = ?1 ORDER BY t.name",
+            )
+            .unwrap();
+        stmt.query_map([message], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|name| {
+                name.unwrap()
+                    .trim_matches(|c| c == '\u{2068}' || c == '\u{2069}')
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_folder_walked_alone_settles_its_own_window_and_the_rejoin_takes_the_arrivals_tags() {
+        // `sync_folder` is a round of its own: it holds what leaves the folder and settles it
+        // before it returns. A reissue within one folder is a departure and an arrival in the
+        // same walk. The rejoined message is described by what the provider says now, tags
+        // included, and keeps nothing of what it said before.
+        let s = Scratch::new("move-one-folder");
+        let mut before_move = unread("m1");
+        before_move.tags = vec!["Blue".into()];
+        let mut after_move = unread("m1-reissued");
+        after_move.tags = vec!["Red".into(), "Urgent".into()];
+        let mut adapter = Scripted::new(vec![folder("AAMk-inbox", SpecialUse::Inbox)]).answering(
+            vec![
+                page(vec![present("m1", Provenance::Discovered)], "c1", false),
+                page(
+                    vec![
+                        Change::Removed {
+                            id: RemoteMessageId("m1".into()),
+                        },
+                        present("m1-reissued", Provenance::Delivered),
+                    ],
+                    "c2",
+                    false,
+                ),
+            ],
+            vec![before_move, after_move],
+        );
+        adapter.capabilities = sift_graph::capabilities();
+        let mut account = s.open();
+        run::discover_folders(&adapter, &account).unwrap();
+        let remote = RemoteFolderId("AAMk-inbox".into());
+        let inbox = ingest::folder_local_id(&account.store, &remote).unwrap();
+        let ids = ids();
+
+        run::sync_folder(&adapter, &mut account, inbox, &remote, &ids, 1).unwrap();
+        let before = local_of(&account, "m1");
+        assert_eq!(tags_of(&account, &before), vec!["Blue"]);
+
+        let report = run::sync_folder(&adapter, &mut account, inbox, &remote, &ids, 1).unwrap();
+        assert_eq!(report.rejoined, 1, "the folder's own window never settled");
+        assert_eq!(
+            count(
+                &account,
+                "SELECT count(*) FROM message WHERE remote_id IS NULL"
+            ),
+            0,
+            "a departure outlived the walk that held it"
+        );
+        assert_eq!(count(&account, "SELECT count(*) FROM message"), 1);
+        assert_eq!(local_of(&account, "m1-reissued"), before);
+        assert_eq!(
+            tags_of(&account, &before),
+            vec!["Red", "Urgent"],
+            "the rejoined message lost the tags it arrived with, or kept the ones it left with"
+        );
+    }
+
+    #[test]
+    fn an_account_whose_identifiers_survive_a_move_never_holds() {
+        assert!(!ingest::MoveWindow::for_account(true).holds());
+        assert!(!ingest::MoveWindow::default().holds());
+    }
+}

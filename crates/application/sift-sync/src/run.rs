@@ -18,7 +18,7 @@
 //! provider. Between two held steps the account may have been removed; the hold then answers
 //! [`None`], and the walk stops with [`RunError::Gone`] having written nothing further.
 
-use crate::ingest::{self, IngestError, PageReport};
+use crate::ingest::{self, IngestError, MoveWindow, PageReport};
 use sift_foundation::identity::LocalIdGenerator;
 use sift_provider::adapter::{Adapter, Change, Failure, RemoteFolderId, RemoteMessageId};
 use sift_store::account::Account;
@@ -177,6 +177,19 @@ pub fn sync_one_page_held<A: Adapter + ?Sized, H: Hold + ?Sized>(
 where
     A::Error: core::fmt::Display,
 {
+    one_page(adapter, hold, folder, remote, &mut MoveWindow::default())
+}
+
+fn one_page<A: Adapter + ?Sized, H: Hold + ?Sized>(
+    adapter: &A,
+    hold: &mut H,
+    folder: i64,
+    remote: &RemoteFolderId,
+    window: &mut MoveWindow,
+) -> Result<Turn, RunError>
+where
+    A::Error: core::fmt::Display,
+{
     let cursor = held(hold, |account, _| ingest::cursor_of(&account.store, folder))?;
     let page = match adapter.delta(remote, cursor.as_ref()) {
         Ok(page) => page,
@@ -251,7 +264,7 @@ where
     }
 
     let report = held(hold, |account, ids| {
-        ingest::apply_page(&mut account.store, folder, &page, &envelopes, ids)
+        ingest::apply_page_within(&mut account.store, folder, &page, &envelopes, ids, window)
     })?;
     Ok(Turn::Applied {
         report,
@@ -312,9 +325,55 @@ pub fn sync_folder_held<A: Adapter + ?Sized, H: Hold + ?Sized>(
 where
     A::Error: core::fmt::Display,
 {
+    let mut window = MoveWindow::for_account(adapter.capabilities().identifier_survives_a_move());
+    let walked = walk_folder(adapter, hold, folder, remote, max_pages, &mut window);
+    settled(hold, &mut window, walked)
+}
+
+/// Close a window whatever the round came to. A round that failed part-way still settles
+/// what it applied, so a departure whose arrival was applied before the failure is rejoined
+/// now rather than deleted by the next round, which will not see that arrival again. The
+/// round's own error is the one returned.
+///
+/// A window that does not hold has nothing to settle, and takes no held step for it.
+fn settled<H: Hold + ?Sized>(
+    hold: &mut H,
+    window: &mut MoveWindow,
+    walked: Result<PageReport, RunError>,
+) -> Result<PageReport, RunError> {
+    if !window.holds() {
+        return walked;
+    }
+    match walked {
+        Ok(mut total) => {
+            held(hold, |account, _| {
+                ingest::settle_moves(&mut account.store, window, &mut total)
+            })?;
+            Ok(total)
+        }
+        Err(error) => {
+            let _ = hold.with(|account, _| {
+                ingest::settle_moves(&mut account.store, window, &mut PageReport::default())
+            });
+            Err(error)
+        }
+    }
+}
+
+fn walk_folder<A: Adapter + ?Sized, H: Hold + ?Sized>(
+    adapter: &A,
+    hold: &mut H,
+    folder: i64,
+    remote: &RemoteFolderId,
+    max_pages: usize,
+    window: &mut MoveWindow,
+) -> Result<PageReport, RunError>
+where
+    A::Error: core::fmt::Display,
+{
     let mut total = PageReport::default();
     for _ in 0..max_pages {
-        match sync_one_page_held(adapter, hold, folder, remote)? {
+        match one_page(adapter, hold, folder, remote, window)? {
             Turn::Applied { report, more } => {
                 total.absorb(&report);
                 if !more {
@@ -382,10 +441,22 @@ where
     A::Error: core::fmt::Display,
 {
     let watched = held(hold, |account, _| ingest::watched_folders(&account.store))?;
-    let mut total = PageReport::default();
-    for (folder, remote) in watched {
-        let report = sync_folder_held(adapter, hold, folder, &remote, max_pages_per_folder)?;
-        total.absorb(&report);
-    }
-    Ok(total)
+    let mut window = MoveWindow::for_account(adapter.capabilities().identifier_survives_a_move());
+    let mut walk = || {
+        let mut total = PageReport::default();
+        for (folder, remote) in &watched {
+            let report = walk_folder(
+                adapter,
+                hold,
+                *folder,
+                remote,
+                max_pages_per_folder,
+                &mut window,
+            )?;
+            total.absorb(&report);
+        }
+        Ok(total)
+    };
+    let walked = walk();
+    settled(hold, &mut window, walked)
 }
