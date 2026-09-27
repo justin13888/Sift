@@ -1423,7 +1423,20 @@ fn a_caveat_appears_only_for_the_query_it_is_about() {
     cmds.push("search is:unread");
     let out = session(&cmds);
     assert!(!out.contains("has:attachment"), "{out}");
-    assert!(!out.contains("Message bodies are not searched"), "{out}");
+    assert!(!out.contains("Message bodies are searched only"), "{out}");
+}
+
+/// D-81's consequence is stated under a query that searches text: bodies enter the index when
+/// a message is first opened, so the bodies of unopened mail were not searched.
+#[test]
+fn a_text_search_says_which_bodies_it_covered() {
+    let mut cmds = hostile();
+    cmds.push("search receipt");
+    let out = session(&cmds);
+    assert!(
+        out.contains("Message bodies are searched only for messages you have opened"),
+        "{out}"
+    );
 }
 
 /// FR-5: a folder matches on its semantic use, which means the same thing in every locale,
