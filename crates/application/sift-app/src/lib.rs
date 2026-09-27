@@ -1217,21 +1217,103 @@ impl App {
     /// Provable by enumeration, which is what the registry is for: what it does not list does
     /// not exist. The ordinal is not freed, because D-78 never reuses local identity.
     ///
+    /// # Teardown comes first, and in this order
+    ///
+    /// 1. **The grant is read out**, where it may be revoked afterwards — see
+    ///    [`Revocation`]. Only while the credential store still holds it: after step 3 there
+    ///    is nothing to read.
+    /// 2. **The account is closed.** The files cannot be removed from underneath an open
+    ///    connection on every platform, and a half-removed account is the state this is
+    ///    preventing. Its queue goes with it: what had not been flushed is *discarded*, and
+    ///    the count comes back so the caller can say so — D-32 notes a queued mutation is the
+    ///    one thing a resync cannot restore, which is why the confirmation states it first.
+    /// 3. **The container erases it** — credentials, both files and their siblings, and the
+    ///    registry and setting rows in one transaction.
+    /// 4. **The wheel is re-armed without it**, so no deadline names an identity that no
+    ///    longer exists. A fire already taken off the wheel resolves by identity and skips it.
+    /// 5. **Nothing in front of the user still names it** — the selection, the open message
+    ///    and FR-8's show-once allowance are dropped where they belonged to it.
+    ///
+    /// Work already running for this account is not something this has to wait for: every
+    /// sync and flush holds the application for its whole duration, so a caller that has it
+    /// has already waited.
+    ///
     /// # Errors
     /// There is no such account, or the registry refused.
-    pub fn forget_account(&mut self, name: &str) -> Result<(), String> {
-        let id = self
+    pub fn forget_account(&mut self, name: &str) -> Result<Forgotten, String> {
+        let account = self
             .accounts
             .get(name)
-            .ok_or_else(|| format!("no account named `{name}`"))?
-            .id;
-        // Closed first: the files cannot be removed from underneath an open connection on
-        // every platform, and a half-removed account is the state this is preventing.
+            .ok_or_else(|| format!("no account named `{name}`"))?;
+        let id = account.id;
+        let kind = account.kind.clone();
+        let discarded = account.queue.len();
+        let revocation = self.revocation_for(id, &kind);
+
         self.accounts.remove(name);
         if let Some(container) = self.container.as_mut() {
             container.forget(id, &sift_credentials::store::Platform)?;
+        } else if let Some(root) = self.root.clone() {
+            // The scratch mode keeps no registry and no credential, but it does keep files,
+            // and "no file belonging to that account remains on disk" is the same claim here.
+            container::remove_account_files(&root, id);
         }
-        Ok(())
+        self.arm_periodic();
+
+        let held = |app: &Self, m: LocalId| app.owner_of_stored(m).is_some();
+        let selection = std::mem::take(&mut self.selection);
+        self.selection = selection.into_iter().filter(|m| held(self, *m)).collect();
+        if self.open_message.is_some_and(|m| !held(self, m)) {
+            self.open_message = None;
+        }
+        if self.allowed_once_message.is_some_and(|m| !held(self, m)) {
+            self.allowed_once_message = None;
+        }
+        Ok(Forgotten {
+            id,
+            discarded,
+            revocation,
+        })
+    }
+
+    /// Whether removing this account should also revoke its grant at the provider, and with
+    /// what — FR-4's best effort, decided **before** the credential store is emptied.
+    ///
+    /// `None` wherever revoking is either impossible or unsafe:
+    ///
+    /// - the account has no provider behind it, or its provider declares no revocation
+    ///   endpoint, or this build has no client for it — nothing to send, or nothing to send
+    ///   it as;
+    /// - there is no container, which is the scratch mode, where nothing was ever stored;
+    /// - **another open account has the same kind.** A grant belongs to a client and a
+    ///   person, not to a Sift account, and a provider that revokes a token revokes the grant
+    ///   it came from — so revoking here would sign out the *other* account whenever the two
+    ///   are one mailbox, which is precisely the replace-after-re-authentication case. No
+    ///   address crosses this layer to tell a second mailbox from the same one, so the rule is
+    ///   the conservative one: a grant left standing is revocable from the provider's own
+    ///   console, and an account signed out behind the user's back is not recoverable at all.
+    fn revocation_for(&self, id: AccountId, kind: &str) -> Option<Revocation> {
+        self.container.as_ref()?;
+        let descriptor = sift_registry::by_persisted(kind)?;
+        // Compared as resolved kinds rather than as the recorded strings, because a row written
+        // before kinds were recorded names the same provider by a different string.
+        if self.accounts.values().any(|other| {
+            other.id != id
+                && sift_registry::by_persisted(&other.kind).map(|d| d.kind) == Some(descriptor.kind)
+        }) {
+            return None;
+        }
+        descriptor.profile()?.revoke.as_ref()?;
+        let client_id = self.oauth_client(descriptor.kind.as_str())?.to_owned();
+        let token = self.broker.usable(id).ok()?.refresh;
+        if token.is_empty() {
+            return None;
+        }
+        Some(Revocation {
+            kind: descriptor.kind,
+            client_id,
+            token,
+        })
     }
 
     /// Send what is queued for one account, once.
@@ -1653,6 +1735,62 @@ pub struct Flushed {
     pub error: Option<String>,
 }
 
+/// What removing an account came to — FR-4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Forgotten {
+    /// The identity that no longer exists. D-89 never gives it to another account.
+    pub id: AccountId,
+    /// Intents that had not been flushed and were discarded with the account. The
+    /// confirmation says this before removal, from the same count; this is what it came to.
+    pub discarded: usize,
+    /// The grant to revoke at the provider, where that is both possible and safe. Carried out
+    /// rather than performed here, because it is a network round trip and removal is not:
+    /// the caller runs it wherever provider calls run, after the erasure has already happened.
+    pub revocation: Option<Revocation>,
+}
+
+/// FR-4's best-effort revocation of a removed account's grant.
+///
+/// **It holds a refresh token**, read out of the credential store before the erasure because
+/// afterwards there is nothing to read. It lives in memory only, for as long as it takes to
+/// send it once, and its `Debug` does not print it — a type that carries a credential and
+/// derives `Debug` is one `{:?}` away from putting it in a log.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Revocation {
+    kind: sift_registry::ProviderKind,
+    client_id: String,
+    token: String,
+}
+
+impl std::fmt::Debug for Revocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Revocation")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Revocation {
+    /// Send it, once.
+    ///
+    /// **Never retried and never in the way.** The account is already gone when this runs,
+    /// FR-4's erasure is local and provable without it, and a provider that is unreachable or
+    /// refuses leaves a grant the person can still revoke from the provider's own console.
+    ///
+    /// # Errors
+    /// The provider could not be reached or refused, in the credential layer's words.
+    pub fn send(self) -> Result<sift_credentials::oauth::Revoked, String> {
+        let registration = authorize::registration(self.kind, &self.client_id)?;
+        let Some(endpoint) = registration.profile.revoke.as_ref() else {
+            return Ok(sift_credentials::oauth::Revoked::NoEndpoint);
+        };
+        let mut transport = sift_http::Https::to(&endpoint.host)
+            .map_err(|why| format!("the trust store could not be consulted: {why}"))?;
+        sift_credentials::oauth::revoke(&mut transport, &registration.profile, &self.token)
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// What one turn of the sync loop did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SyncReport {
@@ -1884,4 +2022,22 @@ pub struct NewMail {
     /// `None` where it is no longer visible — archived by a rule, or by a gesture, between
     /// the arrival and this read — and then there is nothing a notification could open.
     pub newest: Option<rows::MessageRow>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_revocation_never_prints_the_token_it_carries() {
+        // NFR-23: never in a log. A `{:?}` is how a credential gets into one.
+        let kind = sift_registry::KINDS.first().expect("a provider").kind;
+        let revocation = Revocation {
+            kind,
+            client_id: "client".to_owned(),
+            token: "1//refresh-token-secret".to_owned(),
+        };
+        let printed = format!("{revocation:?}");
+        assert!(!printed.contains("refresh-token-secret"), "{printed}");
+    }
 }
