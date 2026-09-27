@@ -37,8 +37,23 @@
 //! The same argument applies to the installation-scoped files, and to D-43's per-installation
 //! secret, which is otherwise used both as a BLAKE3 key and as key material — two uses of one
 //! secret with no domain separation between them.
+//!
+//! # Below the database: one key per file, and per incarnation
+//!
+//! A [`Role`] names a *database*, and SQLite derives up to two more files from each one's path —
+//! its write-ahead log and its rollback journal. Each keeps a counter of its own, starting from
+//! its own header, so one role key over all three is the same collision one level down: the
+//! database and its log both seal block 0 at counter 1. That is why a role key is never sealed
+//! under directly. [`part_key`] derives the key a file actually uses from the role key, the
+//! file's [`Part`], and a salt the file's header carries.
+//!
+//! The salt closes the other half. The engine deletes the write-ahead log on a clean close and
+//! creates it again on the next open, at the same path under the same role key, and a new file's
+//! counter starts from a new header — so without the salt every incarnation of the log would
+//! reissue the nonces the one before it used. A fresh salt per incarnation makes each one a
+//! fresh key.
 
-use crate::page::{KeyId, PageKey};
+use crate::page::{KeyId, PageKey, SALT_LEN};
 
 /// What a derived key is for.
 ///
@@ -104,6 +119,47 @@ pub fn file_key_id(owner: &[u8; 32], role: Role) -> KeyId {
     let mut id = [0u8; 16];
     id.copy_from_slice(&full[..16]);
     KeyId(id)
+}
+
+/// Which of a database's files a key seals.
+///
+/// A closed set for the same reason [`Role`] is one: two files under one context is a silent
+/// collision, not an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Part {
+    /// The database file itself.
+    Database,
+    /// Its write-ahead log, the `-wal` file.
+    WriteAheadLog,
+    /// Its rollback journal, the `-journal` file.
+    RollbackJournal,
+}
+
+impl Part {
+    /// The derivation context. **Permanent**, as [`Role`]'s are.
+    const fn context(self) -> &'static str {
+        match self {
+            Self::Database => "sift/part/database/v1",
+            Self::WriteAheadLog => "sift/part/write-ahead-log/v1",
+            Self::RollbackJournal => "sift/part/rollback-journal/v1",
+        }
+    }
+}
+
+/// The key one file is sealed under: the database's role key, separated by the file's [`Part`]
+/// and by the salt that file's header carries.
+///
+/// The key identifier is not separated the same way, deliberately. It names a key
+/// *generation* — the thing D-22 rotates and FR-4 destroys — and a generation spans all of a
+/// database's files, so every file of one database carries its database's identifier. The
+/// collision this closes is one of keys, and the keys are what differ.
+#[must_use]
+pub fn part_key(role_key: &PageKey, part: Part, salt: &[u8; SALT_LEN]) -> PageKey {
+    // Fixed-length inputs in a fixed order, so no two (key, salt) pairs hash the same bytes.
+    let mut hasher = blake3::Hasher::new_derive_key(part.context());
+    hasher.update(role_key.bytes());
+    hasher.update(salt);
+    PageKey::from_bytes(*hasher.finalize().as_bytes())
 }
 
 #[cfg(test)]
@@ -227,6 +283,63 @@ mod tests {
         assert_ne!(sealed_store, sealed_journal);
     }
 
+    const PARTS: [Part; 3] = [Part::Database, Part::WriteAheadLog, Part::RollbackJournal];
+
+    fn part_cipher(part: Part, salt: [u8; SALT_LEN]) -> PageCipher {
+        let key = part_key(&file_key(&OWNER, Role::Store), part, &salt);
+        PageCipher::new(&key, &Header::new(file_key_id(&OWNER, Role::Store)))
+    }
+
+    #[test]
+    fn a_database_and_its_log_and_journal_seal_under_three_keys() {
+        // #155: the database and its write-ahead log each seal block 0 at counter 1 on their
+        // first write. Under one key that is one nonce over two plaintexts.
+        let role = file_key(&OWNER, Role::Store);
+        let salt = [1u8; SALT_LEN];
+        let keys: BTreeSet<[u8; 32]> = PARTS
+            .iter()
+            .map(|p| *part_key(&role, *p, &salt).bytes())
+            .collect();
+        assert_eq!(keys.len(), PARTS.len(), "two parts share a key");
+        assert!(
+            !keys.contains(role.bytes()),
+            "a part is sealed under the role key itself"
+        );
+
+        let db = part_cipher(Part::Database, salt);
+        let wal = part_cipher(Part::WriteAheadLog, salt);
+        let a = db.seal_with_counter(0, 1, b"page zero").unwrap();
+        let b = wal.seal_with_counter(0, 1, b"page zero").unwrap();
+        assert_ne!(a, b, "the database and its log share a keystream");
+        assert!(
+            wal.open(0, &a).is_err(),
+            "a database block opened as the log's"
+        );
+    }
+
+    #[test]
+    fn a_new_incarnation_of_a_file_is_a_new_key() {
+        // #155: the log is deleted on a clean close and created again on the next open, at the
+        // same path under the same role key, with a counter that starts over. Its salt is what
+        // makes the second one a different key.
+        let first = part_cipher(Part::WriteAheadLog, [1u8; SALT_LEN]);
+        let second = part_cipher(Part::WriteAheadLog, [2u8; SALT_LEN]);
+        let a = first.seal_with_counter(0, 1, b"frame").unwrap();
+        let b = second.seal_with_counter(0, 1, b"frame").unwrap();
+        assert_ne!(a, b, "two incarnations of one file share a keystream");
+        assert!(second.open(0, &a).is_err());
+        assert_eq!(first.open(0, &a).unwrap(), b"frame");
+    }
+
+    #[test]
+    fn a_part_key_is_separated_by_its_role_key() {
+        // Two databases with one salt still do not share a part key: the role is an input.
+        let salt = [3u8; SALT_LEN];
+        let store = part_key(&file_key(&OWNER, Role::Store), Part::Database, &salt);
+        let journal = part_key(&file_key(&OWNER, Role::Journal), Part::Database, &salt);
+        assert_ne!(store.bytes(), journal.bytes());
+    }
+
     #[test]
     fn derivation_is_stable_across_runs() {
         // These contexts are permanent. A change to one is a key destruction wearing the
@@ -236,6 +349,11 @@ mod tests {
         assert_eq!(
             file_key_id(&OWNER, Role::Store),
             file_key_id(&OWNER, Role::Store)
+        );
+        let salt = [4u8; SALT_LEN];
+        assert_eq!(
+            part_key(&k, Part::WriteAheadLog, &salt).bytes(),
+            part_key(&k, Part::WriteAheadLog, &salt).bytes()
         );
     }
 }

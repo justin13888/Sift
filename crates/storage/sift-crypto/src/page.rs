@@ -1,8 +1,9 @@
 //! D-76 — the page format, and D-42's layer beneath the database engine.
 //!
 //! Every page written to disk is encrypted and authenticated; the engine above is
-//! unmodified. **The write-ahead log is covered by the same layer**, and so are the two
-//! installation-scoped stores.
+//! unmodified. **The write-ahead log is covered by the same layer** — under a key of its own,
+//! because it keeps a counter of its own (D-106, [`derive::part_key`](crate::derive::part_key))
+//! — and so are the two installation-scoped stores.
 //!
 //! # Why the nonce is the whole decision
 //!
@@ -105,7 +106,20 @@ pub const COUNTER_LEN: usize = 8;
 pub const PAGE_OVERHEAD: usize = COUNTER_LEN + TAG_LEN;
 
 /// The fixed-size file header.
+///
+/// ```text
+/// 0..8    magic
+/// 8..10   format version
+/// 10..26  key identifier
+/// 26..34  counter high-water mark
+/// 34..50  retiring key identifier, zero when no rotation is in progress
+/// 50..58  retiring boundary counter
+/// 58..64  salt: which incarnation of the file this is (D-106)
+/// ```
 pub const HEADER_LEN: usize = 64;
+
+/// Bytes of per-file salt the header carries. See [`Header::salt`].
+pub const SALT_LEN: usize = 6;
 
 /// Identifies which key a file is sealed under.
 ///
@@ -213,6 +227,14 @@ pub struct Header {
     /// Stored in bytes the first header left zero, so a file that has never rotated encodes
     /// exactly as it did before rotation existed — the byte-for-byte fixture still holds.
     pub retiring: Option<Retiring>,
+    /// Chosen at random when the file is created, and fixed for its life.
+    ///
+    /// D-106: the key a file is sealed under is derived from its database's key, its part and
+    /// this salt (`derive::part_key`). A file deleted and created again at the same path starts
+    /// its counter over, and a new salt is what keeps that from reissuing the nonces of the file
+    /// before it. It sits in bytes the first header left zero, so a header built by
+    /// [`new`](Self::new) still encodes as the byte-for-byte fixture pins it.
+    pub salt: [u8; SALT_LEN],
 }
 
 impl Header {
@@ -223,6 +245,7 @@ impl Header {
             key_id,
             counter_high_water: 0,
             retiring: None,
+            salt: [0u8; SALT_LEN],
         }
     }
 
@@ -237,6 +260,7 @@ impl Header {
             out[34..50].copy_from_slice(&retiring.key_id.0);
             out[50..58].copy_from_slice(&retiring.through.to_be_bytes());
         }
+        out[58..64].copy_from_slice(&self.salt);
         out
     }
 
@@ -267,11 +291,14 @@ impl Header {
             key_id: KeyId(retiring_id),
             through: u64::from_be_bytes(through),
         });
+        let mut salt = [0u8; SALT_LEN];
+        salt.copy_from_slice(&bytes[58..64]);
         Ok(Self {
             format_version,
             key_id: KeyId(key_id),
             counter_high_water: u64::from_be_bytes(hw),
             retiring,
+            salt,
         })
     }
 
@@ -307,6 +334,8 @@ pub struct PageCipher {
     cipher: backend::Aead,
     key_id: KeyId,
     previous: Option<Previous>,
+    /// The file's salt, carried so every header this cipher writes keeps it.
+    salt: [u8; SALT_LEN],
     counter: AtomicU64,
 }
 
@@ -350,6 +379,7 @@ impl PageCipher {
             cipher,
             key_id: header.key_id,
             previous,
+            salt: header.salt,
             counter: AtomicU64::new(header.counter_high_water),
         }
     }
@@ -365,8 +395,9 @@ impl PageCipher {
         self.previous.as_ref().map(|p| p.retiring)
     }
 
-    /// The header to write with a given high-water mark: this cipher's key identifier and
-    /// its retiring generation, so that writing a header can never forget a rotation.
+    /// The header to write with a given high-water mark: this cipher's key identifier, its
+    /// retiring generation and its salt, so that writing a header can never forget a rotation
+    /// or re-key the file it describes.
     #[must_use]
     pub fn header(&self, counter_high_water: u64) -> Header {
         Header {
@@ -374,6 +405,7 @@ impl PageCipher {
             key_id: self.key_id,
             counter_high_water,
             retiring: self.retiring(),
+            salt: self.salt,
         }
     }
 
@@ -923,6 +955,20 @@ mod tests {
         h.counter_high_water = 9;
         assert!(h.encode()[34..].iter().all(|b| *b == 0));
         assert_eq!(Header::decode(&h.encode()).unwrap().retiring, None);
+    }
+
+    #[test]
+    fn a_salt_round_trips_and_every_header_the_cipher_writes_keeps_it() {
+        // D-106: the salt is an input to the file's key. A header written without it would, at
+        // the next open, derive a different key and refuse every page the file holds.
+        let (mut header, _) = rotated();
+        header.salt = [1, 2, 3, 4, 5, 6];
+        let decoded = Header::decode(&header.encode()).unwrap();
+        assert_eq!(decoded, header);
+        assert_eq!(&header.encode()[58..64], &[1, 2, 3, 4, 5, 6]);
+
+        let c = PageCipher::with_retiring(&key(), &header, &old_key());
+        assert_eq!(c.header(99).salt, header.salt);
     }
 
     #[test]
