@@ -992,7 +992,7 @@ fn body(app: &mut App, args: &[&str]) -> Output {
         return Err("body <id|#n>".to_owned());
     };
     let id = resolve(app, reference)?;
-    let document = app.open_document(id, false)?;
+    let document = app.open_document(id, false, false)?;
 
     let mut out = vec![
         format!("stages: {}", document.stages.join(" -> ")),
@@ -1019,7 +1019,7 @@ fn blocked(app: &mut App, args: &[&str]) -> Output {
         return Err("blocked <id|#n>".to_owned());
     };
     let id = resolve(app, reference)?;
-    let document = app.open_document(id, false)?;
+    let document = app.open_document(id, false, false)?;
     let mut out = vec![match document.blocked {
         0 => "nothing was withheld".to_owned(),
         1 => "1 remote resource not loaded".to_owned(),
@@ -1042,7 +1042,7 @@ fn links(app: &mut App, args: &[&str]) -> Output {
         return Err("links <id|#n>".to_owned());
     };
     let id = resolve(app, reference)?;
-    let document = app.open_document(id, false)?;
+    let document = app.open_document(id, false, false)?;
     let mut out = vec![format!("{} link(s)", document.links.len())];
     out.extend(link_lines(&document));
     out.push(match &document.unsubscribe {

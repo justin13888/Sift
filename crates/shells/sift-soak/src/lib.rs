@@ -170,7 +170,9 @@ impl Load {
             return Err(format!("`{name}` has no messages to read after a sync"));
         };
         for row in &rows {
-            let document = tagged(Subsystem::Sanitize, || app.open_document(row.id, false))?;
+            let document = tagged(Subsystem::Sanitize, || {
+                app.open_document(row.id, false, false)
+            })?;
             tagged(Subsystem::Sanitize, || app.close_document(&document.token));
         }
         tagged(Subsystem::Index, || app.search(QUERY, None, 50))?;

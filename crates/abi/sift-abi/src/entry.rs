@@ -2410,6 +2410,11 @@ pub unsafe extern "C" fn sift_message_row(
 /// The document stays open until [`sift_close_document`] revokes its token, because the body
 /// view asks for resources after the HTML has been handed over.
 ///
+/// `dark` asks for the dark transform. `increased_contrast` is the system's
+/// increased-contrast preference, which raises the threshold the transform's contrast repair
+/// targets; the shell reads it and re-opens the document when it changes, as it does for
+/// `dark`. Each is nonzero for true.
+///
 /// # Safety
 /// `app` and `out` must be valid.
 #[unsafe(no_mangle)]
@@ -2417,6 +2422,7 @@ pub unsafe extern "C" fn sift_open_document(
     app: *mut SiftApp,
     message: SiftId,
     dark: u8,
+    increased_contrast: u8,
     out: *mut SiftDocument<'static>,
 ) -> SiftStatus {
     unsafe {
@@ -2429,7 +2435,7 @@ pub unsafe extern "C" fn sift_open_document(
                 let mut session = layer.session.lock().map_err(|_| ())?;
                 let document = session
                     .app_mut()
-                    .open_document(id, dark != 0)
+                    .open_document(id, dark != 0, increased_contrast != 0)
                     .map_err(|_| ())?;
                 // **What makes D-98's `OpenMessage` scope reachable at all.** The field was
                 // set to `None` at initialization and assigned nowhere, so every action scoped
@@ -3531,9 +3537,11 @@ mod tests {
 
         // D-51: everything the user sees reads *through* the overlay, so the archived row is
         // absent from the projection rather than marked in it.
-        let mut oldest = Oldest {
-            at: u64::MAX,
-            id: 0,
+        let mut ends = Ends {
+            oldest_at: u64::MAX,
+            oldest: 0,
+            newest_at: 0,
+            newest: 0,
         };
         let mut observation = SiftObservation::NONE;
         let _ = unsafe {
@@ -3541,13 +3549,13 @@ mod tests {
                 app,
                 SiftId::from_u128(0),
                 50,
-                keep_oldest,
-                (&raw mut oldest).cast::<c_void>(),
+                keep_ends,
+                (&raw mut ends).cast::<c_void>(),
                 &raw mut observation,
             )
         };
         assert_ne!(
-            oldest.id,
+            ends.oldest,
             message.to_u128(),
             "the archived message is still the oldest row visible"
         );
@@ -3800,25 +3808,31 @@ mod tests {
     // U+202E so it renders `invoice.pdf`, carrying a PE header.
     // -----------------------------------------------------------------------------------
 
-    /// Where [`keep_oldest`] accumulates. Travels as the callback's context.
-    struct Oldest {
-        at: u64,
-        id: u128,
+    /// Where [`keep_ends`] accumulates. Travels as the callback's context.
+    struct Ends {
+        oldest_at: u64,
+        oldest: u128,
+        newest_at: u64,
+        newest: u128,
     }
 
-    extern "C" fn keep_oldest(
+    extern "C" fn keep_ends(
         context: *mut c_void,
         _: SiftObservation,
         _: Generation,
         rows: SiftRows<'_, SiftMessageRow<'_>>,
     ) {
-        // SAFETY: the context is a live `Oldest` for the duration of the call that posted
+        // SAFETY: the context is a live `Ends` for the duration of the call that posted
         // this delivery, and the rows are live for the duration of the callback.
-        let oldest = unsafe { &mut *context.cast::<Oldest>() };
+        let ends = unsafe { &mut *context.cast::<Ends>() };
         for row in unsafe { rows.as_slice() } {
-            if row.received_millis < oldest.at {
-                oldest.at = row.received_millis;
-                oldest.id = u128::from_be_bytes(row.id.bytes);
+            if row.received_millis < ends.oldest_at {
+                ends.oldest_at = row.received_millis;
+                ends.oldest = u128::from_be_bytes(row.id.bytes);
+            }
+            if row.received_millis >= ends.newest_at {
+                ends.newest_at = row.received_millis;
+                ends.newest = u128::from_be_bytes(row.id.bytes);
             }
         }
     }
@@ -3828,6 +3842,16 @@ mod tests {
     /// The layer must have been started with [`run_inline`], because the delivery this reads
     /// arrives through D-48's hop and a schedule that drops the ticket delivers nothing.
     fn hostile_message(app: *mut SiftApp) -> SiftId {
+        SiftId::from_u128(synced_ends(app).oldest)
+    }
+
+    /// As [`hostile_message`], but the newest message: an ordinary one, whose body carries
+    /// the corpus's between-the-thresholds colour pair.
+    fn ordinary_message(app: *mut SiftApp) -> SiftId {
+        SiftId::from_u128(synced_ends(app).newest)
+    }
+
+    fn synced_ends(app: *mut SiftApp) -> Ends {
         let name = "mail";
         let mut account = SiftId::from_u128(0);
         assert_eq!(
@@ -3843,9 +3867,11 @@ mod tests {
         // The accumulator travels as the callback's own context rather than as a static,
         // because these tests run in parallel and a static would make them one test with a
         // race in it.
-        let mut oldest = Oldest {
-            at: u64::MAX,
-            id: 0,
+        let mut ends = Ends {
+            oldest_at: u64::MAX,
+            oldest: 0,
+            newest_at: 0,
+            newest: 0,
         };
         let mut observation = SiftObservation::NONE;
         assert_eq!(
@@ -3854,19 +3880,32 @@ mod tests {
                     app,
                     SiftId::from_u128(0),
                     50,
-                    keep_oldest,
-                    (&raw mut oldest).cast::<c_void>(),
+                    keep_ends,
+                    (&raw mut ends).cast::<c_void>(),
                     &raw mut observation,
                 )
             },
             SiftStatus::Ok
         );
-        assert_ne!(oldest.at, u64::MAX, "the observation delivered no rows");
+        assert_ne!(
+            ends.oldest_at,
+            u64::MAX,
+            "the observation delivered no rows"
+        );
         let _ = unsafe { sift_cancel_observation(app, observation) };
-        SiftId::from_u128(oldest.id)
+        ends
     }
 
     fn open(app: *mut SiftApp, message: SiftId) -> SiftDocument<'static> {
+        open_as(app, message, 0, 0)
+    }
+
+    fn open_as(
+        app: *mut SiftApp,
+        message: SiftId,
+        dark: u8,
+        increased_contrast: u8,
+    ) -> SiftDocument<'static> {
         let mut document = SiftDocument {
             html: SiftStr::null(),
             token: SiftStr::null(),
@@ -3877,10 +3916,40 @@ mod tests {
             has_unsubscribe: 0,
         };
         assert_eq!(
-            unsafe { sift_open_document(app, message, 0, &raw mut document) },
+            unsafe {
+                sift_open_document(app, message, dark, increased_contrast, &raw mut document)
+            },
             SiftStatus::Ok
         );
         document
+    }
+
+    #[test]
+    fn the_increased_contrast_preference_reaches_the_repair_across_the_boundary() {
+        // The UI shell: the system's increased-contrast preference raises the threshold the
+        // dark transform's repair targets. The ordinary fixture's `#383838` on white
+        // transforms to a pair between the two thresholds, so the three renders differ
+        // exactly where the preference is honoured: dark changes the body, and the preference
+        // then changes it again. Light with the preference set is light — it is a threshold,
+        // not a transform of its own.
+        let app = start(run_inline, scratch_str());
+        let message = ordinary_message(app);
+
+        let light = text(open_as(app, message, 0, 0).html);
+        let light_raised = text(open_as(app, message, 0, 1).html);
+        let ordinary = text(open_as(app, message, 1, 0).html);
+        let raised = text(open_as(app, message, 1, 1).html);
+
+        assert_eq!(
+            light, light_raised,
+            "the preference acted with dark mode off"
+        );
+        assert_ne!(light, ordinary, "the dark transform did not run");
+        assert_ne!(
+            ordinary, raised,
+            "the preference did not reach the transform's contrast repair"
+        );
+        let _ = unsafe { sift_shutdown(app) };
     }
 
     fn text(s: SiftStr<'_>) -> String {
@@ -4782,7 +4851,7 @@ mod tests {
             has_unsubscribe: 0,
         };
         assert_eq!(
-            unsafe { sift_open_document(app, message, 0, &raw mut document) },
+            unsafe { sift_open_document(app, message, 0, 0, &raw mut document) },
             SiftStatus::Ok
         );
         let token = unsafe { document.token.as_str() }

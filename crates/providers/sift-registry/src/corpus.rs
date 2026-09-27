@@ -208,6 +208,10 @@ pub fn graph() -> Replay {
 /// `m1` is deliberately hostile. Every other fixture here is a well-behaved message, and a
 /// corpus of only well-behaved messages tests the happy path of a product whose entire reason
 /// for existing is the other one. What it carries is in [`hostile`].
+///
+/// The ordinary body's `#383838` on white is chosen, not incidental: the dark transform turns
+/// it into a pair that clears the ordinary contrast threshold and not the increased-contrast
+/// one, so a test at the boundary can see the system's preference reach the repair.
 fn structure(id: &str) -> String {
     if id == "m1" {
         return hostile();
@@ -215,7 +219,7 @@ fn structure(id: &str) -> String {
     let html = if id == "m5" {
         "<p>Your quokka sanctuary statement for last year is attached.</p>"
     } else {
-        "<style>p{color:#111111;background-color:#ffffff}</style>\
+        "<style>p{color:#383838;background-color:#ffffff}</style>\
          <p>Hello from a fixture. <img src=\"https://tracker.test/pixel.gif\" width=\"1\" height=\"1\"> \
          <a href=\"https://example.test/read\">read more</a></p>"
     };
