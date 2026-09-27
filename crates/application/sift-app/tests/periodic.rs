@@ -405,3 +405,206 @@ fn a_warning_tier_does_not_revoke_the_open_documents_token() {
         "L3 destroys every window, so a token that outlived one would be unrevocable"
     );
 }
+
+// ---------------------------------------------------------------------------
+// D-122: the application is held across store work only.
+// ---------------------------------------------------------------------------
+
+/// A hold that lets something happen between two of a job's held steps — which is exactly
+/// where a person's gesture lands once the lock is let go of for every round trip.
+struct Between<F: FnMut(&mut App)> {
+    app: App,
+    steps: usize,
+    before_step: usize,
+    act: F,
+}
+
+impl<F: FnMut(&mut App)> sift_app::Locked for Between<F> {
+    fn with<R>(&mut self, step: impl FnOnce(&mut App) -> R) -> Option<R> {
+        self.steps += 1;
+        if self.steps == self.before_step {
+            (self.act)(&mut self.app);
+        }
+        Some(step(&mut self.app))
+    }
+}
+
+#[test]
+fn a_sync_lets_go_of_the_application_between_its_round_trips() {
+    let mut app = App::new();
+    app.add_replayed_account("mail").expect("added");
+    let mut between = Between {
+        app,
+        steps: 0,
+        before_step: usize::MAX,
+        act: |_: &mut App| {},
+    };
+    let report = App::sync_held(&mut between, "mail", 1).expect("synced");
+    assert!(report.inserted > 0, "{report:?}");
+    // The loan; the folders; the watched list; a cursor, what is known and the write for the
+    // page; and the return. One hold for all of it was the defect.
+    assert!(
+        between.steps >= 7,
+        "the walk ran under {} holds, so a round trip was inside one",
+        between.steps
+    );
+    let account = between.app.account("mail").expect("open");
+    assert!(
+        account.adapter.is_some() && !account.lent,
+        "the adapter was not returned"
+    );
+}
+
+#[test]
+fn a_second_sync_of_a_busy_account_is_refused_rather_than_reconnected() {
+    let mut app = App::new();
+    app.add_replayed_account("mail").expect("added");
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let saw = std::rc::Rc::clone(&seen);
+    let mut between = Between {
+        app,
+        steps: 0,
+        // After the loan and the folders, while the walk is between round trips.
+        before_step: 3,
+        act: move |app: &mut App| {
+            let second = app.sync("mail", 1);
+            let account = app.account("mail").expect("open");
+            *saw.borrow_mut() = Some((second, account.lent, account.adapter.is_some()));
+        },
+    };
+    App::sync_held(&mut between, "mail", 1).expect("the first sync");
+    let (second, lent, reconnected) = seen.borrow_mut().take().expect("the gesture ran");
+    assert!(lent, "the adapter was not lent while the walk had it");
+    assert!(
+        second
+            .as_ref()
+            .is_err_and(|why| why.contains("already talking")),
+        "a second conversation with the provider was started: {second:?}"
+    );
+    assert!(!reconnected, "a lent adapter was reconnected around");
+}
+
+#[test]
+fn an_account_removed_mid_sync_is_written_nothing_and_its_adapter_dropped() {
+    let mut app = App::new();
+    app.add_replayed_account("mail").expect("added");
+    let mut between = Between {
+        app,
+        steps: 0,
+        before_step: 4,
+        act: |app: &mut App| {
+            app.forget_account("mail").expect("forgotten");
+        },
+    };
+    let outcome = App::sync_held(&mut between, "mail", 1);
+    assert!(
+        outcome.as_ref().is_err_and(|why| why.contains("removed")),
+        "{outcome:?}"
+    );
+    assert!(between.app.account("mail").is_err());
+    // And an account added under the same label afterwards is a different one: nothing the
+    // removed account's walk fetched lands in it.
+    between
+        .app
+        .add_replayed_account("mail")
+        .expect("added again");
+    assert!(
+        sift_app::list_messages(between.app.account("mail").expect("open"))
+            .expect("list")
+            .is_empty()
+    );
+}
+
+#[test]
+fn an_intent_made_while_a_flush_is_out_waits_behind_it() {
+    use sift_mutations::intent::Intent;
+
+    let mut app = App::new();
+    app.add_replayed_account("mail").expect("added");
+    app.sync("mail", 1).expect("sync");
+    app.set_writes_enabled("mail", true).expect("authorized");
+    let message = sift_app::list_messages(app.account("mail").expect("open"))
+        .expect("list")
+        .first()
+        .expect("a message")
+        .0;
+    app.account("mail")
+        .expect("open")
+        .queue
+        .enqueue(1, message, Intent::Archive, 0);
+
+    let mut between = Between {
+        app,
+        steps: 0,
+        // The issue is the first held step and the answer the second: between them the batch
+        // is out and the account's queue is not held.
+        before_step: 2,
+        act: move |app: &mut App| {
+            let account = app.account("mail").expect("open");
+            assert!(
+                account.lent,
+                "the flush's adapter was not lent while it was out"
+            );
+            account.queue.enqueue(2, message, Intent::MarkRead, 0);
+        },
+    };
+    let flushed = App::flush_held(&mut between, "mail").expect("flushed");
+    assert_eq!(flushed.report.issued, 1, "{flushed:?}");
+    let account = between.app.account("mail").expect("open");
+    assert!(!account.lent && account.adapter.is_some());
+    let left: Vec<u128> = account.queue.entries().iter().map(|q| q.id).collect();
+    assert!(
+        left.contains(&2),
+        "the intent made while the batch was out was lost or merged: {left:?}"
+    );
+}
+
+#[test]
+fn an_account_removed_while_its_flush_is_out_settles_nothing_and_drops_its_adapter() {
+    use sift_mutations::intent::Intent;
+
+    let mut app = App::new();
+    app.add_replayed_account("mail").expect("added");
+    app.sync("mail", 1).expect("sync");
+    app.set_writes_enabled("mail", true).expect("authorized");
+    let message = sift_app::list_messages(app.account("mail").expect("open"))
+        .expect("list")
+        .first()
+        .expect("a message")
+        .0;
+    app.account("mail")
+        .expect("open")
+        .queue
+        .enqueue(1, message, Intent::Archive, 0);
+
+    let mut between = Between {
+        app,
+        steps: 0,
+        // Between the issue and the answer: the batch is out, and the account goes.
+        before_step: 2,
+        act: |app: &mut App| {
+            assert!(app.account("mail").expect("open").lent);
+            app.forget_account("mail").expect("forgotten");
+        },
+    };
+    let flushed = App::flush_held(&mut between, "mail");
+    assert!(
+        flushed.as_ref().is_err_and(|why| why.contains("removed")),
+        "an answer was settled against a queue that went with its account: {flushed:?}"
+    );
+    assert!(between.app.account("mail").is_err());
+    assert!(
+        !between.app.any_lent(),
+        "a removed account's adapter is still counted as out, so every provider call waits"
+    );
+
+    // An account added under the same label afterwards is a different one: the dropped
+    // adapter was not handed to it, and nothing of the removed queue is in it.
+    between
+        .app
+        .add_replayed_account("mail")
+        .expect("added again");
+    let account = between.app.account("mail").expect("open");
+    assert!(!account.lent && account.adapter.is_some());
+    assert!(account.queue.entries().is_empty());
+}

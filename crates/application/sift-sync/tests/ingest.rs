@@ -15,8 +15,9 @@ use sift_provider::capability::Capabilities;
 use sift_store::account::{Account, AccountPaths};
 use sift_sync::ingest;
 use sift_sync::run::{self, Turn};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
 // A scratch account, on disk, through the real schema.
@@ -73,6 +74,8 @@ struct Scripted {
     envelopes: Vec<Envelope>,
     asked_for: RefCell<Vec<RemoteMessageId>>,
     cursors_seen: RefCell<Vec<Option<Cursor>>>,
+    /// Set while a [`Watched`] hold is inside a step. D-122: no round trip may start then.
+    inside: Rc<Cell<bool>>,
 }
 
 impl Scripted {
@@ -84,7 +87,16 @@ impl Scripted {
             envelopes: Vec::new(),
             asked_for: RefCell::new(Vec::new()),
             cursors_seen: RefCell::new(Vec::new()),
+            inside: Rc::new(Cell::new(false)),
         }
+    }
+
+    /// Refuse, loudly, any round trip made while the store is held.
+    fn outside(&self, call: &str) {
+        assert!(
+            !self.inside.get(),
+            "{call} reached the provider while the account was held"
+        );
     }
 
     fn answering(
@@ -130,6 +142,7 @@ impl Adapter for Scripted {
     }
 
     fn enumerate_folders(&self) -> Result<Vec<RemoteFolder>, Self::Error> {
+        self.outside("enumerate_folders");
         Ok(self.folders.clone())
     }
 
@@ -138,6 +151,7 @@ impl Adapter for Scripted {
         _folder: &RemoteFolderId,
         cursor: Option<&Cursor>,
     ) -> Result<Delta, Self::Error> {
+        self.outside("delta");
         self.cursors_seen.borrow_mut().push(cursor.cloned());
         let mut pages = self.pages.borrow_mut();
         if pages.is_empty() {
@@ -147,6 +161,7 @@ impl Adapter for Scripted {
     }
 
     fn fetch_envelopes(&self, ids: &[RemoteMessageId]) -> Result<Vec<Envelope>, Self::Error> {
+        self.outside("fetch_envelopes");
         self.asked_for.borrow_mut().extend_from_slice(ids);
         Ok(self
             .envelopes
@@ -920,6 +935,108 @@ fn a_transient_failure_does_not_degrade_the_folder() {
         ingest::state_of(&account.store, folder).unwrap().as_deref(),
         Some("Degraded")
     );
+}
+
+// ---------------------------------------------------------------------------
+// D-122: the store is held only across store work.
+// ---------------------------------------------------------------------------
+
+/// A hold that marks when it is inside a step, and can lose the account after some number of
+/// them — the removal a person can make between two held steps.
+struct Watched<'a> {
+    account: &'a mut Account,
+    ids: &'a LocalIdGenerator,
+    inside: Rc<Cell<bool>>,
+    steps: usize,
+    gone_after: usize,
+}
+
+impl run::Hold for Watched<'_> {
+    fn with<R>(&mut self, step: impl FnOnce(&mut Account, &LocalIdGenerator) -> R) -> Option<R> {
+        if self.steps >= self.gone_after {
+            return None;
+        }
+        self.steps += 1;
+        self.inside.set(true);
+        let out = step(self.account, self.ids);
+        self.inside.set(false);
+        Some(out)
+    }
+}
+
+#[test]
+fn no_round_trip_is_made_while_the_account_is_held() {
+    let s = Scratch::new("held-round-trips");
+    let mut account = s.open();
+    let adapter = Scripted::new(vec![inbox()]).answering(
+        vec![
+            page(vec![present("m1", Provenance::Discovered)], "c1", true),
+            page(vec![present("m2", Provenance::Discovered)], "c2", false),
+        ],
+        vec![envelope("m1", "one", 100), envelope("m2", "two", 200)],
+    );
+    let ids = ids();
+    let mut hold = Watched {
+        account: &mut account,
+        ids: &ids,
+        inside: Rc::clone(&adapter.inside),
+        steps: 0,
+        gone_after: usize::MAX,
+    };
+
+    run::discover_folders_held(&adapter, &mut hold).unwrap();
+    let report = run::sync_account_held(&adapter, &mut hold, 10).unwrap();
+    assert_eq!(report.inserted, 2, "the walk did its work through the hold");
+    // Folders; the watched list; then cursor, known, apply for each of two pages.
+    assert_eq!(hold.steps, 8, "a round trip was folded into a held step");
+    assert_eq!(
+        ingest::cursor_of(&account.store, 1).unwrap(),
+        Some(Cursor(b"c2".to_vec()))
+    );
+}
+
+#[test]
+fn an_account_removed_between_the_round_trip_and_the_write_is_written_nothing() {
+    let s = Scratch::new("held-gone");
+    let mut account = s.open();
+    let adapter = Scripted::new(vec![inbox()]).answering(
+        vec![page(
+            vec![present("m1", Provenance::Discovered)],
+            "c1",
+            false,
+        )],
+        vec![envelope("m1", "one", 100)],
+    );
+    run::discover_folders(&adapter, &account).unwrap();
+    let folder = ingest::folder_local_id(&account.store, &RemoteFolderId("INBOX".into())).unwrap();
+    let ids = ids();
+    // The cursor and what is known are read; the account is gone by the time the page is.
+    let mut hold = Watched {
+        account: &mut account,
+        ids: &ids,
+        inside: Rc::clone(&adapter.inside),
+        steps: 0,
+        gone_after: 2,
+    };
+
+    let outcome =
+        run::sync_one_page_held(&adapter, &mut hold, folder, &RemoteFolderId("INBOX".into()));
+    assert!(matches!(outcome, Err(run::RunError::Gone)), "{outcome:?}");
+    assert_eq!(
+        adapter.asked_for.borrow().len(),
+        1,
+        "the round trip before the removal was made"
+    );
+    assert_eq!(
+        ingest::cursor_of(&account.store, folder).unwrap(),
+        None,
+        "a page was written for an account that was gone"
+    );
+    let rows: i64 = account
+        .store
+        .query_row("SELECT count(*) FROM message", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
 }
 
 #[test]
