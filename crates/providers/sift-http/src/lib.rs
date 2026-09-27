@@ -21,7 +21,13 @@
 //!   understate a metered link, which is the wrong direction for a data cap.
 //! - **D-87 — a stated delay is a deadline, never a sleep.** A throttle comes back as
 //!   [`TransportError::Throttled`] carrying the provider's own number. Nothing here waits.
+//!
+//! And one from the resource broker: **a connection is only ever made to a public address.**
+//! A host name is resolved once, every address it names on the reader's own machine or
+//! network is dropped, and only a survivor is dialled — see [`resolve`] for why the check is
+//! on the address rather than the name.
 
+pub mod resolve;
 pub mod wire;
 
 use core::time::Duration;
@@ -125,6 +131,8 @@ pub struct Https {
     meter: Meter,
     /// NFR-39's ceiling on a single fetch, defaulting to L-13.
     cap: u64,
+    /// Turns the host into the addresses [`resolve::admissible`] filters.
+    resolver: Arc<dyn resolve::Resolve>,
 }
 
 impl core::fmt::Debug for Https {
@@ -161,6 +169,7 @@ impl Https {
             connection: None,
             meter: Meter::new(),
             cap: L13_FETCH_BYTES,
+            resolver: Arc::new(resolve::System),
         })
     }
 
@@ -182,11 +191,20 @@ impl Https {
         self.connection.is_some()
     }
 
+    /// Resolve the host once, drop every address on the reader's own machine or network, and
+    /// dial the survivors in the resolver's order.
+    ///
+    /// The addresses dialled are the ones checked: nothing resolves the name a second time, so
+    /// a name that answers differently between the check and the connect (DNS rebinding) is
+    /// still only ever connected to at an address that passed.
     fn connect(&mut self) -> Result<Tls, TransportError> {
         let name = rustls::pki_types::ServerName::try_from(self.host.clone())
             .map_err(|_| TransportError::Refused(format!("`{}` is not a host name", self.host)))?;
-        let tcp = TcpStream::connect((self.host.as_str(), self.port))
-            .map_err(|_| TransportError::Transient)?;
+        let addresses = resolve::admissible(self.resolver.as_ref(), &self.host, self.port)?;
+        let tcp = addresses
+            .iter()
+            .find_map(|address| TcpStream::connect_timeout(address, IO_TIMEOUT).ok())
+            .ok_or(TransportError::Transient)?;
         tcp.set_read_timeout(Some(IO_TIMEOUT))
             .and_then(|()| tcp.set_write_timeout(Some(IO_TIMEOUT)))
             .and_then(|()| tcp.set_nodelay(true))
@@ -500,6 +518,46 @@ mod tests {
             )),
             TransportError::Unknown
         );
+    }
+
+    /// A transport whose host resolves to `addresses`, and nothing else.
+    fn resolving_to(addresses: &[&str]) -> Https {
+        let mut https = Https::to("images.example.com").unwrap();
+        https.resolver = Arc::new(resolve::Fixed(
+            addresses.iter().map(|a| a.parse().unwrap()).collect(),
+        ));
+        https
+    }
+
+    #[test]
+    fn a_public_name_that_resolves_to_the_readers_network_is_refused_before_any_connect() {
+        // #163: the name passes every check made on its text, and the address it answers
+        // with is the reader's router. Refused, not Transient — nothing was dialled, so no
+        // connect ever timed out.
+        for private in ["192.168.1.1", "::ffff:192.168.1.1", "127.0.0.1", "fe80::1"] {
+            let mut https = resolving_to(&[private]);
+            let got = https.get_streaming("/x.png", &[]);
+            assert!(
+                matches!(got, Err(TransportError::Refused(_))),
+                "{private}: {got:?}"
+            );
+            assert!(!https.is_connected());
+            assert_eq!(https.meter().totals(), (0, 0), "{private} was written to");
+        }
+    }
+
+    #[test]
+    fn a_provider_exchange_is_held_to_the_same_rule() {
+        let mut https = resolving_to(&["10.0.0.1"]);
+        let got = https.exchange(&Request {
+            exchange: sift_provider::transport::Exchange {
+                verb: "GET".to_owned(),
+                target: "/".to_owned(),
+            },
+            headers: vec![],
+            body: b"",
+        });
+        assert!(matches!(got, Err(TransportError::Refused(_))), "{got:?}");
     }
 
     #[test]
