@@ -66,7 +66,7 @@ problems=()
 # run of the same version is not refused for the diff the first one left.
 dirty="$(git status --porcelain=v1 --untracked-files=all | grep -vF " $cask" || true)"
 if [[ -n "$dirty" ]]; then
-    problems+=("the worktree is not clean — commit or remove:" "$(sed 's/^/  /' <<<"$dirty")")
+    problems+=("the worktree is not clean — commit or remove:"$'\n'"$dirty")
 fi
 
 # The revision is on the default branch's first-parent history, which is what makes its build
@@ -82,8 +82,7 @@ revision="$(git rev-parse HEAD)"
 # `grep` without `-q`: an early exit would leave `git` writing into a closed pipe, and under
 # `pipefail` that SIGPIPE would read as "not on the branch".
 if ! git rev-list --first-parent "origin/$default_branch" | grep -x "$revision" >/dev/null; then
-    problems+=("HEAD ($revision) is not on origin/$default_branch's first-parent history." \
-        "A release is cut from a revision that landed: git switch --detach origin/$default_branch")
+    problems+=("HEAD ($revision) is not on origin/$default_branch's first-parent history."$'\n'"A release is cut from a revision that landed: git switch --detach origin/$default_branch")
 fi
 build_number="$(git rev-list --count --first-parent HEAD)"
 
@@ -117,9 +116,7 @@ identity="$(security find-identity -v -p codesigning \
 
 # The notary credentials, stored once by a person (`xcrun notarytool store-credentials`).
 if ! xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; then
-    problems+=("no usable notarytool keychain profile '$profile'. Store one with:" \
-        "  xcrun notarytool store-credentials $profile --apple-id <apple-id> --team-id $team" \
-        "(it prompts for an app-specific password from account.apple.com)")
+    problems+=("no usable notarytool keychain profile '$profile'. Store one with:"$'\n'"  xcrun notarytool store-credentials $profile --apple-id <apple-id> --team-id $team"$'\n'"(it prompts for an app-specific password from account.apple.com)")
 fi
 
 # An OAuth client for every provider kind the candidate offers. A release bundle with none
@@ -144,7 +141,10 @@ command -v brew >/dev/null 2>&1 || problems+=("brew is not on PATH, and the Cask
 
 if [[ ${#problems[@]} -gt 0 ]]; then
     echo "release-rc: not starting — ${#problems[@]} precondition(s) unmet:" >&2
-    for line in "${problems[@]}"; do echo "  - $line" >&2; done
+    # One bullet per precondition; a problem's further lines are indented under it.
+    for problem in "${problems[@]}"; do
+        printf '%s\n' "$problem" | awk 'NR == 1 { print "  - " $0; next } { print "      " $0 }' >&2
+    done
     exit 1
 fi
 
@@ -169,7 +169,8 @@ xcarchive="shells/macos/.build/Sift.xcarchive"
 # 3. Notarize and staple, bounded: notarytool gives up after its timeout and this fails.
 # ---------------------------------------------------------------------------------------------
 notarize() {
-    local what="$1" result="$out/notary.$(basename "$1").json" id status
+    local what="$1" result id status
+    result="$out/notary.$(basename "$what").json"
     xcrun notarytool submit "$what" --keychain-profile "$profile" \
         --wait --timeout 1h --output-format json >"$result" \
         || true
