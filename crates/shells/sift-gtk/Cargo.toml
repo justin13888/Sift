@@ -31,6 +31,9 @@ path = "src/main.rs"
 [dependencies]
 sift-presentation.workspace = true
 sift-foundation.workspace = true
+# Named only for its `public-lists` feature below, and optional so no other build of this
+# shell reaches it.
+sift-block = { workspace = true, optional = true }
 
 # D-61 inverts the macOS relationship here: **Cargo owns the Linux binary** and the GTK shell
 # is Rust in the same workspace, so the Flatpak manifest wraps an ordinary Cargo build.
@@ -47,3 +50,7 @@ libadwaita = { version = "0.8", optional = true }
 [features]
 # Off by default so the workspace builds anywhere. The Flatpak manifest turns it on.
 toolkit = ["dep:gtk4", "dep:libadwaita"]
+# D-112: EasyList and EasyPrivacy, which the Flatpak may carry. The Flatpak manifest turns it
+# on. This shell does not link the filter engine yet, so today it selects the lists for the
+# day it does rather than putting them in the binary. Registered in docs/build/workspace.md.
+public-lists = ["dep:sift-block", "sift-block/public-lists"]

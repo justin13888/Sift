@@ -36,11 +36,16 @@ sift-alloc.workspace = true
 sift-subsystem.workspace = true
 # D-19's blocking pool, where a sync and a wheel fire's work run instead of on the shell's loop.
 sift-runtime.workspace = true
-
-[dev-dependencies]
-# The origin and the authority a test grant is decided under — a stream's revocation is
-# tested at the boundary without a network or a rendered message behind it.
+# The filter engine's crate, named here for its `public-lists` feature below. Tests also use
+# its origin and authority: a stream's revocation is tested at the boundary without a network
+# or a rendered message behind it.
 sift-block.workspace = true
+
+[features]
+# D-112: EasyList and EasyPrivacy compiled into the library the macOS shell links. Only the
+# Homebrew Cask build may carry them, and `mise run macos` — which builds the Cask — is what
+# turns this on. Registered in docs/build/workspace.md.
+public-lists = ["sift-block/public-lists"]
 
 [lib]
 crate-type = ["staticlib", "rlib"]

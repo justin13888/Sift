@@ -1824,6 +1824,7 @@ version = "0.1.0"
 dependencies = [
  "gtk4",
  "libadwaita",
+ "sift-block",
  "sift-foundation",
  "sift-presentation",
 ]

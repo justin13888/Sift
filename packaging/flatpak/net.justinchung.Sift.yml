@@ -53,8 +53,13 @@ modules:
       # D-61: on Linux **Cargo owns the binary**, and this manifest wraps an ordinary Cargo
       # build. That is the inverse of macOS, where the platform toolchain owns the bundle and
       # links the Rust core as a static library.
-      - cargo --offline build --release --package sift-gtk --features toolkit
+      # D-112: the Flatpak may carry EasyList and EasyPrivacy, under GPL-3.0, so this build
+      # selects them, and installs their notice and licence text beside the binary: D-112 has
+      # every build carry the notices of what it bundles.
+      - cargo --offline build --release --package sift-gtk --features toolkit,public-lists
       - install -Dm755 target/release/sift /app/bin/sift
+      - install -Dm644 crates/rendering/sift-block/lists/EASYLIST-NOTICE /app/share/licenses/net.justinchung.Sift/EASYLIST-NOTICE
+      - install -Dm644 crates/rendering/sift-block/lists/COPYING.GPL-3.0 /app/share/licenses/net.justinchung.Sift/COPYING.GPL-3.0
     sources:
       - type: dir
         path: ../..

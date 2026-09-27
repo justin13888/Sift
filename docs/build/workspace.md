@@ -95,6 +95,7 @@ build. A target measured under one flag set and shipped under another has not be
 |---|---|---|
 | Allocation stack capture | off in release | [D-24](../runtime/observability.md)'s per-allocation backtraces. On, it exceeds NFR-44's 2% and is a debugging tool rather than a shipping one |
 | Fault injection | off, and absent from release | The kill points and write-interception [verification](verification.md) requires for NFR-16. It MUST NOT be compilable into a shipped binary |
+| Public filter lists | off; on in the release set of the Homebrew Cask and the Flatpak, and nowhere else | Compiles EasyList and EasyPrivacy into the binary and has the filter engine parse them beside the email list ([FR-27](../rendering/content-blocking.md#fr-27--filter-lists)). [D-112](../product/platforms-and-distribution.md#d-112--bundle-only-what-each-channels-licence-can-carry) lets only those two channels carry them, so a build for any other channel MUST leave it off. On, it costs the lists' size in the binary, a longer engine load on window open, and the larger share of NFR-42's budget; the test build reads the lists whatever the flag, so what it enables is exercised either way |
 
 ## Build-time concerns expressed more than once
 

@@ -117,6 +117,11 @@ fi
 # `project.yml`. Empty for an ordinary build.
 overrides=()
 
+# D-112: this task builds the Homebrew Cask's bundle — the App Store build is deferred and has
+# no task — and the Cask may carry EasyList and EasyPrivacy, so every core it links has them.
+# A build for a channel that may not carry them MUST NOT reuse this line.
+core_features=(--features public-lists)
+
 if [[ "$universal" == true ]]; then
     # **D-46 — one core with both slices, linked by an explicit path.** Each architecture is a
     # targeted build (`--target` on the command line wins over `CARGO_BUILD_TARGET`, so the
@@ -131,7 +136,7 @@ if [[ "$universal" == true ]]; then
     mise run toolchain
     slices=()
     for triple in aarch64-apple-darwin x86_64-apple-darwin; do
-        cargo build --release -p sift-abi --target "$triple"
+        cargo build --release -p sift-abi "${core_features[@]}" --target "$triple"
         slices+=("target/$triple/release/libsift_abi.a")
     done
     mkdir -p target/universal-apple-darwin/release
@@ -149,9 +154,9 @@ if [[ "$universal" == true ]]; then
     overrides+=("ARCHS=arm64 x86_64" "ONLY_ACTIVE_ARCH=NO" "OTHER_LDFLAGS=$archive")
 else
     if [[ "$configuration" == "Release" ]]; then
-        cargo build --release -p sift-abi
+        cargo build --release -p sift-abi "${core_features[@]}"
     else
-        cargo build -p sift-abi
+        cargo build -p sift-abi "${core_features[@]}"
     fi
 
     # The project links `target/{debug,release}/libsift_abi.a` by configuration.
