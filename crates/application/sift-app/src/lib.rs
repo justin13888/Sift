@@ -399,6 +399,54 @@ pub struct App {
     /// pause, D-95 — is the account's own setting and is read beside this rather than folded
     /// into it. FR-21's server-side search is the first thing that asks.
     network: sift_net::tier::Tier,
+    /// The temporary root this `App` made for itself, where it made one — #137.
+    ///
+    /// **Last, deliberately.** Fields drop in declaration order, so every store above that
+    /// holds a file open in the directory has closed it before the directory goes. A scratch
+    /// root that nothing removed was the whole defect: every test run added directories to
+    /// the temporary directory and none took them away, until the disk filled.
+    ///
+    /// A root the shell named — [`App::open_container`] — is never owned, and is never
+    /// removed.
+    scratch: Option<Scratch>,
+}
+
+/// A temporary directory that is removed when its owner is dropped, on success and on panic
+/// alike — the same shape `sift-store` and `sift-sync` use in their own tests.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    /// Make a fresh directory under the system's temporary directory.
+    ///
+    /// Process identifier, the clock **and** a counter. A pid alone is not unique for long:
+    /// the operating system reuses one within seconds, and a session that landed on a reused
+    /// directory would open a previous session's account files and fail to insert its own
+    /// account row — which is a flaky test that looks like a bug in the store.
+    ///
+    /// The counter is the other half. `as_nanos` reports at whatever resolution the platform
+    /// has, and two `App`s constructed in one process read the same value often enough to
+    /// matter — which gave two of them one directory, and it surfaced as `database is locked`
+    /// from a test that had nothing to do with the one that took the directory.
+    fn create(prefix: &str) -> std::io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("{prefix}-{}-{unique}-{n}", std::process::id()));
+        // `create_dir` rather than `create_dir_all`: the name is fresh by construction, and a
+        // directory already there is somebody else's, which this must neither adopt nor — on
+        // drop — delete.
+        std::fs::create_dir(&d)?;
+        Ok(Self(d))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 impl std::fmt::Debug for App {
@@ -456,6 +504,7 @@ impl App {
             // Absent until a window opens: no window means no body view and so no caller.
             filter: sift_block::engine::Authority::Absent,
             network: sift_net::tier::Tier::Conservative,
+            scratch: None,
         }
     }
 
@@ -651,34 +700,32 @@ impl App {
     }
 
     fn root(&mut self) -> PathBuf {
-        self.root
-            .get_or_insert_with(|| {
-                // Process identifier, the clock **and** a counter. A pid alone is not unique
-                // for long: the operating system reuses one within seconds, and a session that
-                // landed on a reused directory would open a previous session's account files
-                // and fail to insert its own account row — which is a flaky test that looks
-                // like a bug in the store.
-                //
-                // The counter is the other half, and it was missing. `as_nanos` reports at
-                // whatever resolution the platform has, and two `App`s constructed in one
-                // process read the same value often enough to matter — which gave two of them
-                // one directory, and `remove_dir_all` below then deleted the other's files
-                // underneath it. It surfaced as `database is locked` from a test that had
-                // nothing to do with the one that took the directory. The same mistake was
-                // made and fixed in the layer's ephemeral root; this is the other copy.
-                use std::sync::atomic::{AtomicU64, Ordering};
-                static NEXT: AtomicU64 = AtomicU64::new(0);
-                let unique = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos());
-                let n = NEXT.fetch_add(1, Ordering::Relaxed);
-                let d = std::env::temp_dir()
-                    .join(format!("sift-harness-{}-{unique}-{n}", std::process::id()));
-                let _ = std::fs::remove_dir_all(&d);
-                std::fs::create_dir_all(&d).expect("scratch root");
-                d
-            })
-            .clone()
+        if let Some(root) = &self.root {
+            return root.clone();
+        }
+        self.open_scratch("sift-harness")
+            .expect("scratch root")
+            .to_path_buf()
+    }
+
+    /// Root this `App` in a temporary directory of its own, which it removes when dropped.
+    ///
+    /// The scratch mode the harness and the tests run in: no container, no registry, and
+    /// nothing that outlives the `App` — **including the directory itself**, which is #137.
+    /// A root already set is kept, and nothing new is made.
+    ///
+    /// # Errors
+    /// The directory could not be created.
+    pub fn open_scratch(&mut self, prefix: &str) -> Result<&std::path::Path, String> {
+        if self.root.is_none() {
+            let scratch = Scratch::create(prefix).map_err(|e| e.to_string())?;
+            self.root = Some(scratch.0.clone());
+            self.scratch = Some(scratch);
+        }
+        Ok(self
+            .root
+            .as_deref()
+            .unwrap_or_else(|| unreachable!("set above")))
     }
 
     /// Add an account. Its capability set is chosen by name so that a test can exercise the

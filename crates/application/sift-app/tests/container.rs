@@ -15,10 +15,26 @@
 use sift_credentials::store::{CredentialStore, Item, StoreError};
 use sift_foundation::identity::AccountId;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-fn scratch(label: &str) -> PathBuf {
+/// A temporary container, removed when dropped — on success and on panic alike (#137).
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+fn scratch(label: &str) -> Scratch {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let d = std::env::temp_dir().join(format!(
@@ -27,7 +43,7 @@ fn scratch(label: &str) -> PathBuf {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&d).expect("scratch");
-    d
+    Scratch(d)
 }
 
 /// A credential store in memory.
@@ -99,7 +115,6 @@ fn a_registry_survives_being_closed_and_reopened() {
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].id, first[0].id);
     assert_eq!(listed[1].display_name, "personal");
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// D-78: local identity is never reused. Removing an account must not free its ordinal, or the
@@ -125,7 +140,6 @@ fn an_ordinal_is_never_reclaimed() {
         second.id, first.id,
         "re-adding an account is a new account — D-89"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// FR-4, as a property rather than as a call: after erasure there is nothing left that names
@@ -166,7 +180,6 @@ fn erasing_an_account_leaves_nothing_that_names_it() {
             item.name()
         );
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// D-101's scope split is the storage split, and the account half had nowhere to live.
@@ -212,7 +225,6 @@ fn an_account_setting_is_that_accounts_and_survives_being_reopened() {
         Some("true".to_owned()),
         "a pause the user asked for that a restart undoes is worse than one that was refused"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -236,7 +248,6 @@ fn an_account_setting_is_erased_with_the_account() {
         "FR-4 is provable by enumeration, and a setting outliving its account is a row that \
          names one the registry says does not exist"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -265,7 +276,6 @@ fn the_two_security_state_rows_are_still_refused_by_the_table_that_now_exists() 
             .is_err(),
         "an installation setting recorded per account is one the installation would never read"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A crash between creating an account's files and recording it leaves exactly this. The files
@@ -288,7 +298,6 @@ fn files_no_registry_row_claims_are_reported_as_orphans() {
         found.contains(&paths.store),
         "the stray file was not reported: {found:?}"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The keystone. A gesture that was durably enqueued and not yet issued is still there after a
@@ -350,7 +359,6 @@ fn a_queued_gesture_survives_a_restart() {
     );
     assert_eq!(entry.undo_group, Some(9));
     drop(account);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The same read the application performs, duplicated here only because it is private to it.
@@ -481,7 +489,6 @@ fn a_rotated_key_is_retired_from_the_credential_store_only_once_no_page_carries_
 
     // And the next rotation may begin.
     begin_account_key_rotation(&store, id).expect("a rotation after retirement");
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// D-43 and D-76: the installation secret is never routed through the lazy path, because its
@@ -511,7 +518,6 @@ fn the_installation_secret_does_not_rotate_lazily() {
         store.read(INSTALLATION, Item::RetiringDatabaseKey),
         Err(StoreError::NotFound)
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A crash between the two writes that begin a rotation leaves both items holding one key. That
@@ -542,5 +548,4 @@ fn a_rotation_interrupted_between_its_two_writes_resumes() {
     let keys = account_keys(&store, &dir, id).expect("keys");
     assert_ne!(keys.current, key);
     assert_eq!(keys.retiring, Some(key));
-    std::fs::remove_dir_all(&dir).ok();
 }
